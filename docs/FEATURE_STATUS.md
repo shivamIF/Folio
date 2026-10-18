@@ -20,7 +20,8 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Editor | Colour palette, per-tool width, stabilisation slider | 🟡 | Persisted in prefs; not E2E tested |
 | Editor | Pressure-sensitive width, calibrated to real S Pen data, with a sensitivity slider | 🟡 | Unit-tested; measured on the user's recorded strokes; awaiting their feel test |
 | Editor | Tilt-sensitive pencil/brush (shading beyond natural writing angle) | 🟡 | Unit-tested against measured tilt range |
-| Editor | Stroke eraser (tool) | ✅ | E2E step 4 |
+| Editor | Eraser menu: stroke eraser or partial eraser (cuts strokes, instant pixel wipe), "erase highlighter only", size slider; side button uses the same settings | ✅ | `PartialEraserTest` ×6; Tab E2E (stroke, partial + undo, highlighter-only); erase latency in PERFORMANCE.md |
+| Performance | Ink layer cache, background rebuilds, fast erasing | ✅ | docs/PERFORMANCE.md: dense-page writing and scrolling p95 about 23 ms (was 93–117 ms) |
 | Editor | Undo / redo | ✅ | Unit + E2E step 5 |
 | Editor | Multiple pages: add, previous/next | 🟡 | Implemented; not E2E tested |
 | Editor | Paper: blank / ruled / grid / dotted | 🟡 | Rendered; seen on screenshot (ruled) |

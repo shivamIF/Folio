@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -147,6 +148,7 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                                     override fun onLassoSelected(ids: Set<String>) = vm.onLassoSelected(ids)
                                     override fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform) =
                                         vm.transformSelection(ids, transform)
+                                    override fun onStrokesSplit(pieces: Map<String, List<Stroke>>) = vm.onStrokesSplit(pieces)
                                 }
                             }
                         },
@@ -154,6 +156,8 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                             v.tool = tools.tool; v.color = tools.color; v.penWidth = tools.width
                             v.stabilization = tools.stabilization; v.eraserSelected = tools.eraser
                             v.pdfBackground = state.background
+                            v.eraserPartial = tools.eraserPartial; v.eraserSizeDp = tools.eraserSizeDp
+                            v.eraseHighlighterOnly = tools.eraseHighlighterOnly
                             v.lassoMode = tools.lasso; v.lassoRectangle = tools.lassoShape == LassoShape.RECTANGLE; v.selection = state.selection
                             v.pressureCurve = PressureCurve.fromSensitivity(tools.pressureSensitivity)
                             v.penOnlyPreference = tools.penOnly
@@ -254,8 +258,46 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
                     }
                 }
             }
-            IconToggleButton(tools.eraser, onCheckedChange = { e -> update { it.copy(eraser = e, lasso = false) } }, modifier = Modifier.testTag("tool-eraser")) {
-                Icon(Icons.Outlined.AutoFixNormal, contentDescription = "Stroke eraser", tint = if (tools.eraser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Box {
+                var eraserMenu by remember { mutableStateOf(false) }
+                IconToggleButton(tools.eraser, onCheckedChange = { eraserMenu = true }, modifier = Modifier.testTag("tool-eraser")) {
+                    Icon(Icons.Outlined.AutoFixNormal, contentDescription = "Eraser", tint = if (tools.eraser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                DropdownMenu(eraserMenu, onDismissRequest = { eraserMenu = false }) {
+                    listOf(false to "Stroke eraser", true to "Partial eraser").forEach { (partial, label) ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(label)
+                                    Text(
+                                        if (partial) "Erases only where you rub, like a real eraser" else "Deletes each whole stroke it touches",
+                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            },
+                            trailingIcon = { if (tools.eraser && tools.eraserPartial == partial) Icon(Icons.Default.Check, contentDescription = "Selected") },
+                            onClick = { eraserMenu = false; update { it.copy(eraser = true, eraserPartial = partial, lasso = false) } },
+                        )
+                    }
+                    // The whole row toggles (not just the small switch).
+                    Row(
+                        Modifier.width(312.dp).toggleable(
+                            value = tools.eraseHighlighterOnly, role = androidx.compose.ui.semantics.Role.Switch,
+                            onValueChange = { on -> update { it.copy(eraseHighlighterOnly = on) } },
+                        ).padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Erase highlighter only", modifier = Modifier.weight(1f))
+                        Switch(tools.eraseHighlighterOnly, onCheckedChange = null)
+                    }
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).width(280.dp)) {
+                        Text("Eraser size", style = MaterialTheme.typography.labelLarge)
+                        Slider(
+                            tools.eraserSizeDp, { v -> update { it.copy(eraserSizeDp = v) } }, valueRange = 4f..60f,
+                            modifier = Modifier.semantics { contentDescription = "Eraser size" },
+                        )
+                    }
+                }
             }
           }
           Row(verticalAlignment = Alignment.CenterVertically) {

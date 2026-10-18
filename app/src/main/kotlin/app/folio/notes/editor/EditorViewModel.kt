@@ -133,6 +133,11 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         edit(PageEdit.RemoveStrokes.of(ed.currentStrokes, ids))
     }
 
+    fun onStrokesSplit(pieces: Map<String, List<Stroke>>) {
+        val ed = currentEditor() ?: return
+        edit(PageEdit.SplitStrokes.of(ed.currentStrokes, pieces))
+    }
+
     fun undo() { currentEditor()?.let { if (it.undo()) changed(it) } }
     fun redo() { currentEditor()?.let { if (it.redo()) changed(it) } }
 

@@ -158,6 +158,7 @@ def main():
     assert s0["tool"] == "FOUNTAIN"
 
     def erase():
+        d.tap("Eraser")
         d.tap("Stroke eraser")
         midx = (xl + xr) // 2
         d.stylus_swipe(midx, ya - 30, midx, ya + 60, ms=300)
@@ -347,6 +348,39 @@ def main():
         ids = [s["id"] for s in d.page(nb_id, pid)["strokes"]]
         assert ids == [first_id, second_id], f"content changed by trash/restore: {ids}"
     check("move to Trash hides a notebook; Restore brings it back intact", trash_and_restore)
+
+    # --------------------------------------------------------------- eraser
+    def partial_eraser():
+        d.tap("Notebook Milestone")
+        d.find("Handwriting canvas")
+        d.tap("Eraser")
+        d.tap("Partial eraser")
+        midx = (xl + xr) // 2
+        d.stylus_swipe(midx, ya - 40, midx, ya + 70, ms=400)
+        wait_for(lambda: len(strokes()) == 3, f"partial erase did not split stroke 1 into 2 pieces ({len(strokes())} strokes)")
+        ids = [s["id"] for s in strokes()]
+        assert first_id not in ids and ids[-1] == second_id, f"wrong stroke split or z-order changed: {ids}"
+        assert by_id(second_id) == second_before or by_id(second_id)["color"] != 0, "stroke 2 must be untouched"
+        raw = d.run_as("cat", f"files/library/notebooks/{nb_id}/{pid}.page.json")
+        assert "boundsCache" not in raw, "cached bounds leaked into the saved file"
+        d.tap("Undo")
+        wait_for(lambda: [s["id"] for s in strokes()] == [first_id, second_id], "undo did not restore the whole stroke")
+    check("partial eraser cuts a stroke into pieces; undo restores it", partial_eraser)
+
+    def highlighter_only():
+        d.tap("Eraser")
+        d.tap("Erase highlighter only")
+        d.sh("shell", "input", "keyevent", "KEYCODE_ESCAPE")  # close the menu
+        time.sleep(0.5)
+        midx = (xl + xr) // 2
+        before = [s["id"] for s in strokes()]
+        d.stylus_swipe(midx, ya - 40, midx, ya + 70, ms=400)
+        time.sleep(2)
+        assert [s["id"] for s in strokes()] == before, "highlighter-only eraser erased ink"
+        d.tap("Eraser")
+        d.tap("Erase highlighter only")  # restore default
+        d.sh("shell", "input", "keyevent", "KEYCODE_ESCAPE")
+    check("with 'Erase highlighter only' on, ink is protected", highlighter_only)
 
     print(f"\n{len(results)} checks passed. Screenshots in {a.out}")
 

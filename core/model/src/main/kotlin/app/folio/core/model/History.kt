@@ -19,6 +19,34 @@ sealed interface PageEdit {
         }
     }
 
+    /**
+     * Replaces strokes with pieces of themselves (partial eraser), each set of
+     * pieces taking its original's place in the z-order. Pieces may be empty.
+     */
+    class SplitStrokes(private val splits: List<Triple<Int, Stroke, List<Stroke>>>) : PageEdit {
+        override fun apply(strokes: MutableList<Stroke>) {
+            for ((_, original, pieces) in splits) {
+                val at = strokes.indexOfFirst { it.id == original.id }
+                if (at < 0) continue
+                strokes.removeAt(at)
+                strokes.addAll(at, pieces)
+            }
+        }
+
+        override fun revert(strokes: MutableList<Stroke>) {
+            val pieceIds = splits.flatMap { it.third }.mapTo(HashSet()) { it.id }
+            strokes.removeAll { it.id in pieceIds }
+            for ((index, original, _) in splits.sortedBy { it.first }) strokes.add(index.coerceAtMost(strokes.size), original)
+        }
+
+        companion object {
+            /** [pieces] maps an original stroke id to what remains of it. */
+            fun of(current: List<Stroke>, pieces: Map<String, List<Stroke>>) = SplitStrokes(
+                current.withIndex().filter { it.value.id in pieces }.map { Triple(it.index, it.value, pieces.getValue(it.value.id)) },
+            )
+        }
+    }
+
     /** Removes strokes and remembers their z-order so undo restores the exact stacking. */
     class RemoveStrokes(private val removed: List<Pair<Int, Stroke>>) : PageEdit {
         override fun apply(strokes: MutableList<Stroke>) {

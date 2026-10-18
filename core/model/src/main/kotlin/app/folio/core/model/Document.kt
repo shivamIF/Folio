@@ -140,7 +140,13 @@ class Stroke(
 
     val size: Int get() = x.size
 
-    fun bounds(): Rect {
+    /** Strokes are immutable once built, so the bounds are computed once (not serialised). */
+    @kotlinx.serialization.Transient
+    private var boundsCache: Rect? = null
+
+    fun bounds(): Rect = boundsCache ?: computeBounds().also { boundsCache = it }
+
+    private fun computeBounds(): Rect {
         if (size == 0) return Rect.EMPTY
         var l = Float.MAX_VALUE; var tp = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
         for (i in 0 until size) {
