@@ -81,6 +81,10 @@ data class NotebookMeta(
     val createdAt: Long,
     val modifiedAt: Long = createdAt,
     val favorite: Boolean = false,
+    /** Set when moved to Trash (epoch ms); null for live notebooks. Absent in older files. */
+    val deletedAt: Long? = null,
+    /** Created by importing a PDF (the library shows its first page instead of a cover). */
+    val fromPdf: Boolean = false,
 ) {
     companion object {
         /** Page units; roughly A4 at 120 units per inch. */

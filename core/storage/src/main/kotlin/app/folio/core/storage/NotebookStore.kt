@@ -21,7 +21,14 @@ interface DocumentRepository {
         pageWidth: Float = NotebookMeta.PAGE_WIDTH, pageHeight: Float = NotebookMeta.PAGE_HEIGHT,
     ): NotebookMeta
     fun updateNotebook(meta: NotebookMeta)
+    /** Permanently deletes a notebook and its files. Prefer [trashNotebook] for user-facing deletes. */
     fun deleteNotebook(id: String)
+    /** Moves a notebook to Trash; it disappears from the library but keeps all its files. */
+    fun trashNotebook(id: String)
+    /** Brings a notebook back from Trash (to the root if its folder no longer exists). */
+    fun restoreNotebook(id: String)
+    /** Permanently deletes trashed notebooks deleted before [cutoff] (epoch ms). Returns how many. */
+    fun purgeTrash(cutoff: Long): Int
     fun addPage(notebookId: String, afterIndex: Int): NotebookMeta
 
     /**
@@ -125,6 +132,34 @@ class FileNotebookStore(
         saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == meta.id) meta.copy(modifiedAt = clock()) else it }))
     }
 
+    override fun trashNotebook(id: String) = synchronized(lock) {
+        val idx = loadIndex()
+        require(idx.notebooks.any { it.id == id }) { "notebook not found" }
+        saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == id) it.copy(deletedAt = clock()) else it }))
+    }
+
+    override fun restoreNotebook(id: String) = synchronized(lock) {
+        val idx = loadIndex()
+        val folders = idx.folders.mapTo(HashSet()) { it.id }
+        saveIndex(
+            idx.copy(
+                notebooks = idx.notebooks.map {
+                    if (it.id == id) it.copy(deletedAt = null, folderId = it.folderId?.takeIf { f -> f in folders }) else it
+                },
+            ),
+        )
+    }
+
+    override fun purgeTrash(cutoff: Long): Int = synchronized(lock) {
+        val idx = loadIndex()
+        val doomed = idx.notebooks.filter { (it.deletedAt ?: Long.MAX_VALUE) < cutoff }
+        if (doomed.isEmpty()) return@synchronized 0
+        // Drop them from the index first: a crash mid-way then leaves orphan files, never a broken entry.
+        saveIndex(idx.copy(notebooks = idx.notebooks - doomed.toSet()))
+        doomed.forEach { notebookDir(it.id).deleteRecursively() }
+        doomed.size
+    }
+
     override fun deleteNotebook(id: String) = synchronized(lock) {
         val idx = loadIndex()
         saveIndex(idx.copy(notebooks = idx.notebooks.filter { it.id != id }))
@@ -182,7 +217,7 @@ class FileNotebookStore(
         val now = clock()
         val first = pages.first()
         val meta = NotebookMeta(
-            title = title.trim().ifEmpty { "Imported PDF" }, folderId = folderId, cover = cover, paper = PaperTemplate.BLANK,
+            title = title.trim().ifEmpty { "Imported PDF" }, folderId = folderId, cover = cover, paper = PaperTemplate.BLANK, fromPdf = true,
             pageWidth = first.width, pageHeight = first.height, pageIds = pages.map { it.id }, createdAt = now,
         )
         val target = attachmentFile(meta.id, staged.id)

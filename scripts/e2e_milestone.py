@@ -316,6 +316,38 @@ def main():
         assert boxes == {b"0 0 612 792"}, f"page size not preserved: {boxes}"
     check("export writes a 3-page PDF to Downloads/Folio", export_pdf)
 
+    # -------------------------------------------------------------- library
+    def pdf_card_shows_first_page():
+        d.sh("shell", "input", "keyevent", "KEYCODE_BACK")
+        _, _, (x1, y1, x2, y2) = d.find("First page of folio-test", timeout=15)
+        time.sleep(1.5)
+        dark = d.ink_in_band(x1, x2, y1, y2)
+        assert dark > 200, f"preview of the PDF notebook looks blank ({dark} dark pixels)"
+    check("library shows the first page of an imported PDF", pdf_card_shows_first_page)
+    d.shot("library-previews")
+
+    def long_press(label):
+        x, y, _ = d.find(label)
+        d.sh("shell", "input", "swipe", str(x), str(y), str(x), str(y), "900")
+        time.sleep(0.6)
+
+    def trash_and_restore():
+        long_press("Notebook Milestone")
+        d.tap("Move to Trash")
+        wait_for(lambda: next(n for n in d.library()["notebooks"] if n["id"] == nb_id).get("deletedAt") is not None,
+                 "notebook not marked as trashed")
+        assert "Notebook Milestone" not in d.ui(), "trashed notebook still shown in the library"
+        d.tap("Trash")
+        d.tap("Trashed notebook Milestone")
+        d.tap("Restore")
+        wait_for(lambda: next(n for n in d.library()["notebooks"] if n["id"] == nb_id).get("deletedAt") is None,
+                 "restore did not clear deletedAt")
+        d.tap("Back to notebooks")
+        d.find("Notebook Milestone")
+        ids = [s["id"] for s in d.page(nb_id, pid)["strokes"]]
+        assert ids == [first_id, second_id], f"content changed by trash/restore: {ids}"
+    check("move to Trash hides a notebook; Restore brings it back intact", trash_and_restore)
+
     print(f"\n{len(results)} checks passed. Screenshots in {a.out}")
 
 

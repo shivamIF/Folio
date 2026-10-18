@@ -12,6 +12,8 @@ import java.io.File
 class FolioApp : Application() {
     lateinit var repository: DocumentRepository
         private set
+    lateinit var thumbnails: app.folio.notes.library.Thumbnails
+        private set
 
     /** Outlives screens so a save started on exit still finishes. */
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -28,5 +30,6 @@ class FolioApp : Application() {
     override fun onCreate() {
         super.onCreate()
         repository = FileNotebookStore(File(filesDir, "library"))
+        thumbnails = app.folio.notes.library.Thumbnails(this, repository)
     }
 }

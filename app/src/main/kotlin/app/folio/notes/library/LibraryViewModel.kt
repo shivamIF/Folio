@@ -31,13 +31,18 @@ data class LibraryUiState(
     val loading: Boolean = true,
     val defaults: NotebookDefaults = NotebookDefaults(),
     val importing: Boolean = false,
+    val showingTrash: Boolean = false,
     val message: String? = null,
 ) {
     val currentFolder: Folder? get() = index.folders.firstOrNull { it.id == folderId }
     val subfolders: List<Folder> get() = if (query.isNotBlank()) emptyList() else index.folders.filter { it.parentId == folderId }.sortedBy { it.name.lowercase() }
+    /** Notebooks in Trash, most recently deleted first. */
+    val trashed: List<NotebookMeta> get() = index.notebooks.filter { it.deletedAt != null }.sortedByDescending { it.deletedAt }
+
     val notebooks: List<NotebookMeta> get() {
-        val base = if (query.isNotBlank()) index.notebooks.filter { it.title.contains(query.trim(), ignoreCase = true) }
-        else index.notebooks.filter { it.folderId == folderId }
+        val live = index.notebooks.filter { it.deletedAt == null }
+        val base = if (query.isNotBlank()) live.filter { it.title.contains(query.trim(), ignoreCase = true) }
+        else live.filter { it.folderId == folderId }
         return when (sort) {
             SortOrder.RECENT -> base.sortedByDescending { it.modifiedAt }
             SortOrder.TITLE -> base.sortedBy { it.title.lowercase() }
@@ -53,7 +58,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(LibraryUiState(defaults = defaultsStore.load()))
     val state: StateFlow<LibraryUiState> = _state.asStateFlow()
 
-    init { refresh() }
+    init {
+        // Trash keeps notebooks for 30 days.
+        io { repo.purgeTrash(System.currentTimeMillis() - TRASH_DAYS * 24L * 60 * 60 * 1000) }
+    }
 
     fun refresh() = io { /* re-read */ }
 
@@ -133,7 +141,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }.getOrNull() ?: uri.lastPathSegment
 
     fun updateNotebook(meta: NotebookMeta) = io { repo.updateNotebook(meta) }
-    fun deleteNotebook(id: String) = io { repo.deleteNotebook(id) }
+    fun trashNotebook(id: String) = io { repo.trashNotebook(id) }
+    fun restoreNotebook(id: String) = io { repo.restoreNotebook(id) }
+    fun deleteForever(id: String) = io { repo.deleteNotebook(id) }
+    fun emptyTrash() = io { repo.purgeTrash(Long.MAX_VALUE) }
+    fun showTrash(show: Boolean) = _state.update { it.copy(showingTrash = show, query = "") }
+
+    companion object {
+        const val TRASH_DAYS = 30
+    }
 
     /** Runs a repository call on the writer thread, then reloads the index. */
     private fun <T> io(after: (T) -> Unit = {}, block: () -> T) {

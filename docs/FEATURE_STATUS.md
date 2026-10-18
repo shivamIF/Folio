@@ -13,8 +13,9 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Library | Nested folders: create, rename, delete (keeps notebooks) | 🟡 | Store unit-tested; UI not E2E tested |
 | Library | Rename / recolour notebook, favourites, delete with confirm | 🟡 | UI wired to the repository; not E2E tested |
 | Library | Sort (recent / title / created), title search | 🟡 | Implemented; not tested |
-| Library | Thumbnails of page content | ⏳ | Covers are generated art only |
-| Library | Subject collections, multi-select, drag-and-drop, trash/recovery | ⏳ | |
+| Library | First-page previews (default: imported PDFs; Settings: all notebooks or covers only); refresh when edited | ✅ | Tab E2E checks the preview's pixels; cached as PNGs in the cache dir |
+| Library | Trash: Move to Trash (with Undo), Restore (to root if folder gone), Delete forever, Empty trash, auto-purge after 30 days | ✅ | Storage tests ×4; Tab E2E trash → restore with content intact |
+| Library | Subject collections, multi-select, drag-and-drop | ⏳ | |
 | Editor | Fountain, ballpoint, pencil, brush, highlighter | 🟡 | Profiles unit-tested; on-device look only on the emulator |
 | Editor | Colour palette, per-tool width, stabilisation slider | 🟡 | Persisted in prefs; not E2E tested |
 | Editor | Pressure-sensitive width, calibrated to real S Pen data, with a sensitivity slider | 🟡 | Unit-tested; measured on the user's recorded strokes; awaiting their feel test |

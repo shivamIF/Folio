@@ -174,4 +174,52 @@ class NotebookStoreTest {
         val staged = store.stagePdf(pdfBytes().inputStream())
         assertFailsWith<IllegalArgumentException> { store.createNotebookFromPdf("x", null, Cover(), staged, listOf(Page())) }
     }
+
+    @Test fun trashHidesThenRestoreBringsBackWithContent() {
+        var now = 1_000L
+        val store = FileNotebookStore(root) { now }
+        val nb = store.createNotebook("Bio", null, Cover(), PaperTemplate.RULED)
+        store.savePage(nb.id, Page(id = nb.pageIds.first(), strokes = listOf(stroke("s"))))
+        now = 2_000L
+        store.trashNotebook(nb.id)
+        val trashed = FileNotebookStore(root).library().notebooks.single()
+        assertEquals(2_000L, trashed.deletedAt)
+        store.restoreNotebook(nb.id)
+        val back = FileNotebookStore(root)
+        assertNull(back.library().notebooks.single().deletedAt)
+        assertEquals(listOf("s"), back.loadPage(nb.id, nb.pageIds.first()).strokes.map { it.id })
+    }
+
+    @Test fun restoreGoesToRootWhenFolderIsGone() {
+        val store = FileNotebookStore(root)
+        val f = store.createFolder("Old", null, 0)
+        val nb = store.createNotebook("x", f.id, Cover(), PaperTemplate.BLANK)
+        store.trashNotebook(nb.id)
+        store.deleteFolder(f.id)
+        store.restoreNotebook(nb.id)
+        assertNull(store.library().notebooks.single().folderId)
+    }
+
+    @Test fun purgeRemovesOnlyOldTrash() {
+        var now = 0L
+        val store = FileNotebookStore(root) { now }
+        val old = store.createNotebook("old", null, Cover(), PaperTemplate.BLANK)
+        val recent = store.createNotebook("recent", null, Cover(), PaperTemplate.BLANK)
+        val live = store.createNotebook("live", null, Cover(), PaperTemplate.BLANK)
+        now = 100L; store.trashNotebook(old.id)
+        now = 900L; store.trashNotebook(recent.id)
+        assertEquals(1, store.purgeTrash(cutoff = 500L))
+        val titles = FileNotebookStore(root).library().notebooks.map { it.title }.toSet()
+        assertEquals(setOf("recent", "live"), titles)
+        assertTrue(!File(root, "notebooks/${old.id}").exists())
+        assertTrue(File(root, "notebooks/${live.id}").exists())
+    }
+
+    @Test fun libraryFromBeforeTrashExistedStillLoads() {
+        val store = FileNotebookStore(root)
+        store.createNotebook("legacy", null, Cover(), PaperTemplate.BLANK)
+        val f = File(root, "library.json")
+        f.writeText(f.readText().replace(Regex(",?\"deletedAt\":null"), ""))
+        assertNull(FileNotebookStore(root).library().notebooks.single().deletedAt)
+    }
 }

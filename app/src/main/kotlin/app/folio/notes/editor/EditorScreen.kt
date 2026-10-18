@@ -261,9 +261,12 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
           Row(verticalAlignment = Alignment.CenterVertically) {
             ToolState.PALETTE.forEach { c ->
                 val sel = c == tools.color
+                // Selected: an outer ring with a gap, so even black stays visible on a dark toolbar.
                 Box(
-                    Modifier.padding(3.dp).size(28.dp).clip(CircleShape).background(Color(c))
-                        .border(if (sel) 3.dp else 1.dp, if (sel) MaterialTheme.colorScheme.primary else Color(0x33000000), CircleShape)
+                    Modifier.size(36.dp).clip(CircleShape)
+                        .border(if (sel) 2.5.dp else 0.dp, if (sel) MaterialTheme.colorScheme.primary else Color.Transparent, CircleShape)
+                        .padding(5.dp).clip(CircleShape).background(Color(c))
+                        .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f), CircleShape)
                         // With a selection, a colour tap recolours it instead of changing the pen.
                         .clickable { if (onColorWithSelection != null) onColorWithSelection(c) else update { it.copy(color = c, eraser = false, lasso = false) } }
                         .semantics { contentDescription = "Ink colour ${"%06X".format(c and 0xFFFFFF)}"; selected = sel },

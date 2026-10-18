@@ -33,6 +33,11 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
@@ -89,7 +94,8 @@ private sealed interface Dialog {
     data object Settings : Dialog
     data class EditNotebook(val meta: NotebookMeta) : Dialog
     data class RenameFolder(val folder: Folder) : Dialog
-    data class ConfirmDeleteNotebook(val meta: NotebookMeta) : Dialog
+    data class ConfirmDeleteForever(val meta: NotebookMeta) : Dialog
+    data object ConfirmEmptyTrash : Dialog
     data class ConfirmDeleteFolder(val folder: Folder) : Dialog
 }
 
@@ -116,7 +122,9 @@ fun LibraryScreen(
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
     LaunchedEffect(state.message) { state.message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
-    BackHandler(enabled = state.folderId != null) { vm.goUp() }
+    BackHandler(enabled = state.showingTrash) { vm.showTrash(false) }
+    BackHandler(enabled = !state.showingTrash && state.folderId != null) { vm.goUp() }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -125,14 +133,18 @@ fun LibraryScreen(
                     if (searching) OutlinedTextField(
                         value = state.query, onValueChange = vm::setQuery, singleLine = true,
                         placeholder = { Text("Search notebooks") }, modifier = Modifier.fillMaxWidth().testTag("search"),
-                    ) else Text(state.currentFolder?.name ?: "Notebooks", fontWeight = FontWeight.SemiBold)
+                    ) else Text(if (state.showingTrash) "Trash" else state.currentFolder?.name ?: "Notebooks", fontWeight = FontWeight.SemiBold)
                 },
                 navigationIcon = {
-                    if (state.folderId != null) IconButton(onClick = vm::goUp) {
+                    if (state.showingTrash) IconButton(onClick = { vm.showTrash(false) }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to notebooks")
+                    } else if (state.folderId != null) IconButton(onClick = vm::goUp) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to parent folder")
                     }
                 },
-                actions = {
+                actions = if (state.showingTrash) ({
+                    TextButton(onClick = { dialog = Dialog.ConfirmEmptyTrash }, enabled = state.trashed.isNotEmpty()) { Text("Empty trash") }
+                }) else ({
                     IconButton(onClick = { searching = !searching; if (!searching) vm.setQuery("") }) {
                         Icon(Icons.Default.Search, contentDescription = "Search")
                     }
@@ -151,12 +163,13 @@ fun LibraryScreen(
                         Icon(Icons.Default.PictureAsPdf, contentDescription = "Import PDF")
                     }
                     IconButton(onClick = { dialog = Dialog.NewFolder }) { Icon(Icons.Default.CreateNewFolder, contentDescription = "New folder") }
+                    IconButton(onClick = { vm.showTrash(true) }) { Icon(Icons.Outlined.Delete, contentDescription = "Trash") }
                     IconButton(onClick = { dialog = Dialog.Settings }) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
-                },
+                }),
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
+            if (!state.showingTrash) ExtendedFloatingActionButton(
                 onClick = { dialog = Dialog.NewNotebook },
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
                 text = { Text("New notebook") },
@@ -168,6 +181,10 @@ fun LibraryScreen(
         if (state.importing) androidx.compose.material3.LinearProgressIndicator(
             Modifier.fillMaxWidth().padding(pad).semantics { contentDescription = "Importing PDF" },
         )
+        if (state.showingTrash) {
+            TrashContent(state, pad, onRestore = vm::restoreNotebook, onDeleteForever = { dialog = Dialog.ConfirmDeleteForever(it) })
+            return@Scaffold
+        }
         val empty = state.subfolders.isEmpty() && state.notebooks.isEmpty()
         if (empty) {
             Box(Modifier.fillMaxSize().padding(pad).padding(24.dp), contentAlignment = Alignment.Center) {
@@ -195,7 +212,14 @@ fun LibraryScreen(
                     nb, onOpen = { onOpenNotebook(nb.id) },
                     onEdit = { dialog = Dialog.EditNotebook(nb) },
                     onToggleFavorite = { vm.updateNotebook(nb.copy(favorite = !nb.favorite)) },
-                    onDelete = { dialog = Dialog.ConfirmDeleteNotebook(nb) },
+                    preview = state.defaults.showsPreview(nb),
+                    onDelete = {
+                        vm.trashNotebook(nb.id)
+                        scope.launch {
+                            val r = snackbar.showSnackbar("\"${nb.title}\" moved to Trash", actionLabel = "Undo", duration = SnackbarDuration.Long)
+                            if (r == SnackbarResult.ActionPerformed) vm.restoreNotebook(nb.id)
+                        }
+                    },
                 )
             }
         }
@@ -218,9 +242,13 @@ fun LibraryScreen(
         is Dialog.RenameFolder -> FolderDialog("Rename folder", d.folder.name, onDismiss = { dialog = null }) { name, _ ->
             dialog = null; vm.renameFolder(d.folder.id, name)
         }
-        is Dialog.ConfirmDeleteNotebook -> ConfirmDialog(
-            "Delete \"${d.meta.title}\"?", "This permanently removes the notebook and all its pages.",
-            onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.deleteNotebook(d.meta.id) },
+        is Dialog.ConfirmDeleteForever -> ConfirmDialog(
+            "Delete \"${d.meta.title}\" forever?", "This permanently removes the notebook and all its pages. It can't be undone.",
+            onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.deleteForever(d.meta.id) },
+        )
+        Dialog.ConfirmEmptyTrash -> ConfirmDialog(
+            "Empty Trash?", "All ${state.trashed.size} notebooks in Trash will be deleted forever. This can't be undone.",
+            onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.emptyTrash() },
         )
         is Dialog.ConfirmDeleteFolder -> ConfirmDialog(
             "Delete folder \"${d.folder.name}\"?", "Notebooks inside are kept and moved up one level.",
@@ -252,14 +280,15 @@ private fun FolderCard(f: Folder, onOpen: () -> Unit, onRename: () -> Unit, onDe
 }
 
 @Composable
-private fun NotebookCard(nb: NotebookMeta, onOpen: () -> Unit, onEdit: () -> Unit, onToggleFavorite: () -> Unit, onDelete: () -> Unit) {
+private fun NotebookCard(nb: NotebookMeta, onOpen: () -> Unit, onEdit: () -> Unit, onToggleFavorite: () -> Unit, preview: Boolean, onDelete: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Box {
         Column(
             Modifier.combinedClickable(onClick = onOpen, onLongClick = { menu = true })
                 .semantics { contentDescription = "Notebook ${nb.title}" }.testTag("notebook-${nb.title}"),
         ) {
-            CoverArt(nb.cover, nb.title, Modifier.fillMaxWidth().aspectRatio(0.75f))
+            if (preview) PagePreview(nb, Modifier.fillMaxWidth().aspectRatio(0.75f))
+            else CoverArt(nb.cover, nb.title, Modifier.fillMaxWidth().aspectRatio(0.75f))
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
                 if (nb.favorite) Icon(Icons.Default.Star, contentDescription = "Favourite", tint = Color(0xFFE9C46A), modifier = Modifier.size(16.dp))
                 Text(nb.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
@@ -272,7 +301,74 @@ private fun NotebookCard(nb: NotebookMeta, onOpen: () -> Unit, onEdit: () -> Uni
         DropdownMenu(menu, onDismissRequest = { menu = false }) {
             DropdownMenuItem(text = { Text("Rename & cover") }, onClick = { menu = false; onEdit() })
             DropdownMenuItem(text = { Text(if (nb.favorite) "Remove from favourites" else "Add to favourites") }, onClick = { menu = false; onToggleFavorite() })
-            DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete() })
+            DropdownMenuItem(text = { Text("Move to Trash") }, onClick = { menu = false; onDelete() })
+        }
+    }
+}
+
+/** First page of a notebook, rendered in the background; the cover shows until it's ready. */
+@Composable
+private fun PagePreview(nb: NotebookMeta, modifier: Modifier = Modifier) {
+    val thumbs = (androidx.compose.ui.platform.LocalContext.current.applicationContext as app.folio.notes.FolioApp).thumbnails
+    val bmp by androidx.compose.runtime.produceState(thumbs.cached(nb), nb.id, nb.modifiedAt) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { thumbs.load(nb) }
+    }
+    Box(
+        modifier.clip(RoundedCornerShape(8.dp)).background(Color.White)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+            .semantics { contentDescription = "First page of ${nb.title}" },
+        contentAlignment = Alignment.Center,
+    ) {
+        val b = bmp
+        if (b != null) androidx.compose.foundation.Image(
+            b.asImageBitmap(), contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        ) else CoverArt(nb.cover, nb.title, Modifier.fillMaxSize())
+    }
+}
+
+@Composable
+private fun TrashContent(state: LibraryUiState, pad: androidx.compose.foundation.layout.PaddingValues, onRestore: (String) -> Unit, onDeleteForever: (NotebookMeta) -> Unit) {
+    Column(Modifier.fillMaxSize().padding(pad)) {
+        Text(
+            "Notebooks in Trash are deleted forever after ${LibraryViewModel.TRASH_DAYS} days.",
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+        )
+        if (state.trashed.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Trash is empty", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            return
+        }
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(170.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(24.dp),
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            verticalArrangement = Arrangement.spacedBy(28.dp),
+        ) {
+            items(state.trashed, key = { it.id }) { nb ->
+                var menu by remember { mutableStateOf(false) }
+                Box {
+                    Column(
+                        Modifier.combinedClickable(onClick = { menu = true }, onLongClick = { menu = true })
+                            .semantics { contentDescription = "Trashed notebook ${nb.title}" },
+                    ) {
+                        if (state.defaults.showsPreview(nb)) PagePreview(nb, Modifier.fillMaxWidth().aspectRatio(0.75f))
+                        else CoverArt(nb.cover, nb.title, Modifier.fillMaxWidth().aspectRatio(0.75f))
+                        Text(nb.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 8.dp))
+                        val daysLeft = LibraryViewModel.TRASH_DAYS - ((System.currentTimeMillis() - (nb.deletedAt ?: 0)) / 86_400_000L).toInt()
+                        Text(
+                            "Deleted in ${daysLeft.coerceAtLeast(0)} day" + if (daysLeft == 1) "" else "s",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Restore") }, onClick = { menu = false; onRestore(nb.id) })
+                        DropdownMenuItem(text = { Text("Delete forever") }, onClick = { menu = false; onDeleteForever(nb) })
+                    }
+                }
+            }
         }
     }
 }
@@ -387,6 +483,7 @@ private fun SettingsDialog(current: NotebookDefaults, onDismiss: () -> Unit, onS
     var size by remember { mutableStateOf(current.size) }
     var landscape by remember { mutableStateOf(current.landscape) }
     var paper by remember { mutableStateOf(current.paper) }
+    var preview by remember { mutableStateOf(current.libraryPreview) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },
@@ -400,6 +497,10 @@ private fun SettingsDialog(current: NotebookDefaults, onDismiss: () -> Unit, onS
                     FilterChip(!landscape, { landscape = false }, label = { Text("Portrait") })
                     FilterChip(landscape, { landscape = true }, label = { Text("Landscape") })
                 }
+                Text("Library shows", style = MaterialTheme.typography.labelLarge)
+                LibraryPreview.entries.forEach { p ->
+                    FilterChip(p == preview, { preview = p }, label = { Text(p.label) }, modifier = Modifier.fillMaxWidth())
+                }
                 Text("Default paper", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PaperTemplate.entries.forEach { p -> FilterChip(p == paper, { paper = p }, label = { Text(p.name.lowercase().replaceFirstChar { it.uppercase() }) }) }
@@ -410,7 +511,7 @@ private fun SettingsDialog(current: NotebookDefaults, onDismiss: () -> Unit, onS
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(NotebookDefaults(size, landscape, paper)) }) { Text("Save") } },
+        confirmButton = { TextButton(onClick = { onSave(NotebookDefaults(size, landscape, paper, preview)) }) { Text("Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

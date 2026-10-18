@@ -1,6 +1,6 @@
 # Test Results (2026-10-18)
 
-## Unit tests: `./gradlew test`. 80 tests (as of the lasso + PDF branch; earlier counts below), 0 failures (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
+## Unit tests: `./gradlew test`. 84 tests (after step 2: + Trash ×4; earlier counts below), 0 failures (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
 | Module | Suites | Tests | Covers |
 |---|---|---|---|
 | core:model | CodecTest, PageEditorTest | 10 | Every stroke channel round-trips; Unicode; newer schema rejected; malformed, truncated, empty and inconsistent input → `CorruptDocumentException`; unknown fields tolerated; add/erase/undo/redo with z-order; redo cleared by a new edit; replace; snapshot isolation; bounded history |
@@ -8,7 +8,7 @@
 | core:storage | NotebookStoreTest | 10 | Reopen after "restart"; corrupt page → `.bak` recovery; corrupt with no backup → error, not silent loss; leftover `.tmp` after a crash ignored; nested folders and safe folder delete; unknown parent rejected; page insert position; delete removes files; path-traversal ids rejected; blank names |
 | app | InputPolicyTest | 6 | Finger draws until a stylus is seen, then navigates; barrel button / eraser end / eraser tool erase; large contact = palm; finger within 400 ms of pen = palm; multi-touch navigates; pen-only can be switched off |
 
-## End-to-end: `scripts/e2e_milestone.py`. 14 checks (milestone 6 + lasso 5 + PDF 3); latest run 14/14 on the Galaxy Tab S6 Lite
+## End-to-end: `scripts/e2e_milestone.py`. 16 checks (milestone 6 + lasso 5 + PDF 3 + library 2); latest run 16/16 on the Galaxy Tab S6 Lite
 - **Device**: Android emulator `sdk_gphone64_arm64`, API 35, 1080×2400 (a phone form factor, not a tablet).
 - **Input**: `adb shell input stylus swipe` (`TOOL_TYPE_STYLUS`, constant pressure).
 
@@ -43,6 +43,7 @@ Each step also fails the run if an error dialog is on screen.
 | 17 | Tab E2E | In portrait the toolbar overflowed, hiding Lasso/Eraser off-screen | Toolbar groups wrap onto extra rows |
 | 18 | Tab E2E + log | A finger touching mid-stroke made Android 13 cancel the pen, and the stroke was lost | Cancelled *pen* strokes are kept up to the cancel point; finger strokes are still discarded |
 | 19 | PDF E2E | Imported Letter pages were normalised to A4 width, so the export was 3% smaller | Physical page size kept; E2E asserts the 612×792 pt MediaBox round-trips |
+| 21 | screenshot review | Selected black swatch looked like an empty ring on the dark toolbar | Outer selection ring with gap + thin outline on every swatch; verified on a Tab screenshot |
 | 20 | build | After moving to Desktop, builds ran stale copied outputs and iCloud created conflict copies (`Lasso 2.kt`); builds took 10 min | Project moved to `~/Developer/Folio` (not synced); clean rebuild; committed code re-verified (62/62) |
 | 12 | user | Wanted to zoom out further, page always centred | Zoom out to half of whole-page, centred on both axes in both orientations; Auto page size shaped like the screen. **Awaiting confirmation** |
 
