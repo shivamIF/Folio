@@ -40,6 +40,14 @@ class CodecTest {
         assertFailsWith<CorruptDocumentException> { DocumentCodec.decodePage(bad) }
     }
 
+    @Test fun pageWithPdfBackgroundRoundTripsAndOldPagesStillLoad() {
+        val page = Page(pdf = PdfBackground("abc-123", 4))
+        assertEquals(page, DocumentCodec.decodePage(DocumentCodec.encodePage(page)))
+        // A page saved before PDF support has no "pdf" key at all.
+        val old = DocumentCodec.encodePage(Page()).replace(Regex(",?\"pdf\":null"), "")
+        assertEquals(null, DocumentCodec.decodePage(old).pdf)
+    }
+
     @Test fun unknownFieldsFromNewerMinorVersionsAreTolerated() {
         val text = DocumentCodec.encodePage(Page()).replaceFirst("{", "{\"futureField\":42,")
         DocumentCodec.decodePage(text)

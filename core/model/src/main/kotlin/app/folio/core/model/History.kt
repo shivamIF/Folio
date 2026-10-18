@@ -10,6 +10,15 @@ sealed interface PageEdit {
         override fun revert(strokes: MutableList<Stroke>) { strokes.removeAll { it.id == stroke.id } }
     }
 
+    /** Adds several strokes on top in one undoable step (duplicate, paste). */
+    class AddStrokes(val added: List<Stroke>) : PageEdit {
+        override fun apply(strokes: MutableList<Stroke>) { strokes.addAll(added) }
+        override fun revert(strokes: MutableList<Stroke>) {
+            val ids = added.mapTo(HashSet()) { it.id }
+            strokes.removeAll { it.id in ids }
+        }
+    }
+
     /** Removes strokes and remembers their z-order so undo restores the exact stacking. */
     class RemoveStrokes(private val removed: List<Pair<Int, Stroke>>) : PageEdit {
         override fun apply(strokes: MutableList<Stroke>) {

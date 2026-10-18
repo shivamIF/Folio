@@ -147,6 +147,21 @@ class Stroke(
         return Rect(l - pad, tp - pad, r + pad, b + pad)
     }
 
+    /**
+     * Scales around (ax, ay) and then translates. Line width scales too, so a
+     * resized selection keeps its proportions. [newId] gives the copy a fresh
+     * identity (used for duplicates).
+     */
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false): Stroke = Stroke(
+        if (newId) newId() else id, tool, color, width * scale,
+        FloatArray(size) { ax + (x[it] - ax) * scale + dx }, FloatArray(size) { ay + (y[it] - ay) * scale + dy },
+        pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt,
+    )
+
+    fun recolored(newColor: Argb): Stroke = Stroke(
+        id, tool, newColor, width, x.copyOf(), y.copyOf(), pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt,
+    )
+
     fun translated(dx: Float, dy: Float): Stroke = Stroke(
         id, tool, color, width,
         FloatArray(size) { x[it] + dx }, FloatArray(size) { y[it] + dy },
@@ -167,9 +182,16 @@ data class Rect(val left: Float, val top: Float, val right: Float, val bottom: F
     fun intersects(o: Rect) = left <= o.right && o.left <= right && top <= o.bottom && o.top <= bottom
     fun contains(px: Float, py: Float) = px in left..right && py in top..bottom
     fun inflate(d: Float) = Rect(left - d, top - d, right + d, bottom + d)
+    val width get() = right - left
+    val height get() = bottom - top
+    fun union(o: Rect) = Rect(minOf(left, o.left), minOf(top, o.top), maxOf(right, o.right), maxOf(bottom, o.bottom))
 
     companion object { val EMPTY = Rect(0f, 0f, 0f, 0f) }
 }
+
+/** A page of an imported PDF shown as this page's background; the file lives in the notebook's attachments. */
+@Serializable
+data class PdfBackground(val attachmentId: String, val pageIndex: Int)
 
 @Serializable
 data class Page(
@@ -179,4 +201,6 @@ data class Page(
     val height: Float = NotebookMeta.PAGE_HEIGHT,
     val paper: PaperTemplate = PaperTemplate.RULED,
     val strokes: List<Stroke> = emptyList(),
+    /** Optional; absent in notebooks created before PDF import existed. */
+    val pdf: PdfBackground? = null,
 )

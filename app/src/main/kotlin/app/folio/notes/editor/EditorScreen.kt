@@ -8,6 +8,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,8 +31,15 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.outlined.AutoFixNormal
 import androidx.compose.material.icons.outlined.Draw
+import androidx.compose.material.icons.outlined.Gesture
+import androidx.compose.material.icons.outlined.HighlightAlt
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -71,6 +80,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.folio.core.ink.PressureCurve
+import app.folio.core.ink.SelectionTransform
 import app.folio.core.model.Stroke
 import app.folio.core.model.ToolType
 
@@ -114,13 +124,16 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                     IconButton(onClick = { vm.openPage(state.pageIndex + 1) }, enabled = state.pageIndex < (state.meta?.pageIds?.size ?: 1) - 1) {
                         Icon(Icons.AutoMirrored.Filled.NavigateNext, contentDescription = "Next page")
                     }
+                    IconButton(onClick = vm::exportPdf, enabled = !state.exporting) {
+                        Icon(Icons.Default.PictureAsPdf, contentDescription = "Export as PDF")
+                    }
                     IconButton(onClick = vm::addPage) { Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = "Add page after this one") }
                 },
             )
         },
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
-            ToolBar(state.tools, vm::updateTools)
+            ToolBar(state.tools, vm::updateTools, onColorWithSelection = if (state.selection.isNotEmpty()) vm::recolorSelection else null)
             Box(Modifier.fillMaxSize().clipToBounds()) {
                 val page = state.page
                 if (page != null) {
@@ -131,23 +144,58 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                                 listener = object : InkCanvasView.Listener {
                                     override fun onStrokeFinished(stroke: Stroke) = vm.onStrokeFinished(stroke)
                                     override fun onStrokesErased(ids: Set<String>) = vm.onStrokesErased(ids)
+                                    override fun onLassoSelected(ids: Set<String>) = vm.onLassoSelected(ids)
+                                    override fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform) =
+                                        vm.transformSelection(ids, transform)
                                 }
                             }
                         },
                         update = { v ->
                             v.tool = tools.tool; v.color = tools.color; v.penWidth = tools.width
                             v.stabilization = tools.stabilization; v.eraserSelected = tools.eraser
+                            v.pdfBackground = state.background
+                            v.lassoMode = tools.lasso; v.lassoRectangle = tools.lassoShape == LassoShape.RECTANGLE; v.selection = state.selection
                             v.pressureCurve = PressureCurve.fromSensitivity(tools.pressureSensitivity)
                             v.penOnlyPreference = tools.penOnly
                             v.setPage(state.strokes, page.paper, page.width, page.height)
                         },
                         modifier = Modifier.fillMaxSize().clipToBounds().testTag("canvas"),
                     )
+                    if (state.selection.isNotEmpty()) SelectionBar(
+                        count = state.selection.size,
+                        onDuplicate = vm::duplicateSelection, onDelete = vm::deleteSelection, onDone = vm::clearSelection,
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                    )
                 }
             }
         }
     }
 
+    if (state.exporting) AlertDialog(
+        onDismissRequest = {}, confirmButton = {},
+        title = { Text("Exporting PDF…") },
+        text = { androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth()) },
+    )
+    state.exported?.let { result ->
+        val context = LocalContext.current
+        AlertDialog(
+            onDismissRequest = vm::dismissExport,
+            title = { Text("PDF exported") },
+            text = { Text("Saved to Downloads/Folio/${result.fileName}") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.dismissExport()
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "application/pdf"
+                        putExtra(android.content.Intent.EXTRA_STREAM, result.uri)
+                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(android.content.Intent.createChooser(send, "Share PDF"))
+                }) { Text("Share") }
+            },
+            dismissButton = { TextButton(onClick = vm::dismissExport) { Text("OK") } },
+        )
+    }
     state.error?.let { msg ->
         AlertDialog(onDismissRequest = vm::dismissError, title = { Text("Problem") }, text = { Text(msg) },
             confirmButton = { TextButton(onClick = vm::dismissError) { Text("OK") } })
@@ -164,35 +212,65 @@ private val TOOL_BUTTONS = listOf(
     ToolButton(ToolType.HIGHLIGHTER, "Highlighter", Icons.Default.Highlight),
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit) {
+private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit, onColorWithSelection: ((Long) -> Unit)?) {
     var settings by remember { mutableStateOf(false) }
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+        // Three groups (tools · colours · size/settings) that wrap onto extra rows
+        // on narrow screens, so no tool is ever hidden off-screen in portrait.
+        FlowRow(
+            Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
         ) {
+          Row(verticalAlignment = Alignment.CenterVertically) {
             TOOL_BUTTONS.forEach { b ->
-                val on = !tools.eraser && tools.tool == b.tool
-                IconToggleButton(on, onCheckedChange = { update { it.copy(tool = b.tool, eraser = false) } },
+                val on = !tools.eraser && !tools.lasso && tools.tool == b.tool
+                IconToggleButton(on, onCheckedChange = { update { it.copy(tool = b.tool, eraser = false, lasso = false) } },
                     modifier = Modifier.testTag("tool-${b.tool.name}").semantics { selected = on }) {
                     Icon(b.icon, contentDescription = b.label, tint = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            IconToggleButton(tools.eraser, onCheckedChange = { e -> update { it.copy(eraser = e) } }, modifier = Modifier.testTag("tool-eraser")) {
+            Box {
+                var lassoMenu by remember { mutableStateOf(false) }
+                // Tapping the lasso always offers both shapes, like the pen chooser in note apps.
+                IconToggleButton(tools.lasso, onCheckedChange = { lassoMenu = true }, modifier = Modifier.testTag("tool-lasso")) {
+                    Icon(
+                        if (tools.lassoShape == LassoShape.RECTANGLE) Icons.Outlined.HighlightAlt else Icons.Outlined.Gesture,
+                        contentDescription = "Lasso select",
+                        tint = if (tools.lasso) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                DropdownMenu(lassoMenu, onDismissRequest = { lassoMenu = false }) {
+                    LassoShape.entries.forEach { shape ->
+                        val label = if (shape == LassoShape.FREEFORM) "Freeform lasso" else "Rectangle select"
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            leadingIcon = { Icon(if (shape == LassoShape.FREEFORM) Icons.Outlined.Gesture else Icons.Outlined.HighlightAlt, contentDescription = null) },
+                            trailingIcon = { if (tools.lasso && tools.lassoShape == shape) Icon(Icons.Default.Check, contentDescription = "Selected") },
+                            onClick = { lassoMenu = false; update { it.copy(lasso = true, eraser = false, lassoShape = shape) } },
+                        )
+                    }
+                }
+            }
+            IconToggleButton(tools.eraser, onCheckedChange = { e -> update { it.copy(eraser = e, lasso = false) } }, modifier = Modifier.testTag("tool-eraser")) {
                 Icon(Icons.Outlined.AutoFixNormal, contentDescription = "Stroke eraser", tint = if (tools.eraser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Box(Modifier.width(12.dp))
+          }
+          Row(verticalAlignment = Alignment.CenterVertically) {
             ToolState.PALETTE.forEach { c ->
                 val sel = c == tools.color
                 Box(
                     Modifier.padding(3.dp).size(28.dp).clip(CircleShape).background(Color(c))
                         .border(if (sel) 3.dp else 1.dp, if (sel) MaterialTheme.colorScheme.primary else Color(0x33000000), CircleShape)
-                        .clickable { update { it.copy(color = c, eraser = false) } }
+                        // With a selection, a colour tap recolours it instead of changing the pen.
+                        .clickable { if (onColorWithSelection != null) onColorWithSelection(c) else update { it.copy(color = c, eraser = false, lasso = false) } }
                         .semantics { contentDescription = "Ink colour ${"%06X".format(c and 0xFFFFFF)}"; selected = sel },
                 )
             }
-            Box(Modifier.width(12.dp))
+          }
+          Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Size", style = MaterialTheme.typography.labelMedium)
             Slider(
                 value = tools.width, onValueChange = { w -> update { it.copy(widths = it.widths + (it.tool to w)) } },
@@ -230,7 +308,19 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
                     }
                 }
             }
+          }
         }
     }
 }
 
+@Composable
+private fun SelectionBar(count: Int, onDuplicate: () -> Unit, onDelete: () -> Unit, onDone: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp), tonalElevation = 6.dp, shadowElevation = 6.dp, modifier = modifier) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("$count selected", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 8.dp))
+            IconButton(onClick = onDuplicate) { Icon(Icons.Outlined.ContentCopy, contentDescription = "Duplicate selection") }
+            IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, contentDescription = "Delete selection") }
+            IconButton(onClick = onDone) { Icon(Icons.Default.Check, contentDescription = "Clear selection") }
+        }
+    }
+}

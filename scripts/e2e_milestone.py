@@ -9,7 +9,7 @@ verify the persisted page holds exactly the 2 expected strokes.
 Usage: scripts/e2e_milestone.py [-s SERIAL] [--out DIR]
 Needs a debug build installed (it uses `run-as` to read app-private files).
 """
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, shlex, subprocess, sys, time
 
 PKG = "app.folio.notes"
 ADB = os.path.expanduser("~/Library/Android/sdk/platform-tools/adb")
@@ -60,6 +60,20 @@ class Device:
         with open(path, "wb") as f:
             f.write(subprocess.run([ADB, "-s", self.serial, "exec-out", "screencap", "-p"], capture_output=True).stdout)
         return path
+
+    def ink_in_band(self, x0, x1, y0, y1):
+        """Dark (ink) pixels in a screen rectangle, from a raw framebuffer capture."""
+        raw = subprocess.run([ADB, "-s", self.serial, "exec-out", "screencap"], capture_output=True).stdout
+        w, h = int.from_bytes(raw[0:4], "little"), int.from_bytes(raw[4:8], "little")
+        off = len(raw) - w * h * 4  # header is 12 or 16 bytes depending on Android version
+        dark = 0
+        for y in range(max(0, y0), min(h, y1)):
+            row = off + (y * w) * 4
+            for x in range(max(0, x0), min(w, x1), 2):
+                p = row + x * 4
+                if raw[p] < 90 and raw[p + 1] < 90 and raw[p + 2] < 90:
+                    dark += 1
+        return dark
 
     def run_as(self, *args):
         return self.sh("shell", "run-as", PKG, *args)
@@ -172,6 +186,135 @@ def main():
         assert ids == [first_id, second_id], ids
     check("content survives back, force-stop and relaunch", reopen)
     d.shot("reopened")
+
+    # ---------------------------------------------------------------- lasso
+    def strokes():
+        return d.page(nb_id, pid)["strokes"]
+
+    def by_id(sid):
+        return next(s for s in strokes() if s["id"] == sid)
+
+    def wait_for(pred, what, timeout=8):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.5)
+        raise AssertionError(what)
+
+    def lasso_around_first(activate=True):
+        if activate:  # tapping the lasso tool opens a shape menu
+            d.tap("Lasso select")
+            d.tap("Freeform lasso")
+        # Rectangle loop around stroke 1 only (stroke 2 starts well below it).
+        pts = [(xl - 40, ya - 45), (xr + 40, ya - 45), (xr + 40, ya + 75), (xl - 40, ya + 75), (xl - 40, ya - 40)]
+        d.sh("shell", "input", "stylus", "motionevent", "DOWN", str(pts[0][0]), str(pts[0][1]))
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            for k in range(1, 5):
+                x = x0 + (x1 - x0) * k // 4; y = y0 + (y1 - y0) * k // 4
+                d.sh("shell", "input", "stylus", "motionevent", "MOVE", str(x), str(y))
+        d.sh("shell", "input", "stylus", "motionevent", "UP", str(pts[-1][0]), str(pts[-1][1]))
+        d.find("1 selected")
+    check("lasso selects only the encircled stroke", lasso_around_first)
+    d.shot("lasso-selected")
+
+    y_before = by_id(first_id)["y"][0]
+    second_before = by_id(second_id)
+
+    def move():
+        midx = (xl + xr) // 2
+        old_band = d.ink_in_band(xl, xr, ya - 10, ya + 50)
+        d.stylus_swipe(midx, ya + 20, midx, ya + 140, ms=500)
+        wait_for(lambda: by_id(first_id)["y"][0] > y_before + 20, "selected stroke did not move down")
+        assert by_id(second_id) == second_before, "unselected stroke must not move"
+        time.sleep(1)
+        # The screen must show the ink at its new place, not a stale drawing at the old one.
+        after_band = d.ink_in_band(xl, xr, ya - 10, ya + 50)
+        assert after_band < old_band * 0.2, f"ink still drawn at the old position ({after_band} vs {old_band} dark pixels)"
+    check("dragging the selection moves it (other strokes untouched)", move)
+    d.shot("lasso-moved")
+
+    def undo_move():
+        d.tap("Undo")
+        wait_for(lambda: abs(by_id(first_id)["y"][0] - y_before) < 0.01, "undo did not restore position")
+    check("undo restores the moved selection", undo_move)
+
+    def duplicate_then_delete():
+        d.tap("Duplicate selection")
+        wait_for(lambda: len(strokes()) == 3, "duplicate did not add a copy")
+        d.tap("Delete selection")
+        wait_for(lambda: [s["id"] for s in strokes()] == [first_id, second_id], "delete did not remove only the copy")
+    check("duplicate adds a copy; delete removes the (selected) copy", duplicate_then_delete)
+
+    def recolour():
+        lasso_around_first(activate=False)
+        d.tap("Ink colour C62828")
+        wait_for(lambda: by_id(first_id)["color"] == 0xFFC62828, "selection not recoloured")
+        assert by_id(second_id)["color"] != 0xFFC62828
+        d.tap("Clear selection")
+    check("colour tap recolours the selection only", recolour)
+    d.shot("lasso-done")
+
+    # ------------------------------------------------------------------ PDF
+    fixture = os.path.join(a.out, "folio-test.pdf")
+    subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_test_pdf.py"), fixture, "3"],
+                   check=True, capture_output=True)
+    pdf_nb = {}
+
+    def import_pdf():
+        # Clean previous runs, then hand the PDF to Folio the way "Open with" in Files does.
+        # adb shell re-parses arguments on the device, so SQL clauses must be shell-quoted.
+        d.sh("shell", "content", "delete", "--uri", "content://media/external/file", "--where", shlex.quote("_display_name='folio-test.pdf'"), check=False)
+        d.sh("push", fixture, "/sdcard/Download/folio-test.pdf")
+        d.sh("shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", "file:///sdcard/Download/folio-test.pdf")
+        media_id = None
+        for _ in range(20):
+            out = d.sh("shell", "content", "query", "--uri", "content://media/external/file", "--projection", "_id",
+                       "--where", shlex.quote("_display_name='folio-test.pdf' AND relative_path='Download/'"), check=False)
+            m = re.search(r"_id=(\d+)", out)
+            if m:
+                media_id = m.group(1); break
+            time.sleep(0.5)
+        assert media_id, "media scanner did not index the test PDF"
+        d.sh("shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", f"content://media/external/file/{media_id}",
+             "-t", "application/pdf", "--grant-read-uri-permission", "-n", f"{PKG}/.MainActivity")
+        wait_for(lambda: any(n["title"] == "folio-test" for n in d.library()["notebooks"]), "imported notebook not in library")
+        nb = next(n for n in d.library()["notebooks"] if n["title"] == "folio-test")
+        assert len(nb["pageIds"]) == 3, nb["pageIds"]
+        pdf_nb.update(nb)
+        page = d.page(nb["id"], nb["pageIds"][0])
+        assert page["pdf"]["pageIndex"] == 0, page
+        d.find("Handwriting canvas")
+        time.sleep(2)
+        _, _, (x1, y1, x2, y2) = d.find("Handwriting canvas")
+        dark = d.ink_in_band(x1, x2, y1, y2)
+        assert dark > 2000, f"PDF background not visible ({dark} dark pixels)"
+    check("PDF opened with Folio becomes a 3-page notebook showing the PDF", import_pdf)
+    d.shot("pdf-imported")
+
+    def annotate_pdf():
+        _, _, (x1, y1, x2, y2) = d.find("Handwriting canvas")
+        w, h = x2 - x1, y2 - y1
+        d.stylus_swipe(x1 + w // 5, y1 + int(h * 0.75), x1 + 4 * w // 5, y1 + int(h * 0.72))
+        wait_for(lambda: len(d.page(pdf_nb["id"], pdf_nb["pageIds"][0])["strokes"]) == 1, "annotation not saved on the PDF page")
+        d.tap("Next page")
+        d.find("Handwriting canvas")
+    check("writing on a PDF page is saved; page navigation works", annotate_pdf)
+
+    def export_pdf():
+        d.sh("shell", "content", "delete", "--uri", "content://media/external/file", "--where", shlex.quote("_display_name='folio-test.pdf' AND relative_path='Download/Folio/'"), check=False)
+        d.tap("Export as PDF")
+        d.find("PDF exported", timeout=30)
+        d.tap("OK")
+        local = os.path.join(a.out, "exported.pdf")
+        d.sh("pull", "/sdcard/Download/Folio/folio-test.pdf", local)
+        data = open(local, "rb").read()
+        assert data.startswith(b"%PDF"), "export is not a PDF"
+        pages = len(re.findall(rb"/Type\s*/Page[^s]", data))
+        assert pages == 3, f"exported PDF has {pages} pages"
+        boxes = set(re.findall(rb"/MediaBox\s*\[([^\]]*)\]", data))
+        assert boxes == {b"0 0 612 792"}, f"page size not preserved: {boxes}"
+    check("export writes a 3-page PDF to Downloads/Folio", export_pdf)
 
     print(f"\n{len(results)} checks passed. Screenshots in {a.out}")
 

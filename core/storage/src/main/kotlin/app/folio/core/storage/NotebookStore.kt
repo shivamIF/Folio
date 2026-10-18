@@ -23,9 +23,31 @@ interface DocumentRepository {
     fun updateNotebook(meta: NotebookMeta)
     fun deleteNotebook(id: String)
     fun addPage(notebookId: String, afterIndex: Int): NotebookMeta
+
+    /**
+     * Copies an incoming file into a private staging area, enforcing [maxBytes]
+     * and checking for a PDF header. Nothing is visible in the library yet.
+     */
+    fun stagePdf(source: java.io.InputStream, maxBytes: Long = MAX_PDF_BYTES): StagedFile
+
+    /** Discards a staged file that failed validation. */
+    fun discardStaged(staged: StagedFile)
+
+    /** Creates a notebook whose pages are backed by the staged PDF, moving the file into the notebook. */
+    fun createNotebookFromPdf(title: String, folderId: String?, cover: Cover, staged: StagedFile, pages: List<Page>): NotebookMeta
+
+    /** The on-disk file of a notebook attachment (e.g. an imported PDF). */
+    fun attachmentFile(notebookId: String, attachmentId: String): File
     fun loadPage(notebookId: String, pageId: String): Page
     fun savePage(notebookId: String, page: Page)
 }
+
+/** A file copied into staging, not yet part of any notebook. */
+class StagedFile internal constructor(val id: String, val file: File)
+
+class InvalidImportException(message: String) : Exception(message)
+
+const val MAX_PDF_BYTES = 300L * 1024 * 1024
 
 /**
  * File-system repository. Layout under [root]:
@@ -119,6 +141,70 @@ class FileNotebookStore(
         val updated = meta.copy(pageIds = ids, modifiedAt = clock())
         saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == notebookId) updated else it }))
         updated
+    }
+
+    override fun stagePdf(source: java.io.InputStream, maxBytes: Long): StagedFile {
+        val id = app.folio.core.model.newId()
+        val dir = File(root, "staging").apply { mkdirs() }
+        val out = File(dir, "$id.pdf")
+        try {
+            var total = 0L
+            val head = java.io.ByteArrayOutputStream()
+            java.io.FileOutputStream(out).use { o ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val n = source.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > maxBytes) throw InvalidImportException("File is larger than ${maxBytes / (1024 * 1024)} MB")
+                    if (head.size() < 1024) head.write(buf, 0, minOf(n, 1024 - head.size()))
+                    o.write(buf, 0, n)
+                }
+                o.fd.sync()
+            }
+            if (total == 0L) throw InvalidImportException("File is empty")
+            // The PDF spec allows the header anywhere in the first 1024 bytes.
+            if (!head.toByteArray().decodeToString().contains("%PDF-")) throw InvalidImportException("Not a PDF file")
+            return StagedFile(id, out)
+        } catch (e: Exception) {
+            out.delete()
+            throw e
+        }
+    }
+
+    override fun discardStaged(staged: StagedFile) { staged.file.delete() }
+
+    override fun createNotebookFromPdf(title: String, folderId: String?, cover: Cover, staged: StagedFile, pages: List<Page>): NotebookMeta = synchronized(lock) {
+        require(pages.isNotEmpty()) { "a PDF notebook needs at least one page" }
+        require(pages.all { it.pdf?.attachmentId == staged.id }) { "pages must reference the staged PDF" }
+        require(staged.file.exists()) { "staged file is gone" }
+        val idx = loadIndex()
+        val now = clock()
+        val first = pages.first()
+        val meta = NotebookMeta(
+            title = title.trim().ifEmpty { "Imported PDF" }, folderId = folderId, cover = cover, paper = PaperTemplate.BLANK,
+            pageWidth = first.width, pageHeight = first.height, pageIds = pages.map { it.id }, createdAt = now,
+        )
+        val target = attachmentFile(meta.id, staged.id)
+        target.parentFile.mkdirs()
+        try {
+            java.nio.file.Files.move(staged.file.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+            java.nio.file.Files.move(staged.file.toPath(), target.toPath())
+        }
+        try {
+            pages.forEach { writePage(meta.id, it) }
+            saveIndex(idx.copy(notebooks = idx.notebooks + meta))
+        } catch (e: Exception) {
+            notebookDir(meta.id).deleteRecursively() // never leave a half-imported notebook behind
+            throw e
+        }
+        meta
+    }
+
+    override fun attachmentFile(notebookId: String, attachmentId: String): File {
+        require(SAFE_ID.matches(attachmentId)) { "invalid id" }
+        return File(File(notebookDir(notebookId), "attachments"), "$attachmentId.pdf")
     }
 
     /**

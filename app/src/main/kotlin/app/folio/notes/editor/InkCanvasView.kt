@@ -18,6 +18,7 @@ import app.folio.notes.input.PageViewport
 import androidx.input.motionprediction.MotionEventPredictor
 import app.folio.core.ink.PenProfile
 import app.folio.core.ink.PressureCurve
+import app.folio.core.ink.SelectionTransform
 import app.folio.core.ink.StrokeBuilder
 import app.folio.core.ink.StrokeGeometry
 import app.folio.core.model.Argb
@@ -46,6 +47,10 @@ class InkCanvasView(context: Context) : View(context) {
     interface Listener {
         fun onStrokeFinished(stroke: Stroke)
         fun onStrokesErased(ids: Set<String>)
+        /** A lasso loop finished; [ids] is the new selection (empty clears it). */
+        fun onLassoSelected(ids: Set<String>)
+        /** The selection was moved or resized; commit as one undoable edit. */
+        fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform)
     }
 
     var listener: Listener? = null
@@ -58,6 +63,17 @@ class InkCanvasView(context: Context) : View(context) {
     var pressureCurve: PressureCurve = PressureCurve()
     var eraserSelected: Boolean = false
         set(value) { field = value; invalidate() }
+    /** Lasso tool active: the pen selects instead of writing. */
+    var lassoMode: Boolean = false
+        set(value) { field = value; invalidate() }
+    /** Rendered PDF page shown under the ink, or null for plain paper. */
+    var pdfBackground: android.graphics.Bitmap? = null
+        set(value) { if (field !== value) { field = value; invalidate() } }
+    /** Rectangle selection instead of a freeform loop. */
+    var lassoRectangle: Boolean = false
+    /** Currently selected stroke ids (owned by the view model). */
+    var selection: Set<String> = emptySet()
+        set(value) { if (field != value) { field = value; invalidate() } }
 
     val policy = InputPolicy(palmTouchMajorPx = 48f * resources.displayMetrics.density)
 
@@ -70,7 +86,18 @@ class InkCanvasView(context: Context) : View(context) {
     /** Finished strokes not yet echoed back through [setPage]; drawn so pen-up never blinks. */
     private val pendingCommits = ArrayList<Stroke>()
     private val pendingSince = HashMap<String, Long>()
-    private val pathCache = HashMap<String, Path>()
+    /**
+     * Outline paths keyed by stroke id, remembering which stroke object built them.
+     * Edits like move/resize keep the id but create a new stroke object, so the
+     * identity check makes those strokes redraw at their new geometry.
+     */
+    private val pathCache = HashMap<String, Pair<Stroke, Path>>()
+
+    private fun pathFor(s: Stroke): Path {
+        val cached = pathCache[s.id]
+        if (cached != null && cached.first === s) return cached.second
+        return PageRenderer.pathOf(StrokeGeometry.outline(s)).also { pathCache[s.id] = s to it }
+    }
     private var paper = PaperTemplate.RULED
     private var pageW = 1000f
     private var pageH = 1414f
@@ -86,6 +113,7 @@ class InkCanvasView(context: Context) : View(context) {
         pendingSince.keys.retainAll(pendingCommits.mapTo(HashSet()) { it.id })
         pathCache.keys.retainAll(live + pendingCommits.map { it.id })
         erasedPending.retainAll(live)
+        if (selGesture == SelGesture.NONE) selTransform = SelectionTransform()
         viewport.setPage(width, height)
         syncMatrices()
         invalidate()
@@ -104,6 +132,7 @@ class InkCanvasView(context: Context) : View(context) {
     private var action = GestureAction.IGNORE
     private var activePointerId = -1
     private var builder: StrokeBuilder? = null
+    private var strokeIsFromPen = false
     private val predictor = MotionEventPredictor.newInstance(this)
     private var predicted: MotionEvent? = null
     private var lastErase: FloatArray? = null
@@ -111,6 +140,23 @@ class InkCanvasView(context: Context) : View(context) {
     private var navigating = false
     private var lastPanX = 0f
     private var lastPanY = 0f
+
+    // ---- lasso / selection gesture state ----
+    private enum class SelGesture { NONE, LASSO, MOVE, RESIZE }
+    private var selGesture = SelGesture.NONE
+    private val lassoPoints = ArrayList<Float>()
+    /** Live (and just-committed) move/resize, drawn on the selected strokes. */
+    private var selTransform = SelectionTransform()
+    private var selDownX = 0f
+    private var selDownY = 0f
+    private var selBox: app.folio.core.model.Rect? = null
+    private val selMatrix = Matrix()
+    private val selPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 2f; color = 0xFF3D5A80.toInt()
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(14f, 10f), 0f)
+    }
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF3D5A80.toInt() }
+    private val lassoPath = Path()
 
     // ---- hover state ----
     private var hoverX = -1f
@@ -126,12 +172,8 @@ class InkCanvasView(context: Context) : View(context) {
         }
     })
 
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val pagePaint = Paint().apply { color = Color.WHITE }
+    private val renderer = PageRenderer()
     private val deskPaint = Paint().apply { color = 0xFFE8E6E1.toInt() }
-    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFC9D6E3.toInt(); strokeWidth = 1.2f }
-    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFB0B8C4.toInt() }
-    private val marginPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFF2B8B5.toInt(); strokeWidth = 1.5f }
     private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2f }
     private val livePath = Path()
 
@@ -253,7 +295,9 @@ class InkCanvasView(context: Context) : View(context) {
                 if (action == GestureAction.NAVIGATE) startPan(e)
             }
             MotionEvent.ACTION_MOVE -> when (action) {
-                GestureAction.DRAW -> { predictor.record(e); appendSamples(e); updatePrediction(); invalidate() }
+                GestureAction.DRAW -> if (selGesture != SelGesture.NONE) moveSelectionGesture(e) else {
+                    predictor.record(e); appendSamples(e); updatePrediction(); invalidate()
+                }
                 GestureAction.ERASE -> eraseAlong(e)
                 GestureAction.NAVIGATE -> navigate(e)
                 GestureAction.IGNORE -> Unit
@@ -279,10 +323,15 @@ class InkCanvasView(context: Context) : View(context) {
         if (policy.stylusSeen) policy.penOnly = penOnlyPreference
         activePointerId = e.getPointerId(index)
         when (action) {
+            GestureAction.DRAW if lassoMode -> {
+                requestUnbufferedDispatch(e)
+                beginSelectionGesture(e.getX(index), e.getY(index))
+            }
             GestureAction.DRAW -> {
                 // Deliver every sample as soon as it arrives instead of once per frame.
                 requestUnbufferedDispatch(e)
                 builder = StrokeBuilder(tool, color, penWidth, stabilization, startedAt = System.currentTimeMillis())
+                strokeIsFromPen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
                 predictor.record(e)
                 appendSamples(e)
             }
@@ -329,16 +378,23 @@ class InkCanvasView(context: Context) : View(context) {
 
     private fun finishGesture(e: MotionEvent, index: Int, canceled: Boolean) {
         when (action) {
+            GestureAction.DRAW if selGesture != SelGesture.NONE -> finishSelectionGesture(canceled)
             GestureAction.DRAW -> {
                 val b = builder
-                if (b != null && !canceled) {
-                    val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
-                    appendSamples(e)
-                    val p = toPage(e.getX(idx), e.getY(idx))
-                    b.finishAt(p[0], p[1], effort(e, idx, e.getPressure(idx)), e.getAxisValue(MotionEvent.AXIS_TILT, idx), e.getAxisValue(MotionEvent.AXIS_ORIENTATION, idx), e.eventTime)
+                // On Android 13 a finger or palm touching mid-stroke makes the system cancel the
+                // pen stream. Keep what the pen already wrote rather than losing it (observed on
+                // Galaxy Tab S6 Lite). A cancelled finger stroke is still discarded as accidental.
+                val keepCanceledPenStroke = canceled && strokeIsFromPen && b != null && b.size >= 2
+                if (b != null && (!canceled || keepCanceledPenStroke)) {
+                    if (!canceled) {
+                        val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
+                        appendSamples(e)
+                        val p = toPage(e.getX(idx), e.getY(idx))
+                        b.finishAt(p[0], p[1], effort(e, idx, e.getPressure(idx)), e.getAxisValue(MotionEvent.AXIS_TILT, idx), e.getAxisValue(MotionEvent.AXIS_ORIENTATION, idx), e.eventTime)
+                    }
                     if (b.size > 0) {
                         val stroke = b.build()
-                        pathCache[stroke.id] = pathOf(StrokeGeometry.outline(stroke))
+                        pathFor(stroke)
                         pendingCommits += stroke
                         pendingSince[stroke.id] = SystemClock.uptimeMillis()
                         listener?.onStrokeFinished(stroke)
@@ -441,6 +497,113 @@ class InkCanvasView(context: Context) : View(context) {
         return true
     }
 
+    // ---------------------------------------------------------- lasso select
+
+    private fun handleRadiusPx() = 22f * resources.displayMetrics.density
+
+    /** Selection bounds in page units, including any live transform. */
+    private fun currentSelectionBox(): app.folio.core.model.Rect? {
+        if (selection.isEmpty()) return null
+        val b = app.folio.core.ink.Lasso.bounds(strokes.filter { it.id in selection }) ?: return null
+        val t = selTransform
+        return app.folio.core.model.Rect(t.mapX(b.left), t.mapY(b.top), t.mapX(b.right), t.mapY(b.bottom))
+    }
+
+    private fun beginSelectionGesture(vx: Float, vy: Float) {
+        val p = toPage(vx, vy); val px = p[0]; val py = p[1]
+        selDownX = px; selDownY = py
+        val box = currentSelectionBox()
+        val pad = handleRadiusPx() / scale
+        selGesture = when {
+            box != null && kotlin.math.hypot(px - box.right, py - box.bottom) <= pad * 1.5f -> SelGesture.RESIZE
+            box != null && box.inflate(pad / 2f).contains(px, py) -> SelGesture.MOVE
+            else -> SelGesture.LASSO
+        }
+        selBox = box
+        lassoPoints.clear()
+        if (selGesture == SelGesture.LASSO) { lassoPoints += px; lassoPoints += py }
+        invalidate()
+    }
+
+    private fun moveSelectionGesture(e: MotionEvent) {
+        val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: return
+        when (selGesture) {
+            SelGesture.LASSO -> if (lassoRectangle) {
+                // Rectangle: keep the start corner and the current corner only.
+                val p = toPage(e.getX(idx), e.getY(idx))
+                while (lassoPoints.size > 2) lassoPoints.removeAt(lassoPoints.size - 1)
+                lassoPoints += p[0]; lassoPoints += p[1]
+            } else {
+                for (h in 0 until e.historySize) {
+                    val p = toPage(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h)); lassoPoints += p[0]; lassoPoints += p[1]
+                }
+                val p = toPage(e.getX(idx), e.getY(idx)); lassoPoints += p[0]; lassoPoints += p[1]
+            }
+            SelGesture.MOVE -> {
+                val p = toPage(e.getX(idx), e.getY(idx))
+                selTransform = SelectionTransform(dx = p[0] - selDownX, dy = p[1] - selDownY)
+            }
+            SelGesture.RESIZE -> {
+                val box = selBox ?: return
+                val p = toPage(e.getX(idx), e.getY(idx))
+                selTransform = SelectionTransform.resize(box, p[0], p[1])
+            }
+            SelGesture.NONE -> Unit
+        }
+        invalidate()
+    }
+
+    private fun finishSelectionGesture(canceled: Boolean) {
+        val g = selGesture
+        selGesture = SelGesture.NONE
+        if (canceled) { selTransform = SelectionTransform(); lassoPoints.clear(); return }
+        when (g) {
+            SelGesture.LASSO -> {
+                val polygon = if (lassoRectangle && lassoPoints.size >= 4) {
+                    app.folio.core.ink.Lasso.rectangle(lassoPoints[0], lassoPoints[1], lassoPoints[lassoPoints.size - 2], lassoPoints[lassoPoints.size - 1])
+                } else lassoPoints.toFloatArray()
+                val ids = app.folio.core.ink.Lasso.select(strokes, polygon)
+                lassoPoints.clear()
+                listener?.onLassoSelected(ids)
+            }
+            SelGesture.MOVE, SelGesture.RESIZE -> {
+                val t = selTransform
+                // Keep drawing the transform until the edited strokes come back through setPage.
+                if (!t.isIdentity && selection.isNotEmpty()) listener?.onSelectionTransformed(selection, t)
+                else selTransform = SelectionTransform()
+            }
+            SelGesture.NONE -> Unit
+        }
+    }
+
+    private fun transformMatrix(t: SelectionTransform): Matrix = selMatrix.apply {
+        setTranslate(-t.anchorX, -t.anchorY)
+        postScale(t.scale, t.scale)
+        postTranslate(t.anchorX + t.dx, t.anchorY + t.dy)
+    }
+
+    private fun drawSelectionOverlay(canvas: Canvas) {
+        val px = 1f / scale
+        selPaint.strokeWidth = 2f * px
+        selPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(14f * px, 10f * px), 0f)
+        if (selGesture == SelGesture.LASSO && lassoRectangle && lassoPoints.size >= 4) {
+            val n = lassoPoints.size
+            canvas.drawRect(
+                minOf(lassoPoints[0], lassoPoints[n - 2]), minOf(lassoPoints[1], lassoPoints[n - 1]),
+                maxOf(lassoPoints[0], lassoPoints[n - 2]), maxOf(lassoPoints[1], lassoPoints[n - 1]), selPaint,
+            )
+        } else if (selGesture == SelGesture.LASSO && lassoPoints.size >= 4) {
+            lassoPath.rewind()
+            lassoPath.moveTo(lassoPoints[0], lassoPoints[1])
+            var i = 2
+            while (i < lassoPoints.size) { lassoPath.lineTo(lassoPoints[i], lassoPoints[i + 1]); i += 2 }
+            canvas.drawPath(lassoPath, selPaint)
+        }
+        val box = currentSelectionBox() ?: return
+        canvas.drawRect(box.left, box.top, box.right, box.bottom, selPaint)
+        canvas.drawCircle(box.right, box.bottom, handleRadiusPx() * 0.45f * px, handlePaint)
+    }
+
     // ---------------------------------------------------------------- drawing
 
     override fun onDraw(canvas: Canvas) {
@@ -450,25 +613,28 @@ class InkCanvasView(context: Context) : View(context) {
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), deskPaint)
         canvas.save()
         canvas.concat(pageToView)
-        drawPaper(canvas)
+        renderer.drawPaper(canvas, paper, pageW, pageH, hasPdf = pdfBackground != null)
+        pdfBackground?.let { renderer.drawPdfBackground(canvas, it, pageW, pageH) }
         canvas.clipRect(0f, 0f, pageW, pageH)
+        val moving = !selTransform.isIdentity && selection.isNotEmpty()
         for (s in strokes) {
-            if (s.id in erasedPending) continue
-            drawStroke(canvas, s.color, s.tool, pathCache.getOrPut(s.id) { pathOf(StrokeGeometry.outline(s)) })
+            if (s.id in erasedPending || (moving && s.id in selection)) continue
+            drawStroke(canvas, s.color, s.tool, pathFor(s))
         }
-        for (s in pendingCommits) drawStroke(canvas, s.color, s.tool, pathCache.getValue(s.id))
+        if (moving) {
+            canvas.save()
+            canvas.concat(transformMatrix(selTransform))
+            for (s in strokes) if (s.id in selection) drawStroke(canvas, s.color, s.tool, pathFor(s))
+            canvas.restore()
+        }
+        drawSelectionOverlay(canvas)
+        for (s in pendingCommits) drawStroke(canvas, s.color, s.tool, pathFor(s))
         builder?.let { drawLive(canvas, it) }
         canvas.restore()
         drawCursor(canvas)
     }
 
-    private fun drawStroke(canvas: Canvas, c: Argb, t: ToolType, path: Path) {
-        val profile = PenProfile.of(t)
-        val argb = c.toInt()
-        strokePaint.color = argb
-        strokePaint.alpha = (Color.alpha(argb) * profile.opacity).toInt()
-        canvas.drawPath(path, strokePaint)
-    }
+    private fun drawStroke(canvas: Canvas, c: Argb, t: ToolType, path: Path) = renderer.drawStroke(canvas, c, t, path)
 
     private fun drawLive(canvas: Canvas, b: StrokeBuilder) {
         val s = b.build()
@@ -486,7 +652,7 @@ class InkCanvasView(context: Context) : View(context) {
             }
         }
         val outline = StrokeGeometry.outline(xs, ys, ps, ts, n, penWidth, PenProfile.of(tool))
-        fillPath(livePath, outline)
+        PageRenderer.fillPath(livePath, outline)
         drawStroke(canvas, color, tool, livePath)
     }
 
@@ -497,42 +663,7 @@ class InkCanvasView(context: Context) : View(context) {
         canvas.drawCircle(hoverX, hoverY, r, cursorPaint)
     }
 
-    private fun drawPaper(canvas: Canvas) {
-        canvas.drawRect(0f, 0f, pageW, pageH, pagePaint)
-        val step = 40f
-        when (paper) {
-            PaperTemplate.BLANK -> Unit
-            PaperTemplate.RULED -> {
-                var y = 120f
-                while (y < pageH - 40f) { canvas.drawLine(40f, y, pageW - 40f, y, linePaint); y += step }
-                canvas.drawLine(110f, 0f, 110f, pageH, marginPaint)
-            }
-            PaperTemplate.GRID -> {
-                var x = step; while (x < pageW) { canvas.drawLine(x, 0f, x, pageH, linePaint); x += step }
-                var y = step; while (y < pageH) { canvas.drawLine(0f, y, pageW, y, linePaint); y += step }
-            }
-            PaperTemplate.DOTTED -> {
-                var y = step
-                while (y < pageH) {
-                    var x = step
-                    while (x < pageW) { canvas.drawCircle(x, y, 1.6f, dotPaint); x += step }
-                    y += step
-                }
-            }
-        }
-    }
 
-    private fun pathOf(outline: FloatArray): Path = Path().also { fillPath(it, outline) }
-
-    private fun fillPath(path: Path, outline: FloatArray) {
-        path.rewind()
-        if (outline.size < 6) return
-        path.moveTo(outline[0], outline[1])
-        var i = 2
-        while (i < outline.size) { path.lineTo(outline[i], outline[i + 1]); i += 2 }
-        path.close()
-        path.fillType = Path.FillType.WINDING
-    }
 
     companion object {
         /** The canvas currently on screen, for window-level routing of side-button gestures. */

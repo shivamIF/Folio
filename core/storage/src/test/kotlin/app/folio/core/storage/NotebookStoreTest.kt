@@ -131,4 +131,47 @@ class NotebookStoreTest {
     @Test fun absurdPageSizeIsRejected() {
         assertFailsWith<IllegalArgumentException> { FileNotebookStore(root).createNotebook("x", null, Cover(), PaperTemplate.BLANK, 0f, 1e9f) }
     }
+
+    private fun pdfBytes(size: Int = 2000) = ("%PDF-1.4\n" + "x".repeat(size)).toByteArray()
+
+    @Test fun importedPdfNotebookKeepsBackgroundsAcrossRestart() {
+        val store = FileNotebookStore(root)
+        val staged = store.stagePdf(pdfBytes().inputStream())
+        val pages = (0 until 3).map { Page(width = 1000f, height = 1294f, paper = PaperTemplate.BLANK, pdf = app.folio.core.model.PdfBackground(staged.id, it)) }
+        val nb = store.createNotebookFromPdf("Lecture 1", null, Cover(), staged, pages)
+        val reopened = FileNotebookStore(root)
+        val meta = reopened.library().notebooks.single()
+        assertEquals(3, meta.pageIds.size)
+        assertEquals(2, reopened.loadPage(meta.id, meta.pageIds[2]).pdf!!.pageIndex)
+        assertTrue(reopened.attachmentFile(nb.id, staged.id).exists())
+        assertTrue(!staged.file.exists(), "staged copy moved, not duplicated")
+    }
+
+    @Test fun nonPdfIsRejectedAndLeavesNothingBehind() {
+        val store = FileNotebookStore(root)
+        assertFailsWith<InvalidImportException> { store.stagePdf("hello world".toByteArray().inputStream()) }
+        assertFailsWith<InvalidImportException> { store.stagePdf(ByteArray(0).inputStream()) }
+        assertTrue(File(root, "staging").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun oversizedImportIsRejected() {
+        val store = FileNotebookStore(root)
+        assertFailsWith<InvalidImportException> { store.stagePdf(pdfBytes(5000).inputStream(), maxBytes = 1000) }
+        assertTrue(File(root, "staging").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun deletingImportedNotebookRemovesThePdf() {
+        val store = FileNotebookStore(root)
+        val staged = store.stagePdf(pdfBytes().inputStream())
+        val nb = store.createNotebookFromPdf("x", null, Cover(), staged, listOf(Page(pdf = app.folio.core.model.PdfBackground(staged.id, 0))))
+        val f = store.attachmentFile(nb.id, staged.id)
+        store.deleteNotebook(nb.id)
+        assertTrue(!f.exists())
+    }
+
+    @Test fun pagesMustReferenceTheStagedFile() {
+        val store = FileNotebookStore(root)
+        val staged = store.stagePdf(pdfBytes().inputStream())
+        assertFailsWith<IllegalArgumentException> { store.createNotebookFromPdf("x", null, Cover(), staged, listOf(Page())) }
+    }
 }

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -94,8 +95,20 @@ private sealed interface Dialog {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LibraryScreen(onOpenNotebook: (String) -> Unit, vm: LibraryViewModel = viewModel()) {
+fun LibraryScreen(
+    onOpenNotebook: (String) -> Unit,
+    importRequest: android.net.Uri? = null,
+    onImportHandled: () -> Unit = {},
+    vm: LibraryViewModel = viewModel(),
+) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val pickPdf = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) vm.importPdf(uri, onCreated = onOpenNotebook) }
+    // A PDF opened or shared from another app.
+    LaunchedEffect(importRequest) {
+        if (importRequest != null) { vm.importPdf(importRequest, onCreated = onOpenNotebook); onImportHandled() }
+    }
     var dialog by remember { mutableStateOf<Dialog?>(null) }
     var searching by remember { mutableStateOf(false) }
     var sortMenu by remember { mutableStateOf(false) }
@@ -134,6 +147,9 @@ fun LibraryScreen(onOpenNotebook: (String) -> Unit, vm: LibraryViewModel = viewM
                             }
                         }
                     }
+                    IconButton(onClick = { pickPdf.launch(arrayOf("application/pdf")) }, enabled = !state.importing) {
+                        Icon(Icons.Default.PictureAsPdf, contentDescription = "Import PDF")
+                    }
                     IconButton(onClick = { dialog = Dialog.NewFolder }) { Icon(Icons.Default.CreateNewFolder, contentDescription = "New folder") }
                     IconButton(onClick = { dialog = Dialog.Settings }) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
                 },
@@ -149,6 +165,9 @@ fun LibraryScreen(onOpenNotebook: (String) -> Unit, vm: LibraryViewModel = viewM
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
+        if (state.importing) androidx.compose.material3.LinearProgressIndicator(
+            Modifier.fillMaxWidth().padding(pad).semantics { contentDescription = "Importing PDF" },
+        )
         val empty = state.subfolders.isEmpty() && state.notebooks.isEmpty()
         if (empty) {
             Box(Modifier.fillMaxSize().padding(pad).padding(24.dp), contentAlignment = Alignment.Center) {

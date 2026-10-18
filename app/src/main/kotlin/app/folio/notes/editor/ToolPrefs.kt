@@ -5,9 +5,14 @@ import app.folio.core.ink.PressureCurve
 import app.folio.core.model.Argb
 import app.folio.core.model.ToolType
 
+enum class LassoShape { FREEFORM, RECTANGLE }
+
 data class ToolState(
     val tool: ToolType = ToolType.FOUNTAIN,
     val eraser: Boolean = false,
+    /** Lasso select tool (not persisted: the app always reopens on a writing tool). */
+    val lasso: Boolean = false,
+    val lassoShape: LassoShape = LassoShape.FREEFORM,
     val color: Argb = 0xFF1B1B1F,
     /** Width per tool, so switching tools keeps each one's own size. */
     val widths: Map<ToolType, Float> = DEFAULT_WIDTHS,
@@ -43,6 +48,7 @@ class ToolPrefs(context: Context) {
             stabilization = sp.getFloat("stabilization", d.stabilization),
             penOnly = sp.getBoolean("penOnly", d.penOnly),
             pressureSensitivity = sp.getFloat("pressureSensitivity", d.pressureSensitivity),
+            lassoShape = runCatching { LassoShape.valueOf(sp.getString("lassoShape", d.lassoShape.name)!!) }.getOrDefault(d.lassoShape),
         )
     }
 
@@ -54,6 +60,7 @@ class ToolPrefs(context: Context) {
             putFloat("stabilization", s.stabilization)
             putBoolean("penOnly", s.penOnly)
             putFloat("pressureSensitivity", s.pressureSensitivity)
+            putString("lassoShape", s.lassoShape.name)
         }.apply()
     }
 }

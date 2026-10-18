@@ -15,7 +15,7 @@
 | Format | Recognise | Open | Edit | Save/Export | Round-trip verified | Status |
 |---|---|---|---|---|---|---|
 | Folio native (JSON pages + library index, schema v1) | ✅ | ✅ | ✅ | ✅ | ✅ unit tests (`CodecTest`, `NotebookStoreTest`) | **Implemented** |
-| PDF import/annotate/export | – | – | – | – | – | Planned (Phase 5) |
+| PDF import, annotate, export | ✅ | ✅ (as page backgrounds) | ✅ ink on top | ✅ export to PDF | ✅ 3-page fixture: page count and 612×792 pt size preserved (Tab E2E) | **Implemented**; backgrounds rasterised in export |
 | `.goodnotes` (ZIP + protobuf) | – | – | – | – | – | Planned: read-only import of attachments and strokes, once the schema is decoded |
 | `.sdocx` (ZIP + custom binary pages) | – | – | – | – | – | Planned: read-only import. Blocked on sample files; locked (encrypted) notes will not be supported |
 

@@ -20,6 +20,11 @@ class FolioApp : Application() {
     @OptIn(ExperimentalCoroutinesApi::class)
     val ioWriter = Dispatchers.IO.limitedParallelism(1)
 
+    /** Rendered PDF backgrounds, bounded by memory (bytes). */
+    val pdfBitmaps = object : android.util.LruCache<String, android.graphics.Bitmap>(64 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap) = value.byteCount
+    }
+
     override fun onCreate() {
         super.onCreate()
         repository = FileNotebookStore(File(filesDir, "library"))

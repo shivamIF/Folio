@@ -24,7 +24,8 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Editor | Multiple pages: add, previous/next | 🟡 | Implemented; not E2E tested |
 | Editor | Paper: blank / ruled / grid / dotted | 🟡 | Rendered; seen on screenshot (ruled) |
 | Editor | Page locked to screen: fit-width on open, zoom out to whole page (centred), edge-stopped pan, fling, rotation keeps place | 🟡 | `PageViewportTest` ×9; awaiting the user's check on the Tab |
-| Editor | Lasso selection, move, resize, shapes, text, images | ⏳ | `ReplaceStrokes` edit already exists |
+| Editor | Lasso select (freeform or rectangle; any touch selects the whole stroke), move, resize, duplicate, delete, recolour; one undo step each | ✅ | `LassoTest` ×12; Tab E2E incl. on-screen pixel check after a move; resize by hand only |
+| Editor | Shapes, text boxes, images | ⏳ | |
 | S Pen | Stylus vs finger detection, pen-only mode | 🟡 | Policy unit-tested; stylus-source E2E |
 | S Pen | Historical samples, unbuffered dispatch, motion prediction | 🟡 | Implemented; latency not measured |
 | S Pen | Side button = erase while held | ✅ | Confirmed on Galaxy Tab S6 Lite (user + input log). Handles Samsung actions 211–214 via window-level routing |
@@ -32,7 +33,8 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | S Pen | Hover cursor (pen size / eraser ring) | 🟡 | Implemented; hardware unverified |
 | S Pen | Palm rejection heuristics + system cancel | 🟡 | Policy unit-tested; hardware unverified |
 | Formats | Native format, versioned | ✅ | CodecTest |
-| Formats | PDF import / annotate / export | ⏳ | Phase 5 |
+| Formats | PDF import (library button or "Open with/Share to Folio"), annotate on top, keeps physical page size | ✅ | Storage tests ×5; Tab E2E: 3-page import, background visible, annotation saved |
+| Formats | PDF export to Downloads/Folio + Share (vector ink and ruling; PDF backgrounds as 180 dpi images) | ✅ | Tab E2E: 3 pages, 612×792 pt preserved, rendered and inspected |
 | Formats | `.goodnotes` / `.sdocx` read-only import | ⏳ / ⛔ | `.sdocx` blocked on sample files |
 | Sync | Offline queue, cloud sync, conflicts | ⏳ | No backend exists; design in ADR-7 |
 | Productivity | Search inside notes, OCR, handwriting recognition | ⏳ | |

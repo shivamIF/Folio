@@ -20,6 +20,24 @@ class MainActivity : ComponentActivity() {
     /** True while a side-button pen gesture is being routed straight to the canvas. */
     private var routingToCanvas = false
 
+    /** PDF handed to us by another app ("Open with" / "Share"), waiting to be imported. */
+    private val importRequest = androidx.compose.runtime.mutableStateOf<android.net.Uri?>(null)
+
+    private fun takeImport(intent: android.content.Intent?) {
+        if (intent == null) return
+        val uri = when (intent.action) {
+            android.content.Intent.ACTION_VIEW -> intent.data
+            android.content.Intent.ACTION_SEND -> androidx.core.content.IntentCompat.getParcelableExtra(intent, android.content.Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            else -> null
+        }
+        if (uri != null) importRequest.value = uri
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        takeImport(intent)
+    }
+
     /**
      * On the Galaxy Tab S6 Lite the system delivers S Pen touches made with the
      * side button held to this window, but they never reach the canvas inside
@@ -47,12 +65,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (savedInstanceState == null) takeImport(intent)
         setContent {
             FolioTheme {
                 // Saved across rotation and process death, so the open notebook is restored.
                 var openNotebook by rememberSaveable { mutableStateOfNullableString() }
                 val id = openNotebook
-                if (id == null) LibraryScreen(onOpenNotebook = { openNotebook = it })
+                val pendingImport = importRequest.value
+                // An incoming PDF always lands in the library, which imports and then opens it.
+                if (pendingImport != null && id != null) openNotebook = null
+                if (id == null) LibraryScreen(
+                    onOpenNotebook = { openNotebook = it },
+                    importRequest = pendingImport,
+                    onImportHandled = { importRequest.value = null },
+                )
                 else EditorScreen(notebookId = id, onClose = { openNotebook = null })
             }
         }
