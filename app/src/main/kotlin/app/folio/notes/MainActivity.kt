@@ -35,6 +35,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        // Debug builds: `am start -f 0x20000000 -a app.folio.notes.debug.PERF_ZOOM` runs the zoom benchmark.
+        if (debugInput && intent.action == "app.folio.notes.debug.PERF_ZOOM") { InkCanvasView.attached?.get()?.runPerfScript(intent.getStringExtra("skip")); return }
         takeImport(intent)
     }
 

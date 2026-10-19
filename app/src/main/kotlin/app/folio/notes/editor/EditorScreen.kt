@@ -161,7 +161,7 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                             v.lassoMode = tools.lasso; v.lassoRectangle = tools.lassoShape == LassoShape.RECTANGLE; v.selection = state.selection
                             v.pressureCurve = PressureCurve.fromSensitivity(tools.pressureSensitivity)
                             v.penOnlyPreference = tools.penOnly
-                            v.setPage(state.strokes, page.paper, page.width, page.height)
+                            v.setPage(page.id, state.strokes, page.paper, page.width, page.height)
                         },
                         modifier = Modifier.fillMaxSize().clipToBounds().testTag("canvas"),
                     )
@@ -260,7 +260,13 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
             }
             Box {
                 var eraserMenu by remember { mutableStateOf(false) }
-                IconToggleButton(tools.eraser, onCheckedChange = { eraserMenu = true }, modifier = Modifier.testTag("tool-eraser")) {
+                // First tap picks the eraser with the type used last time; tapping it again
+                // while it's selected opens the options (type, size, highlighter only).
+                IconToggleButton(
+                    tools.eraser,
+                    onCheckedChange = { if (tools.eraser) eraserMenu = true else update { it.copy(eraser = true, lasso = false) } },
+                    modifier = Modifier.testTag("tool-eraser"),
+                ) {
                     Icon(Icons.Outlined.AutoFixNormal, contentDescription = "Eraser", tint = if (tools.eraser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 DropdownMenu(eraserMenu, onDismissRequest = { eraserMenu = false }) {

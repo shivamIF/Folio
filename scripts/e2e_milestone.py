@@ -9,7 +9,21 @@ verify the persisted page holds exactly the 2 expected strokes.
 Usage: scripts/e2e_milestone.py [-s SERIAL] [--out DIR]
 Needs a debug build installed (it uses `run-as` to read app-private files).
 """
-import argparse, json, os, re, shlex, subprocess, sys, time
+import argparse, base64, json, os, re, shlex, struct, subprocess, sys, time
+
+
+def channels(stroke):
+    """Per-point channels of a saved stroke: schema 2 packs them in "pts"
+    (little-endian x, y, pressure, tilt, orientation as float32, then t as int32)."""
+    if "pts" not in stroke:
+        return {k: stroke[k] for k in ("x", "y", "pressure", "tilt", "orientation", "t")}
+    raw = base64.b64decode(stroke["pts"])
+    n = len(raw) // 24
+    out = {}
+    for i, k in enumerate(("x", "y", "pressure", "tilt", "orientation")):
+        out[k] = list(struct.unpack_from("<%df" % n, raw, i * n * 4))
+    out["t"] = list(struct.unpack_from("<%di" % n, raw, 5 * n * 4))
+    return out
 
 PKG = "app.folio.notes"
 ADB = os.path.expanduser("~/Library/Android/sdk/platform-tools/adb")
@@ -49,6 +63,15 @@ class Device:
         x, y, _ = self.find(label)
         self.sh("shell", "input", "tap", str(x), str(y))
         time.sleep(0.6)
+
+    def eraser_menu(self):
+        """Opens the eraser options. The first tap only selects the eraser (last-used type);
+        a tap while it's selected opens the menu."""
+        self.tap("Eraser")
+        try:
+            self.find("Stroke eraser", timeout=1.5)
+        except AssertionError:
+            self.tap("Eraser")
 
     def stylus_swipe(self, x1, y1, x2, y2, ms=400):
         self.sh("shell", "input", "stylus", "swipe", *map(str, (x1, y1, x2, y2, ms)))
@@ -154,11 +177,12 @@ def main():
     saved = d.page(nb_id, pid)["strokes"]
     first_id, second_id = saved[0]["id"], saved[1]["id"]
     s0 = saved[0]
-    assert len(s0["x"]) >= 5 and len(s0["x"]) == len(s0["pressure"]) == len(s0["t"]), "per-point channels stored"
+    c0 = channels(s0)
+    assert len(c0["x"]) >= 5 and len(c0["x"]) == len(c0["pressure"]) == len(c0["t"]), "per-point channels stored"
     assert s0["tool"] == "FOUNTAIN"
 
     def erase():
-        d.tap("Eraser")
+        d.eraser_menu()
         d.tap("Stroke eraser")
         midx = (xl + xr) // 2
         d.stylus_swipe(midx, ya - 30, midx, ya + 60, ms=300)
@@ -219,14 +243,14 @@ def main():
     check("lasso selects only the encircled stroke", lasso_around_first)
     d.shot("lasso-selected")
 
-    y_before = by_id(first_id)["y"][0]
+    y_before = channels(by_id(first_id))["y"][0]
     second_before = by_id(second_id)
 
     def move():
         midx = (xl + xr) // 2
         old_band = d.ink_in_band(xl, xr, ya - 10, ya + 50)
         d.stylus_swipe(midx, ya + 20, midx, ya + 140, ms=500)
-        wait_for(lambda: by_id(first_id)["y"][0] > y_before + 20, "selected stroke did not move down")
+        wait_for(lambda: channels(by_id(first_id))["y"][0] > y_before + 20, "selected stroke did not move down")
         assert by_id(second_id) == second_before, "unselected stroke must not move"
         time.sleep(1)
         # The screen must show the ink at its new place, not a stale drawing at the old one.
@@ -237,7 +261,7 @@ def main():
 
     def undo_move():
         d.tap("Undo")
-        wait_for(lambda: abs(by_id(first_id)["y"][0] - y_before) < 0.01, "undo did not restore position")
+        wait_for(lambda: abs(channels(by_id(first_id))["y"][0] - y_before) < 0.01, "undo did not restore position")
     check("undo restores the moved selection", undo_move)
 
     def duplicate_then_delete():
@@ -353,7 +377,7 @@ def main():
     def partial_eraser():
         d.tap("Notebook Milestone")
         d.find("Handwriting canvas")
-        d.tap("Eraser")
+        d.eraser_menu()
         d.tap("Partial eraser")
         midx = (xl + xr) // 2
         d.stylus_swipe(midx, ya - 40, midx, ya + 70, ms=400)
@@ -368,7 +392,7 @@ def main():
     check("partial eraser cuts a stroke into pieces; undo restores it", partial_eraser)
 
     def highlighter_only():
-        d.tap("Eraser")
+        d.eraser_menu()
         d.tap("Erase highlighter only")
         d.sh("shell", "input", "keyevent", "KEYCODE_ESCAPE")  # close the menu
         time.sleep(0.5)
@@ -377,7 +401,7 @@ def main():
         d.stylus_swipe(midx, ya - 40, midx, ya + 70, ms=400)
         time.sleep(2)
         assert [s["id"] for s in strokes()] == before, "highlighter-only eraser erased ink"
-        d.tap("Eraser")
+        d.eraser_menu()
         d.tap("Erase highlighter only")  # restore default
         d.sh("shell", "input", "keyevent", "KEYCODE_ESCAPE")
     check("with 'Erase highlighter only' on, ink is protected", highlighter_only)

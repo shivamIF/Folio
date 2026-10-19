@@ -2,9 +2,6 @@ package app.folio.core.model
 
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 class UnsupportedSchemaException(found: Int) :
     Exception("document schema $found is newer than supported $SCHEMA_VERSION; update the app")
@@ -29,11 +26,9 @@ object DocumentCodec {
     fun decodeLibrary(text: String): LibraryIndex = decode(text) { json.decodeFromString(LibraryIndex.serializer(), it) }
 
     private inline fun <T> decode(text: String, block: (String) -> T): T {
-        val version = try {
-            json.parseToJsonElement(text).jsonObject["schemaVersion"]?.jsonPrimitive?.int ?: SCHEMA_VERSION
-        } catch (e: Exception) {
-            throw CorruptDocumentException("not a valid document", e)
-        }
+        // Don't build a JSON tree to read one field: an imported page can hold millions of
+        // numbers, and the tree alone exhausted the 256 MB heap on a Galaxy Tab S6 Lite.
+        val version = schemaVersionOf(text)
         if (version > SCHEMA_VERSION) throw UnsupportedSchemaException(version)
         return try {
             block(text)
@@ -42,5 +37,25 @@ object DocumentCodec {
         } catch (e: IllegalArgumentException) {
             throw CorruptDocumentException("document is inconsistent", e)
         }
+    }
+
+    /**
+     * The document's `schemaVersion`, found by scanning for the key (no other type in the
+     * format uses that name). Missing means the current version; the full decode that
+     * follows still rejects malformed JSON.
+     */
+    internal fun schemaVersionOf(text: String): Int {
+        val key = text.indexOf("\"schemaVersion\"")
+        if (key < 0) return SCHEMA_VERSION
+        var i = key + "\"schemaVersion\"".length
+        while (i < text.length && text[i].isWhitespace()) i++
+        if (i >= text.length || text[i] != ':') throw CorruptDocumentException("not a valid document")
+        i++
+        while (i < text.length && text[i].isWhitespace()) i++
+        val start = i
+        while (i < text.length && text[i] in '0'..'9') i++
+        if (i == start) throw CorruptDocumentException("schemaVersion is not a number")
+        // Absurdly long numbers are "newer than us", not corrupt.
+        return if (i - start > 9) Int.MAX_VALUE else text.substring(start, i).toInt()
     }
 }

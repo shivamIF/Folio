@@ -83,8 +83,12 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         val pageId = meta.pageIds[index]
         viewModelScope.launch {
             try {
-                val editor = editors[pageId] ?: withContext(folio.ioWriter) { repo.loadPage(notebookId, pageId) }
-                    .let { PageEditor(it) }.also { editors[pageId] = it; savedRevision[pageId] = it.revision }
+                val editor = editors[pageId] ?: withContext(folio.ioWriter) {
+                    val t0 = System.nanoTime()
+                    repo.loadPage(notebookId, pageId).also {
+                        android.util.Log.d("FolioPerf", "page load ms=%.1f strokes=%d".format((System.nanoTime() - t0) / 1e6, it.strokes.size))
+                    }
+                }.let { PageEditor(it) }.also { editors[pageId] = it; savedRevision[pageId] = it.revision }
                 val snap = editor.snapshot()
                 _state.update { it.copy(pageIndex = index, page = snap, selection = emptySet(), background = null) }
                 publish(editor)
@@ -135,7 +139,10 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
 
     fun onStrokesSplit(pieces: Map<String, List<Stroke>>) {
         val ed = currentEditor() ?: return
-        edit(PageEdit.SplitStrokes.of(ed.currentStrokes, pieces))
+        val t0 = System.nanoTime()
+        val e = PageEdit.SplitStrokes.of(ed.currentStrokes, pieces)
+        if (ed.currentStrokes.size > 1000) android.util.Log.d("FolioPerf", "vm split-of ms=%.1f".format((System.nanoTime() - t0) / 1e6))
+        edit(e)
     }
 
     fun undo() { currentEditor()?.let { if (it.undo()) changed(it) } }
@@ -182,8 +189,11 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
 
     private fun edit(e: PageEdit) {
         val ed = currentEditor() ?: return
+        val t0 = System.nanoTime()
         ed.perform(e)
+        val t1 = System.nanoTime()
         changed(ed)
+        if (ed.currentStrokes.size > 1000) android.util.Log.d("FolioPerf", "vm edit perform_ms=%.1f publish_ms=%.1f".format((t1 - t0) / 1e6, (System.nanoTime() - t1) / 1e6))
     }
 
     private fun changed(ed: PageEditor) {
@@ -193,9 +203,15 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
 
     private fun publish(ed: PageEditor) {
         val strokes = ed.currentStrokes.toList()
-        val live = strokes.mapTo(HashSet()) { it.id }
         // Undo/redo can remove selected strokes; never keep a selection of ghosts.
-        _state.update { it.copy(strokes = strokes, canUndo = ed.canUndo, canRedo = ed.canRedo, selection = it.selection.filterTo(LinkedHashSet()) { id -> id in live }) }
+        // (Only build the id set when something is selected: pages can hold thousands of strokes.)
+        _state.update {
+            val selection = if (it.selection.isEmpty()) it.selection else {
+                val live = strokes.mapTo(HashSet()) { s -> s.id }
+                it.selection.filterTo(LinkedHashSet()) { id -> id in live }
+            }
+            it.copy(strokes = strokes, canUndo = ed.canUndo, canRedo = ed.canRedo, selection = selection)
+        }
     }
 
     fun updateTools(transform: (ToolState) -> ToolState) {

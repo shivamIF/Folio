@@ -24,46 +24,55 @@ sealed interface PageEdit {
      * pieces taking its original's place in the z-order. Pieces may be empty.
      */
     class SplitStrokes(private val splits: List<Triple<Int, Stroke, List<Stroke>>>) : PageEdit {
+        // One pass over the page (a split of hundreds of strokes on a 7,000-stroke page
+        // took ~200 ms when each stroke was searched for and spliced in separately).
         override fun apply(strokes: MutableList<Stroke>) {
-            for ((_, original, pieces) in splits) {
-                val at = strokes.indexOfFirst { it.id == original.id }
-                if (at < 0) continue
-                strokes.removeAt(at)
-                strokes.addAll(at, pieces)
+            val byId = HashMap<String, List<Stroke>>(splits.size * 2)
+            for ((_, original, pieces) in splits) byId[original.id] = pieces
+            val out = ArrayList<Stroke>(strokes.size + splits.sumOf { it.third.size })
+            for (s in strokes) {
+                val pieces = byId.remove(s.id)
+                if (pieces == null) out += s else out.addAll(pieces)
             }
+            strokes.clear(); strokes.addAll(out)
         }
 
         override fun revert(strokes: MutableList<Stroke>) {
             val pieceIds = splits.flatMap { it.third }.mapTo(HashSet()) { it.id }
             strokes.removeAll { it.id in pieceIds }
-            for ((index, original, _) in splits.sortedBy { it.first }) strokes.add(index.coerceAtMost(strokes.size), original)
+            insertAtOriginalPositions(strokes, splits.map { it.first to it.second })
         }
 
         companion object {
             /** [pieces] maps an original stroke id to what remains of it. */
-            fun of(current: List<Stroke>, pieces: Map<String, List<Stroke>>) = SplitStrokes(
-                current.withIndex().filter { it.value.id in pieces }.map { Triple(it.index, it.value, pieces.getValue(it.value.id)) },
-            )
+            fun of(current: List<Stroke>, pieces: Map<String, List<Stroke>>): SplitStrokes {
+                val splits = ArrayList<Triple<Int, Stroke, List<Stroke>>>(pieces.size)
+                for (i in current.indices) {
+                    val s = current[i]
+                    val p = pieces[s.id] ?: continue
+                    splits += Triple(i, s, p)
+                }
+                return SplitStrokes(splits)
+            }
         }
     }
 
     /** Removes strokes and remembers their z-order so undo restores the exact stacking. */
     class RemoveStrokes(private val removed: List<Pair<Int, Stroke>>) : PageEdit {
         override fun apply(strokes: MutableList<Stroke>) {
-            val ids = removed.map { it.second.id }.toSet()
+            val ids = HashSet<String>(removed.size * 2)
+            for (r in removed) ids += r.second.id
             strokes.removeAll { it.id in ids }
         }
 
-        override fun revert(strokes: MutableList<Stroke>) {
-            for ((index, stroke) in removed.sortedBy { it.first }) {
-                strokes.add(index.coerceAtMost(strokes.size), stroke)
-            }
-        }
+        override fun revert(strokes: MutableList<Stroke>) = insertAtOriginalPositions(strokes, removed)
 
         companion object {
-            fun of(current: List<Stroke>, ids: Set<String>) = RemoveStrokes(
-                current.withIndex().filter { it.value.id in ids }.map { it.index to it.value },
-            )
+            fun of(current: List<Stroke>, ids: Set<String>): RemoveStrokes {
+                val removed = ArrayList<Pair<Int, Stroke>>(ids.size)
+                for (i in current.indices) if (current[i].id in ids) removed += i to current[i]
+                return RemoveStrokes(removed)
+            }
         }
     }
 
@@ -82,6 +91,24 @@ sealed interface PageEdit {
  * Mutable editing state for one page plus its undo/redo stacks. Not thread-safe:
  * the editor owns it on the main thread and hands immutable snapshots to storage.
  */
+/**
+ * Puts strokes back at their recorded positions in one pass. Same result as inserting them
+ * one by one in ascending position order (`add(min(index, size), stroke)`), without shifting
+ * the whole list for every stroke.
+ */
+private fun insertAtOriginalPositions(strokes: MutableList<Stroke>, items: List<Pair<Int, Stroke>>) {
+    if (items.isEmpty()) return
+    val sorted = items.sortedBy { it.first }
+    val out = ArrayList<Stroke>(strokes.size + sorted.size)
+    var k = 0
+    for (s in strokes) {
+        while (k < sorted.size && sorted[k].first <= out.size) out += sorted[k++].second
+        out += s
+    }
+    while (k < sorted.size) out += sorted[k++].second
+    strokes.clear(); strokes.addAll(out)
+}
+
 class PageEditor(page: Page, private val maxHistory: Int = 500) {
     private val strokes = page.strokes.toMutableList()
     private val undoStack = ArrayDeque<PageEdit>()

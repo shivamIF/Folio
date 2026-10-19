@@ -222,4 +222,26 @@ class NotebookStoreTest {
         f.writeText(f.readText().replace(Regex(",?\"deletedAt\":null"), ""))
         assertNull(FileNotebookStore(root).library().notebooks.single().deletedAt)
     }
+
+    @Test fun importWithSeveralPdfsAndPlainPages() {
+        val store = FileNotebookStore(root)
+        val a = store.stagePdf(pdfBytes().inputStream()); val b = store.stagePdf(pdfBytes().inputStream())
+        val pages = listOf(
+            Page(pdf = app.folio.core.model.PdfBackground(a.id, 0)), Page(paper = PaperTemplate.BLANK),
+            Page(pdf = app.folio.core.model.PdfBackground(b.id, 3), strokes = listOf(stroke("s"))),
+        )
+        val nb = store.createNotebookFromImport("GN", null, Cover(), listOf(a, b), pages)
+        val back = FileNotebookStore(root)
+        assertEquals(3, back.library().notebooks.single().pageIds.size)
+        assertTrue(back.attachmentFile(nb.id, a.id).exists() && back.attachmentFile(nb.id, b.id).exists())
+        assertEquals(listOf("s"), back.loadPage(nb.id, pages[2].id).strokes.map { it.id })
+    }
+
+    @Test fun importRejectsPagesPointingAtUnstagedFiles() {
+        val store = FileNotebookStore(root)
+        val a = store.stagePdf(pdfBytes().inputStream())
+        assertFailsWith<IllegalArgumentException> {
+            store.createNotebookFromImport("x", null, Cover(), listOf(a), listOf(Page(pdf = app.folio.core.model.PdfBackground("other", 0))))
+        }
+    }
 }

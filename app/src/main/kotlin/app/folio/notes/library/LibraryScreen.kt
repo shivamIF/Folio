@@ -110,10 +110,10 @@ fun LibraryScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     val pickPdf = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
-    ) { uri -> if (uri != null) vm.importPdf(uri, onCreated = onOpenNotebook) }
+    ) { uri -> if (uri != null) vm.importDocument(uri, onCreated = onOpenNotebook) }
     // A PDF opened or shared from another app.
     LaunchedEffect(importRequest) {
-        if (importRequest != null) { vm.importPdf(importRequest, onCreated = onOpenNotebook); onImportHandled() }
+        if (importRequest != null) { vm.importDocument(importRequest, onCreated = onOpenNotebook); onImportHandled() }
     }
     var dialog by remember { mutableStateOf<Dialog?>(null) }
     var searching by remember { mutableStateOf(false) }
@@ -159,8 +159,9 @@ fun LibraryScreen(
                             }
                         }
                     }
-                    IconButton(onClick = { pickPdf.launch(arrayOf("application/pdf")) }, enabled = !state.importing) {
-                        Icon(Icons.Default.PictureAsPdf, contentDescription = "Import PDF")
+                    // Any file: the type is detected from its contents (PDF, GoodNotes).
+                    IconButton(onClick = { pickPdf.launch(arrayOf("*/*")) }, enabled = !state.importing) {
+                        Icon(Icons.Default.PictureAsPdf, contentDescription = "Import PDF or GoodNotes")
                     }
                     IconButton(onClick = { dialog = Dialog.NewFolder }) { Icon(Icons.Default.CreateNewFolder, contentDescription = "New folder") }
                     IconButton(onClick = { vm.showTrash(true) }) { Icon(Icons.Outlined.Delete, contentDescription = "Trash") }
@@ -179,7 +180,7 @@ fun LibraryScreen(
         snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
         if (state.importing) androidx.compose.material3.LinearProgressIndicator(
-            Modifier.fillMaxWidth().padding(pad).semantics { contentDescription = "Importing PDF" },
+            Modifier.fillMaxWidth().padding(pad).semantics { contentDescription = "Importing" },
         )
         if (state.showingTrash) {
             TrashContent(state, pad, onRestore = vm::restoreNotebook, onDeleteForever = { dialog = Dialog.ConfirmDeleteForever(it) })

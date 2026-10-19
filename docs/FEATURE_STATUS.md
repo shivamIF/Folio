@@ -30,6 +30,7 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Editor | Shapes, text boxes, images | ⏳ | |
 | S Pen | Stylus vs finger detection, pen-only mode | 🟡 | Policy unit-tested; stylus-source E2E |
 | S Pen | Historical samples, unbuffered dispatch, motion prediction | 🟡 | Implemented; latency not measured |
+| Editor | Eraser button remembers the last type (stroke or partial); tap again for options | ✅ | E2E helper opens the menu with a second tap |
 | S Pen | Side button = erase while held | ✅ | Confirmed on Galaxy Tab S6 Lite (user + input log). Handles Samsung actions 211–214 via window-level routing |
 | S Pen | Eraser-end tool type | 🟡 | Policy unit-tested |
 | S Pen | Hover cursor (pen size / eraser ring) | 🟡 | Implemented; hardware unverified |
@@ -37,6 +38,8 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Formats | Native format, versioned | ✅ | CodecTest |
 | Formats | PDF import (library button or "Open with/Share to Folio"), annotate on top, keeps physical page size | ✅ | Storage tests ×5; Tab E2E: 3-page import, background visible, annotation saved |
 | Formats | PDF export to Downloads/Folio + Share (vector ink and ruling; PDF backgrounds as 180 dpi images) | ✅ | Tab E2E: 3 pages, 612×792 pt preserved, rendered and inspected |
-| Formats | `.goodnotes` / `.sdocx` read-only import | ⏳ / ⛔ | `.sdocx` blocked on sample files |
+| Formats | `.goodnotes` import, editable (strokes incl. vector shapes, highlighters, PDF backgrounds) | ✅ | GoodNotesImporterTest ×6 + real notebook (79 pages, 2,020 strokes); on the Tab, highlights line up with the PDF text and erase normally |
+| Formats | `.sdocx` (Samsung Notes) import, editable (strokes, colours, highlighters, pressure) | 🟡 | Real-file test on 5 notes (33,105 strokes); on the Tab, a 25,303-stroke note imports, renders as in Samsung Notes and erases. Not yet: PDF backgrounds, text, images, shapes; stroke width not yet compared side by side. Locked notes are refused (by design). See docs/formats/SDOCX.md |
+| Formats | Open `.sdocx` / `.goodnotes` from Files or Share | ✅ | Intent filters for application/sdoc, zip, octet-stream; Folio listed beside Samsung Notes for an `.sdocx` |
 | Sync | Offline queue, cloud sync, conflicts | ⏳ | No backend exists; design in ADR-7 |
 | Productivity | Search inside notes, OCR, handwriting recognition | ⏳ | |

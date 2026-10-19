@@ -87,49 +87,131 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Imports a PDF from a content URI as a new notebook (one page per PDF page,
-     * the PDF shown under the ink). The file is staged and validated first, so a
-     * bad file never appears in the library.
+     * Imports a document from a content URI as a new notebook. The type is
+     * detected from the file's bytes, not its name:
+     * - PDF: one page per PDF page, the PDF shown under the ink
+     * - GoodNotes 6 (.goodnotes): pages, order, PDF backgrounds, ink and highlighter
+     * Everything is copied and validated before anything appears in the library;
+     * content that can't be brought over is reported afterwards.
      */
-    fun importPdf(uri: android.net.Uri, onCreated: (String) -> Unit = {}) {
+    fun importDocument(uri: android.net.Uri, onCreated: (String) -> Unit = {}) {
         val app = getApplication<Application>()
         _state.update { it.copy(importing = true) }
         viewModelScope.launch {
             try {
-                val meta = withContext(folio.ioWriter) {
-                    val name = displayName(uri)?.removeSuffix(".pdf")?.removeSuffix(".PDF") ?: "Imported PDF"
-                    val input = app.contentResolver.openInputStream(uri) ?: throw InvalidImportException("Couldn't open the file")
-                    val staged = input.use { repo.stagePdf(it) }
+                val (meta, warnings) = withContext(folio.ioWriter) {
+                    val name = displayName(uri) ?: "Imported notebook"
+                    val tmp = java.io.File(app.cacheDir, "import-${System.nanoTime()}")
                     try {
-                        val pages = PdfFile(staged.file).use { pdf ->
-                            val n = pdf.pageCount
-                            if (n !in 1..PdfFile.MAX_PAGES) throw InvalidImportException("PDF has $n pages; up to ${PdfFile.MAX_PAGES} are supported")
-                            (0 until n).map { i ->
-                                val (w, h) = pdf.pageSize(i)
-                                // Keep the PDF's physical page size (points → page units), so export round-trips exactly.
-                                Page(
-                                    width = (w / NotebookPdfExporter.POINTS_PER_UNIT).coerceIn(100f, 10_000f),
-                                    height = (h / NotebookPdfExporter.POINTS_PER_UNIT).coerceIn(100f, 10_000f),
-                                    paper = PaperTemplate.BLANK,
-                                    pdf = PdfBackground(staged.id, i),
-                                )
-                            }
+                        val input = app.contentResolver.openInputStream(uri) ?: throw InvalidImportException("Couldn't open the file")
+                        input.use { copyCapped(it, tmp, MAX_IMPORT_BYTES) }
+                        val head = tmp.inputStream().use { s -> ByteArray(1024).let { b -> b.copyOf(s.read(b).coerceAtLeast(0)) } }
+                        when {
+                            String(head, Charsets.ISO_8859_1).contains("%PDF-") -> importPdfFile(tmp, name.substringBeforeLast('.')) to emptyList()
+                            head.size >= 4 && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte() -> importArchive(tmp, name)
+                            else -> throw InvalidImportException("Folio can open PDF, GoodNotes and Samsung Notes files. This file is none of these.")
                         }
-                        repo.createNotebookFromPdf(name, _state.value.folderId, Cover(color = 0xFF293241), staged, pages)
-                    } catch (e: Exception) {
-                        repo.discardStaged(staged)
-                        throw e
+                    } finally {
+                        tmp.delete()
                     }
                 }
-                _state.update { it.copy(index = withContext(folio.ioWriter) { repo.library() }, importing = false) }
+                _state.update {
+                    it.copy(
+                        index = withContext(folio.ioWriter) { repo.library() }, importing = false,
+                        message = warnings.takeIf { w -> w.isNotEmpty() }?.joinToString(" ", prefix = "Imported. "),
+                    )
+                }
                 onCreated(meta.id)
             } catch (e: Exception) {
                 val msg = when (e) {
                     is SecurityException -> "This PDF is password-protected. Remove the password and try again."
                     is InvalidImportException -> e.message
-                    else -> "This PDF couldn't be read (${e.javaClass.simpleName})."
+                    is app.folio.core.interop.FormatException -> "This file couldn't be read: ${e.message}"
+                    else -> "This file couldn't be imported (${e.javaClass.simpleName})."
                 }
                 _state.update { it.copy(importing = false, message = msg) }
+            }
+        }
+    }
+
+    /** Same as [importDocument]; kept for callers that only deal in PDFs. */
+    fun importPdf(uri: android.net.Uri, onCreated: (String) -> Unit = {}) = importDocument(uri, onCreated)
+
+    private fun copyCapped(input: java.io.InputStream, out: java.io.File, cap: Long) {
+        out.outputStream().use { o ->
+            val buf = ByteArray(64 * 1024); var total = 0L
+            while (true) {
+                val n = input.read(buf); if (n < 0) break
+                total += n
+                if (total > cap) throw InvalidImportException("File is larger than ${cap / (1024 * 1024)} MB")
+                o.write(buf, 0, n)
+            }
+        }
+    }
+
+    private fun importPdfFile(file: java.io.File, title: String): NotebookMeta {
+        val staged = file.inputStream().use { repo.stagePdf(it) }
+        try {
+            val pages = PdfFile(staged.file).use { pdf ->
+                val n = pdf.pageCount
+                if (n !in 1..PdfFile.MAX_PAGES) throw InvalidImportException("PDF has $n pages; up to ${PdfFile.MAX_PAGES} are supported")
+                (0 until n).map { i ->
+                    val (w, h) = pdf.pageSize(i)
+                    // Keep the PDF's physical page size (points → page units), so export round-trips exactly.
+                    Page(
+                        width = (w / NotebookPdfExporter.POINTS_PER_UNIT).coerceIn(100f, 10_000f),
+                        height = (h / NotebookPdfExporter.POINTS_PER_UNIT).coerceIn(100f, 10_000f),
+                        paper = PaperTemplate.BLANK,
+                        pdf = PdfBackground(staged.id, i),
+                    )
+                }
+            }
+            return repo.createNotebookFromPdf(title.ifBlank { "Imported PDF" }, _state.value.folderId, Cover(color = 0xFF293241), staged, pages)
+        } catch (e: Exception) {
+            repo.discardStaged(staged)
+            throw e
+        }
+    }
+
+    /** ZIP-based notebook formats, recognised by their contents. */
+    private fun importArchive(file: java.io.File, name: String): Pair<NotebookMeta, List<String>> {
+        val names = app.folio.core.interop.SafeZip(file).use { it.names }
+        return when {
+            "index.events.pb" in names -> importGoodNotes(file)
+            names.any { it.endsWith("pageIdInfo.dat") } -> importSamsungNotes(file, name)
+            else -> throw InvalidImportException("\"$name\" is an archive Folio doesn't recognise as a notebook.")
+        }
+    }
+
+    private fun importSamsungNotes(file: java.io.File, name: String): Pair<NotebookMeta, List<String>> {
+        app.folio.core.interop.SamsungNotesImporter(file).use { sn ->
+            val nb = sn.read(name)
+            val pages = nb.pages.map { p -> Page(width = p.width, height = p.height, paper = PaperTemplate.BLANK, strokes = p.strokes) }
+            val meta = repo.createNotebookFromImport(nb.title, _state.value.folderId, Cover(color = 0xFF3D5A80), emptyList(), pages)
+            return meta to nb.warnings
+        }
+    }
+
+    private fun importGoodNotes(file: java.io.File): Pair<NotebookMeta, List<String>> {
+        app.folio.core.interop.GoodNotesImporter(file).use { gn ->
+            val nb = gn.read()
+            val staged = LinkedHashMap<String, app.folio.core.storage.StagedFile>()
+            try {
+                for (key in nb.attachmentKeys) staged[key] = gn.openAttachment(key).use { repo.stagePdf(it) }
+                val pages = nb.pages.map { p ->
+                    Page(
+                        width = p.width, height = p.height, paper = PaperTemplate.BLANK, strokes = p.strokes,
+                        pdf = p.pdfKey?.let { k -> staged[k]?.let { PdfBackground(it.id, p.pdfPageIndex) } },
+                    )
+                }
+                val meta = repo.createNotebookFromImport(
+                    nb.title, _state.value.folderId, Cover(color = 0xFF2A9D8F), staged.values.toList(), pages,
+                    fromPdf = pages.any { it.pdf != null },
+                )
+                return meta to nb.warnings
+            } catch (e: Exception) {
+                staged.values.forEach { repo.discardStaged(it) }
+                throw e
             }
         }
     }
@@ -149,6 +231,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val TRASH_DAYS = 30
+        const val MAX_IMPORT_BYTES = 500L * 1024 * 1024
     }
 
     /** Runs a repository call on the writer thread, then reloads the index. */

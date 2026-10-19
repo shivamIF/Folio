@@ -43,6 +43,9 @@ interface DocumentRepository {
     /** Creates a notebook whose pages are backed by the staged PDF, moving the file into the notebook. */
     fun createNotebookFromPdf(title: String, folderId: String?, cover: Cover, staged: StagedFile, pages: List<Page>): NotebookMeta
 
+    /** Creates a notebook from an imported document whose pages may reference several staged PDFs. */
+    fun createNotebookFromImport(title: String, folderId: String?, cover: Cover, staged: List<StagedFile>, pages: List<Page>, fromPdf: Boolean = false): NotebookMeta
+
     /** The on-disk file of a notebook attachment (e.g. an imported PDF). */
     fun attachmentFile(notebookId: String, attachmentId: String): File
     fun loadPage(notebookId: String, pageId: String): Page
@@ -209,25 +212,35 @@ class FileNotebookStore(
 
     override fun discardStaged(staged: StagedFile) { staged.file.delete() }
 
-    override fun createNotebookFromPdf(title: String, folderId: String?, cover: Cover, staged: StagedFile, pages: List<Page>): NotebookMeta = synchronized(lock) {
-        require(pages.isNotEmpty()) { "a PDF notebook needs at least one page" }
+    override fun createNotebookFromPdf(title: String, folderId: String?, cover: Cover, staged: StagedFile, pages: List<Page>): NotebookMeta {
         require(pages.all { it.pdf?.attachmentId == staged.id }) { "pages must reference the staged PDF" }
-        require(staged.file.exists()) { "staged file is gone" }
+        return createNotebookFromImport(title.trim().ifEmpty { "Imported PDF" }, folderId, cover, listOf(staged), pages, fromPdf = true)
+    }
+
+    override fun createNotebookFromImport(
+        title: String, folderId: String?, cover: Cover, staged: List<StagedFile>, pages: List<Page>, fromPdf: Boolean,
+    ): NotebookMeta = synchronized(lock) {
+        require(pages.isNotEmpty()) { "an imported notebook needs at least one page" }
+        val stagedIds = staged.mapTo(HashSet()) { it.id }
+        require(pages.all { p -> p.pdf.let { it == null || it.attachmentId in stagedIds } }) { "pages may only reference staged attachments" }
+        require(staged.all { it.file.exists() }) { "staged file is gone" }
         val idx = loadIndex()
         val now = clock()
         val first = pages.first()
         val meta = NotebookMeta(
-            title = title.trim().ifEmpty { "Imported PDF" }, folderId = folderId, cover = cover, paper = PaperTemplate.BLANK, fromPdf = true,
+            title = title.trim().ifEmpty { "Imported notebook" }, folderId = folderId, cover = cover, paper = PaperTemplate.BLANK, fromPdf = fromPdf,
             pageWidth = first.width, pageHeight = first.height, pageIds = pages.map { it.id }, createdAt = now,
         )
-        val target = attachmentFile(meta.id, staged.id)
-        target.parentFile.mkdirs()
         try {
-            java.nio.file.Files.move(staged.file.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
-        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
-            java.nio.file.Files.move(staged.file.toPath(), target.toPath())
-        }
-        try {
+            for (st in staged) {
+                val target = attachmentFile(meta.id, st.id)
+                target.parentFile.mkdirs()
+                try {
+                    java.nio.file.Files.move(st.file.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+                } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                    java.nio.file.Files.move(st.file.toPath(), target.toPath())
+                }
+            }
             pages.forEach { writePage(meta.id, it) }
             saveIndex(idx.copy(notebooks = idx.notebooks + meta))
         } catch (e: Exception) {

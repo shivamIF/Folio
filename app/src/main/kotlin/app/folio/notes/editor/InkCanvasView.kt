@@ -12,7 +12,9 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.VelocityTracker
-import android.view.View
+import android.view.Choreographer
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.widget.OverScroller
 import app.folio.notes.input.PageViewport
 import androidx.input.motionprediction.MotionEventPredictor
@@ -21,6 +23,7 @@ import app.folio.core.ink.PressureCurve
 import app.folio.core.ink.SelectionTransform
 import app.folio.core.ink.StrokeBuilder
 import app.folio.core.ink.StrokeGeometry
+import app.folio.core.ink.StrokeIndex
 import app.folio.core.model.Argb
 import app.folio.core.model.PaperTemplate
 import app.folio.core.model.Stroke
@@ -42,7 +45,43 @@ import kotlin.math.max
  * tip but are never stored.
  */
 @SuppressLint("ViewConstructor")
-class InkCanvasView(context: Context) : View(context) {
+class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
+
+    // ---- rendering surface ----
+    // The page is drawn on its own surface rather than in the app window. Measured on a
+    // Galaxy Tab S6 Lite: as a plain View, every page frame (pen, pinch, pan) made Android
+    // redraw the whole window as well (toolbar included: ~5.6 ms of render-thread work)
+    // on a GPU that is already fill-rate bound. Now a page frame touches only this surface,
+    // which the display hardware composites under the window.
+    private var surfaceReady = false
+    private var frameScheduled = false
+
+    /**
+     * Schedules one surface frame on the next vsync. Every redraw in this class goes
+     * through here. Don't override invalidate(): SurfaceView relies on it to punch the
+     * window hole the page shows through.
+     */
+    private fun requestRender() {
+        if (frameScheduled || !surfaceReady) return
+        frameScheduled = true
+        Choreographer.getInstance().postFrameCallback(this)
+    }
+
+
+    override fun doFrame(frameTimeNanos: Long) {
+        frameScheduled = false
+        if (!surfaceReady) return
+        stepFling()
+        val c = try { holder.lockHardwareCanvas() } catch (e: Exception) { Log.w(TAG, "lockHardwareCanvas failed", e); null } ?: return
+        try { renderFrame(c) } finally { holder.unlockCanvasAndPost(c) }
+    }
+
+    override fun surfaceCreated(holder: SurfaceHolder) { surfaceReady = true; requestRender() }
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { requestRender() }
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        surfaceReady = false
+        if (frameScheduled) { Choreographer.getInstance().removeFrameCallback(this); frameScheduled = false }
+    }
 
     interface Listener {
         fun onStrokeFinished(stroke: Stroke)
@@ -64,7 +103,7 @@ class InkCanvasView(context: Context) : View(context) {
     var stabilization: Float = 0.3f
     var pressureCurve: PressureCurve = PressureCurve()
     var eraserSelected: Boolean = false
-        set(value) { field = value; invalidate() }
+        set(value) { field = value; requestRender() }
     /** Partial eraser (cuts strokes) instead of the whole-stroke eraser. Also used by the side button. */
     var eraserPartial: Boolean = false
     /** Eraser radius in dp on screen (the hover ring shows it). */
@@ -73,15 +112,15 @@ class InkCanvasView(context: Context) : View(context) {
     var eraseHighlighterOnly: Boolean = false
     /** Lasso tool active: the pen selects instead of writing. */
     var lassoMode: Boolean = false
-        set(value) { field = value; invalidate() }
+        set(value) { field = value; requestRender() }
     /** Rendered PDF page shown under the ink, or null for plain paper. */
     var pdfBackground: android.graphics.Bitmap? = null
-        set(value) { if (field !== value) { field = value; invalidate() } }
+        set(value) { if (field !== value) { field = value; requestRender() } }
     /** Rectangle selection instead of a freeform loop. */
     var lassoRectangle: Boolean = false
     /** Currently selected stroke ids (owned by the view model). */
     var selection: Set<String> = emptySet()
-        set(value) { if (field != value) { field = value; invalidate() } }
+        set(value) { if (field != value) { field = value; requestRender() } }
 
     val policy = InputPolicy(palmTouchMajorPx = 48f * resources.displayMetrics.density)
 
@@ -91,45 +130,62 @@ class InkCanvasView(context: Context) : View(context) {
 
     // ---- page content ----
     private var strokes: List<Stroke> = emptyList()
+    /** Spatial index of [strokes], rebuilt whenever the list changes. */
+    private var index = StrokeIndex(emptyList())
     /** Finished strokes not yet echoed back through [setPage]; drawn so pen-up never blinks. */
     private val pendingCommits = ArrayList<Stroke>()
     private val pendingSince = HashMap<String, Long>()
-    /**
-     * Outline paths keyed by stroke id, remembering which stroke object built them.
-     * Edits like move/resize keep the id but create a new stroke object, so the
-     * identity check makes those strokes redraw at their new geometry.
-     */
-    private val pathCache = HashMap<String, Pair<Stroke, Path>>()
-
-    private fun pathFor(s: Stroke): Path {
-        val cached = pathCache[s.id]
-        if (cached != null && cached.first === s) return cached.second
-        return PageRenderer.pathOf(StrokeGeometry.outline(s)).also { pathCache[s.id] = s to it }
-    }
+    /** Outline path of a committed stroke, built once and shared with the tile renderer. */
+    private fun pathFor(s: Stroke): Path = TileCache.outline(s)
+    private var pageKey: String? = null
     private var paper = PaperTemplate.RULED
     private var pageW = 1000f
     private var pageH = 1414f
 
-    fun setPage(strokes: List<Stroke>, paper: PaperTemplate, width: Float, height: Float) {
+    fun setPage(pageId: String, strokes: List<Stroke>, paper: PaperTemplate, width: Float, height: Float) {
+        // Any new stroke list is the echo of the last edit, wipe included.
+        if (strokes !== this.strokes) wipeAwaitingEcho = false
+        val setPageStart = System.nanoTime()
+        if (perfEraseUpNanos != 0L && strokes !== this.strokes) {
+            Log.d("FolioPerf", "erase commit ms=%.1f (pen-up → edited page back)".format((System.nanoTime() - perfEraseUpNanos) / 1e6))
+            perfEraseUpNanos = 0L
+        }
+        pageKey = pageId
+        // A prebuilt index may hold its own copy of the same strokes; only a new list needs a new index.
+        if (strokes !== this.strokes) {
+            val t0 = System.nanoTime()
+            val pre = prebuiltIndex
+            prebuiltIndex = null
+            index = if (pre != null && sameStrokes(pre.strokes, strokes)) pre else StrokeIndex(strokes)
+            if (debugInput && strokes.size > 1000) Log.d("FolioPerf", "index build ms=%.1f strokes=%d".format((System.nanoTime() - t0) / 1e6, strokes.size))
+        }
         this.strokes = strokes
         this.paper = paper
         pageW = width; pageH = height
-        val live = strokes.mapTo(HashSet()) { it.id }
-        val now = SystemClock.uptimeMillis()
-        // Normally the echo arrives on the next frame; the timeout covers edits the page never accepts.
-        pendingCommits.removeAll { it.id in live || now - (pendingSince[it.id] ?: 0) > 1000 }
-        pendingSince.keys.retainAll(pendingCommits.mapTo(HashSet()) { it.id })
-        pathCache.keys.retainAll(live + pendingCommits.map { it.id })
-        erasedPending.retainAll(live)
+        if (pendingCommits.isNotEmpty() || erasedPending.isNotEmpty()) {
+            // Look ids up in the index rather than building a set of the whole page.
+            val now = SystemClock.uptimeMillis()
+            // Normally the echo arrives on the next frame; the timeout covers edits the page never accepts.
+            pendingCommits.removeAll { index.indexOf(it.id) >= 0 || now - (pendingSince[it.id] ?: 0) > 1000 }
+            pendingSince.keys.retainAll(pendingCommits.mapTo(HashSet()) { it.id })
+            erasedPending.retainAll { index.indexOf(it) >= 0 }
+        }
         if (partialCommitted) {
             partialPieces.clear(); partialCommitted = false
-            inkLayer.adoptAfterWipe(strokes)
-            requestLayer() // sharp rebuild in the background; the wiped layer is shown meanwhile
+            tiles.keepWiped() // the wiped tiles now match; the edit patches them exactly
         }
         if (selGesture == SelGesture.NONE) selTransform = SelectionTransform()
+        if (debugInput && strokes.size > 1000) Log.d("FolioPerf", "setPage ms=%.1f".format((System.nanoTime() - setPageStart) / 1e6))
         viewport.setPage(width, height)
         syncMatrices()
-        invalidate()
+        requestRender()
+    }
+
+    /** Same stroke objects in the same order (the view model publishes its own copy of the list). */
+    private fun sameStrokes(a: List<Stroke>, b: List<Stroke>): Boolean {
+        if (a.size != b.size) return false
+        for (i in a.indices) if (a[i] !== b[i]) return false
+        return true
     }
 
     // ---- view transform: page units → view pixels ----
@@ -180,7 +236,7 @@ class InkCanvasView(context: Context) : View(context) {
         override fun onScale(d: ScaleGestureDetector): Boolean {
             viewport.zoomBy(d.scaleFactor, d.focusX, d.focusY)
             syncMatrices()
-            invalidate()
+            requestRender()
             return true
         }
     })
@@ -193,6 +249,8 @@ class InkCanvasView(context: Context) : View(context) {
     init {
         isFocusable = true
         contentDescription = "Handwriting canvas"
+        holder.setFormat(android.graphics.PixelFormat.OPAQUE)
+        holder.addCallback(this)
     }
 
     override fun onAttachedToWindow() {
@@ -238,11 +296,12 @@ class InkCanvasView(context: Context) : View(context) {
         pageToView.invert(viewToPage)
     }
 
-    override fun computeScroll() {
+    /** Momentum scroll, advanced once per surface frame. */
+    private fun stepFling() {
         if (scroller.computeScrollOffset()) {
             viewport.panBy(scroller.currX - viewport.tx, scroller.currY - viewport.ty)
             syncMatrices()
-            postInvalidateOnAnimation()
+            requestRender()
         }
     }
 
@@ -271,6 +330,8 @@ class InkCanvasView(context: Context) : View(context) {
     private val perfLatencyMs = ArrayList<Float>()
     private val perfDrawMs = ArrayList<Float>()
     private var perfLastInputNanos = 0L
+    private var perfEraseUpNanos = 0L
+    private var perfEraseHitMs = 0f
 
     private fun perfReport(kind: String) {
         if (!debugInput || perfDrawMs.isEmpty()) return
@@ -278,11 +339,12 @@ class InkCanvasView(context: Context) : View(context) {
         Log.d(
             "FolioPerf",
             "%s frames=%d strokes=%d latency_p50=%.1f latency_p95=%.1f draw_p50=%.1f draw_p95=%.1f draw_max=%.1f".format(
-                kind, perfDrawMs.size, strokes.size, pct(perfLatencyMs, .5f), pct(perfLatencyMs, .95f),
+                kind + (if (kind == "erase") " hit_ms=%.0f sync_ms=%.0f diff_ms=%.0f patches=%d".format(perfEraseHitMs, tiles.perfSyncMs, tiles.perfDiffMs, tiles.perfPatches) else ""), perfDrawMs.size, strokes.size, pct(perfLatencyMs, .5f), pct(perfLatencyMs, .95f),
                 pct(perfDrawMs, .5f), pct(perfDrawMs, .95f), perfDrawMs.maxOrNull() ?: -1f,
             ),
         )
         perfLatencyMs.clear(); perfDrawMs.clear()
+        perfEraseHitMs = 0f; tiles.perfSyncMs = 0f; tiles.perfDiffMs = 0f; tiles.perfPatches = 0
     }
     private var lastHoverButtons = 0
 
@@ -324,7 +386,7 @@ class InkCanvasView(context: Context) : View(context) {
             }
             MotionEvent.ACTION_MOVE -> when (action) {
                 GestureAction.DRAW -> if (selGesture != SelGesture.NONE) moveSelectionGesture(e) else {
-                    predictor.record(e); appendSamples(e); updatePrediction(); invalidate()
+                    predictor.record(e); appendSamples(e); updatePrediction(); requestRender()
                 }
                 GestureAction.ERASE -> eraseAlong(e)
                 GestureAction.NAVIGATE -> navigate(e)
@@ -345,6 +407,7 @@ class InkCanvasView(context: Context) : View(context) {
     }
 
     private fun beginGesture(e: MotionEvent, index: Int) {
+        awaitPendingWipe()
         val kind = kindOf(e, index)
         val barrel = sideButtonGesture || (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
         action = policy.classifyDown(kind, e.getTouchMajor(index), barrel, eraserSelected, e.pointerCount, e.eventTime)
@@ -376,7 +439,7 @@ class InkCanvasView(context: Context) : View(context) {
             GestureAction.IGNORE -> Unit
         }
         hoverX = -1f
-        invalidate()
+        requestRender()
     }
 
     private fun appendSamples(e: MotionEvent) {
@@ -433,6 +496,7 @@ class InkCanvasView(context: Context) : View(context) {
                 abortInk()
             }
             GestureAction.ERASE -> {
+                if (debugInput) perfEraseUpNanos = System.nanoTime()
                 if (!canceled && erasedPending.isNotEmpty()) listener?.onStrokesErased(erasedPending.toSet())
                 else erasedPending.clear()
                 if (wiping) finishWipe(canceled)
@@ -453,7 +517,7 @@ class InkCanvasView(context: Context) : View(context) {
         sideButtonGesture = false
         action = GestureAction.IGNORE
         activePointerId = -1
-        invalidate()
+        requestRender()
     }
 
     private fun abortInk() {
@@ -476,52 +540,98 @@ class InkCanvasView(context: Context) : View(context) {
      * up-to-date layer exists.
      */
     private var wiping = false
-    private var drewWipedLayer = false
-    private var wipeLayer: InkLayerCache.Layer? = null
+    /** A wipe was committed; tiles already show it, so edits wait for the page's echo. */
+    private var wipeAwaitingEcho = false
     private val wipePath = ArrayList<Float>()
-    private val wipePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR)
-        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
-    }
 
     private fun startWipeIfPossible() {
-        wiping = false; wipeLayer = null; wipePath.clear()
+        wiping = false; wipePath.clear()
         if (!eraserPartial || eraseHighlighterOnly) return
-        val l = inkLayer.layer ?: return
-        if (!inkLayer.syncContent(strokes, emptySet(), renderer, ::pathFor)) return
-        wiping = true; wipeLayer = l
+        wiping = true
     }
 
     private fun wipeTo(x0: Float, y0: Float, x1: Float, y1: Float) {
-        val l = wipeLayer ?: return
         if (wipePath.isEmpty()) { wipePath += x0; wipePath += y0 }
         wipePath += x1; wipePath += y1
-        wipePaint.strokeWidth = eraserRadiusPage() * 2f
-        l.canvas.drawLine(x0, y0, x1, y1, wipePaint)
-        l.dirty = true // its pixels no longer match its stroke list
+        val k = TileCache.levelFor(scale)
+        tiles.wipe(x0, y0, x1, y1, eraserRadiusPage(), k, minOf(TileCache.levelFor(viewport.fitPageScale), k))
     }
 
     /** Pen-up after a wipe: turn the wiped path into exact stroke pieces (one undo step). */
     private fun finishWipe(canceled: Boolean) {
         val path = wipePath.toFloatArray()
-        wiping = false; wipeLayer = null; wipePath.clear()
-        if (canceled || path.size < 2) { requestLayer(); return }
-        if (path.size == 2) partialEraseAlong(path[0], path[1], path[0], path[1])
-        var i = 2
-        while (i < path.size) { partialEraseAlong(path[i - 2], path[i - 1], path[i], path[i + 1]); i += 2 }
-        if (partialPieces.isNotEmpty()) {
-            partialCommitted = true
-            inkLayer.layer?.awaitingWipeCommit = true
-            listener?.onStrokesSplit(LinkedHashMap(partialPieces))
-        } else {
-            // Wiped only empty paper: the pixels still match the strokes.
-            inkLayer.layer?.let { if (it.strokes === strokes) it.dirty = false }
+        wiping = false; wipePath.clear()
+        if (canceled || path.size < 2) { tiles.discardWiped(); return }
+        // The wiped tiles already show the result. Compute the exact pieces off the UI thread
+        // (it took 100–300 ms on a 7,000-stroke page) from an immutable snapshot, then commit.
+        wipeAwaitingEcho = true
+        val base = strokes; val idx = index; val r = eraserRadiusPage()
+        val job = WipeJob(base)
+        pendingWipe = job
+        job.future = wipeExecutor.submit {
+            val t0 = System.nanoTime()
+            job.pieces = wipePieces(base, idx, path, r)
+            if (job.pieces.isNotEmpty()) {
+                // The page after this edit, and its index, so the UI thread needn't rebuild it.
+                val after = ArrayList<Stroke>(base.size + job.pieces.size)
+                for (s in base) { val p = job.pieces[s.id]; if (p == null) after += s else after.addAll(p) }
+                job.prebuilt = StrokeIndex(after)
+            }
+            if (debugInput) Log.d("FolioPerf", "wipe pieces ms=%.1f (background) path_pts=%d touched=%d".format((System.nanoTime() - t0) / 1e6, path.size / 2, job.pieces.size))
+            post { completeWipe(job) }
         }
+    }
+
+    private class WipeJob(val base: List<Stroke>) {
+        @Volatile var pieces: Map<String, List<Stroke>> = emptyMap()
+        @Volatile var prebuilt: StrokeIndex? = null
+        var future: java.util.concurrent.Future<*>? = null
+    }
+    private var pendingWipe: WipeJob? = null
+    /** Index built in the background for the page an edit is about to produce. */
+    private var prebuiltIndex: StrokeIndex? = null
+
+    /** Background: the pieces left of every stroke the eraser path crossed (one pass per stroke). */
+    private fun wipePieces(base: List<Stroke>, idx: StrokeIndex, path: FloatArray, r: Float): Map<String, List<Stroke>> {
+        val out = LinkedHashMap<String, List<Stroke>>()
+        var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var rt = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
+        for (k in path.indices step 2) { l = minOf(l, path[k]); rt = maxOf(rt, path[k]); t = minOf(t, path[k + 1]); b = maxOf(b, path[k + 1]) }
+        for (i in idx.query(l - r, t - r, rt + r, b + r)) {
+            val s = base[i]
+            app.folio.core.ink.PartialEraser.erasePath(s, path, r)?.let { out[s.id] = it }
+        }
+        return out
+    }
+
+    /** UI thread: commits a finished wipe (one undo step). Safe to call twice; the second does nothing. */
+    private fun completeWipe(job: WipeJob) {
+        if (pendingWipe !== job) return
+        pendingWipe = null
+        try { job.future?.get() } catch (e: Exception) { Log.w(TAG, "wipe failed", e) }
+        val pieces = job.pieces
+        if (pieces.isEmpty()) {
+            // Wiped only empty paper: the tiles still match the strokes.
+            wipeAwaitingEcho = false
+            tiles.keepWiped()
+            requestRender()
+            return
+        }
+        partialPieces.clear(); partialPieces.putAll(pieces)
+        partialCommitted = true
+        prebuiltIndex = job.prebuilt
+        listener?.onStrokesSplit(LinkedHashMap(pieces))
+    }
+
+    /** A new gesture waits for the previous wipe's commit, so edits stay in order. */
+    private fun awaitPendingWipe() {
+        pendingWipe?.let { completeWipe(it) }
     }
 
     private fun partialEraseAlong(x0: Float, y0: Float, x1: Float, y1: Float) {
         val r = eraserRadiusPage()
-        for (s in strokes) {
+        // Pieces never extend beyond their original stroke, so the index finds them too.
+        for (i in index.query(minOf(x0, x1) - r, minOf(y0, y1) - r, maxOf(x0, x1) + r, maxOf(y0, y1) + r)) {
+            val s = strokes[i]
             if (!erasable(s)) continue
             val current = partialPieces[s.id]
             if (current == null) {
@@ -543,16 +653,27 @@ class InkCanvasView(context: Context) : View(context) {
         }
         val p = toPage(e.getX(idx), e.getY(idx)); eraseTo(p[0], p[1])
         hoverX = e.getX(idx); hoverY = e.getY(idx); hoverErase = true
-        invalidate()
+        requestRender()
     }
 
     private fun eraseTo(x: Float, y: Float) {
+        val t0 = if (debugInput) System.nanoTime() else 0L
+        eraseToImpl(x, y)
+        if (debugInput) perfEraseHitMs += (System.nanoTime() - t0) / 1e6f
+    }
+
+    private fun eraseToImpl(x: Float, y: Float) {
         val from = lastErase ?: floatArrayOf(x, y)
         if (wiping) wipeTo(from[0], from[1], x, y)
         else if (eraserPartial) partialEraseAlong(from[0], from[1], x, y)
         else {
-            val candidates = strokes.filter { it.id !in erasedPending && erasable(it) }
-            erasedPending += StrokeGeometry.hitAlong(candidates, from[0], from[1], x, y, eraserRadiusPage())
+            val r = eraserRadiusPage()
+            val near = index.query(minOf(from[0], x) - r, minOf(from[1], y) - r, maxOf(from[0], x) + r, maxOf(from[1], y) + r)
+            if (near.isNotEmpty()) {
+                val candidates = ArrayList<Stroke>(near.size)
+                for (i in near) { val s = strokes[i]; if (s.id !in erasedPending && erasable(s)) candidates += s }
+                if (candidates.isNotEmpty()) erasedPending += StrokeGeometry.hitAlong(candidates, from[0], from[1], x, y, r)
+            }
         }
         lastErase = floatArrayOf(x, y)
     }
@@ -574,7 +695,7 @@ class InkCanvasView(context: Context) : View(context) {
         viewport.panBy(cx - lastPanX, cy - lastPanY)
         lastPanX = cx; lastPanY = cy
         syncMatrices()
-        invalidate()
+        requestRender()
     }
 
     /** Momentum scroll after a finger swipe, stopping at the page edges. */
@@ -587,7 +708,7 @@ class InkCanvasView(context: Context) : View(context) {
             viewport.tx.toInt(), viewport.ty.toInt(), vx, vy,
             viewport.minTx().toInt(), 0, viewport.minTy().toInt(), 0,
         )
-        postInvalidateOnAnimation()
+        requestRender()
     }
 
     override fun onHoverEvent(e: MotionEvent): Boolean {
@@ -607,7 +728,7 @@ class InkCanvasView(context: Context) : View(context) {
             }
             MotionEvent.ACTION_HOVER_EXIT -> hoverX = -1f
         }
-        invalidate()
+        requestRender()
         return true
     }
 
@@ -636,7 +757,7 @@ class InkCanvasView(context: Context) : View(context) {
         selBox = box
         lassoPoints.clear()
         if (selGesture == SelGesture.LASSO) { lassoPoints += px; lassoPoints += py }
-        invalidate()
+        requestRender()
     }
 
     private fun moveSelectionGesture(e: MotionEvent) {
@@ -664,7 +785,7 @@ class InkCanvasView(context: Context) : View(context) {
             }
             SelGesture.NONE -> Unit
         }
-        invalidate()
+        requestRender()
     }
 
     private fun finishSelectionGesture(canceled: Boolean) {
@@ -720,9 +841,10 @@ class InkCanvasView(context: Context) : View(context) {
 
     // ---------------------------------------------------------------- drawing
 
-    override fun onDraw(canvas: Canvas) {
+    private fun renderFrame(canvas: Canvas) {
         val perfStart = if (debugInput) System.nanoTime() else 0L
         drawPageContent(canvas)
+        perfScript?.drawMs?.add((System.nanoTime() - perfStart) / 1e6f)
         val erasing = action == GestureAction.ERASE
         if (debugInput && (builder != null || navigating || erasing)) {
             val end = System.nanoTime()
@@ -735,16 +857,24 @@ class InkCanvasView(context: Context) : View(context) {
         fitIfNeeded()
         // Never paint outside this view (e.g. over the toolbar when zoomed or scrolled).
         canvas.clipRect(0, 0, width, height)
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), deskPaint)
+        val pl = viewport.tx; val pt = viewport.ty
+        val pr = pl + pageW * scale; val pb = pt + pageH * scale
+        // Desk only around the page: tiles are opaque, so each pixel is painted once.
+        canvas.save()
+        canvas.clipOutRect(pl, pt, pr, pb)
+        canvas.drawPaint(deskPaint)
+        canvas.restore()
+        val moving = !selTransform.isIdentity && selection.isNotEmpty()
+        val frozen = wiping || wipeAwaitingEcho
+        tiles.setContent(pageKey, index, excludedFromLayer(moving), paper, pageW, pageH, pdfBackground)
+        if (perfSkip?.contains("ink") != true) {
+            tiles.draw(canvas, scale, viewport.tx, viewport.ty, width.toFloat(), height.toFloat(), viewport.fitPageScale, frozen)
+        }
         canvas.save()
         canvas.concat(pageToView)
-        renderer.drawPaper(canvas, paper, pageW, pageH, hasPdf = pdfBackground != null)
-        pdfBackground?.let { renderer.drawPdfBackground(canvas, it, pageW, pageH) }
         canvas.clipRect(0f, 0f, pageW, pageH)
-        val moving = !selTransform.isIdentity && selection.isNotEmpty()
-        drawCommittedStrokes(canvas, moving)
-        // A wiped layer already shows the erased result; otherwise draw the remaining pieces.
-        if (!drewWipedLayer) for (pieces in partialPieces.values) for (p in pieces) drawStroke(canvas, p.color, p.tool, pathFor(p))
+        // Wiped tiles already show what's left; otherwise draw the remaining pieces.
+        if (!frozen) for (pieces in partialPieces.values) for (p in pieces) drawStroke(canvas, p.color, p.tool, pathFor(p))
         if (moving) {
             canvas.save()
             canvas.concat(transformMatrix(selTransform))
@@ -760,101 +890,102 @@ class InkCanvasView(context: Context) : View(context) {
 
     private fun drawStroke(canvas: Canvas, c: Argb, t: ToolType, path: Path) = renderer.drawStroke(canvas, c, t, path)
 
-    // ------------------------------------------------------------ ink layer
+    // ------------------------------------------------------------ page tiles
 
-    private val inkLayer = InkLayerCache(
-        // Never swap layers in the middle of a wipe; pen-up requests a fresh build anyway.
-        isCurrent = { spec -> !wiping && spec.strokes === strokes },
-        onLayerReady = { invalidate() },
-    )
-    private val layerPaint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val layerDst = android.graphics.RectF()
-    private val visibleTmp = FloatArray(4)
-    private val rebuildAfterZoom = Runnable { requestLayer() }
+    private val tiles = TileCache(onTilesChanged = { requestRender() })
+    private var lastExcluded: Set<String> = emptySet()
 
-    /** Strokes deliberately hidden from the cached layer (being erased or moved). */
-    private fun excludedFromLayer(moving: Boolean): Set<String> = when {
-        erasedPending.isEmpty() && partialPieces.isEmpty() && !moving -> emptySet()
-        else -> buildSet {
-            addAll(erasedPending); addAll(partialPieces.keys)
-            if (moving) addAll(selection)
-        }
-    }
-
-    /** Visible part of the page, in page units: [l, t, r, b]. */
-    private fun visiblePageRect(): FloatArray {
-        visibleTmp[0] = 0f; visibleTmp[1] = 0f; visibleTmp[2] = width.toFloat(); visibleTmp[3] = height.toFloat()
-        viewToPage.mapPoints(visibleTmp)
-        visibleTmp[0] = visibleTmp[0].coerceIn(0f, pageW); visibleTmp[2] = visibleTmp[2].coerceIn(0f, pageW)
-        visibleTmp[1] = visibleTmp[1].coerceIn(0f, pageH); visibleTmp[3] = visibleTmp[3].coerceIn(0f, pageH)
-        return visibleTmp
-    }
-
-    /** What the layer should be right now: whole page if it fits the pixel budget, else the viewport plus a margin. */
-    private fun desiredLayerSpec(excluded: Set<String>): InkLayerCache.Spec {
-        val sc = scale
-        val wholePx = (pageW * sc).toLong() * (pageH * sc).toLong()
-        if (wholePx <= InkLayerCache.MAX_LAYER_PIXELS) {
-            // Round up: a layer even a fraction of a pixel short of the page edge would be rebuilt forever.
-            return InkLayerCache.Spec(sc, 0f, 0f, kotlin.math.ceil(pageW * sc).toInt(), kotlin.math.ceil(pageH * sc).toInt(), strokes, excluded)
-        }
-        val v = visiblePageRect()
-        val mw = (v[2] - v[0]) * 0.5f; val mh = (v[3] - v[1]) * 0.5f
-        val l = (v[0] - mw).coerceAtLeast(0f); val t = (v[1] - mh).coerceAtLeast(0f)
-        val r = (v[2] + mw).coerceAtMost(pageW); val b = (v[3] + mh).coerceAtMost(pageH)
-        return InkLayerCache.Spec(sc, l, t, kotlin.math.ceil((r - l) * sc).toInt(), kotlin.math.ceil((b - t) * sc).toInt(), strokes, excluded)
-    }
-
-    private fun requestLayer() {
-        if (width == 0 || !viewport.ready) return
-        val moving = !selTransform.isIdentity && selection.isNotEmpty()
-        inkLayer.request(desiredLayerSpec(excludedFromLayer(moving)))
-    }
-
-    private fun drawCommittedStrokes(canvas: Canvas, moving: Boolean) {
-        val excluded = excludedFromLayer(moving)
-        val layer = inkLayer.layer
-        drewWipedLayer = false
-        val wiped = wipeLayer
-        if (wiped != null) {
-            layerDst.set(wiped.left, wiped.top, wiped.right, wiped.bottom)
-            canvas.drawBitmap(wiped.bitmap, null, layerDst, layerPaint)
-            drewWipedLayer = true
-            return
-        }
-        if (layer != null && inkLayer.syncContent(strokes, excluded, renderer, ::pathFor)) {
-            layerDst.set(layer.left, layer.top, layer.right, layer.bottom)
-            canvas.drawBitmap(layer.bitmap, null, layerDst, layerPaint)
-            val v = visiblePageRect()
-            val coversView = layer.covers(v[0], v[1], v[2], v[3])
-            if (!coversView) requestLayer()
-            else if (kotlin.math.abs(layer.scale - scale) > scale * 0.01f) {
-                // Zooming: show the scaled layer now, re-render sharp once the pinch pauses.
-                removeCallbacks(rebuildAfterZoom)
-                postDelayed(rebuildAfterZoom, 150)
+    /**
+     * Strokes deliberately hidden from the tiles (being erased or moved). The same set
+     * instance is returned while its contents don't change, so tiles can compare cheaply.
+     */
+    private fun excludedFromLayer(moving: Boolean): Set<String> {
+        val e = when {
+            erasedPending.isEmpty() && partialPieces.isEmpty() && !moving -> emptySet()
+            else -> buildSet {
+                addAll(erasedPending); addAll(partialPieces.keys)
+                if (moving) addAll(selection)
             }
-            return
         }
-        requestLayer()
-        // Dense page: never compute thousands of outlines on the UI thread. Show the previous
-        // layer (or just the paper on first open) until the background rebuild lands.
-        if (strokes.size > DIRECT_DRAW_LIMIT) {
-            if (layer != null) {
-                layerDst.set(layer.left, layer.top, layer.right, layer.bottom)
-                canvas.drawBitmap(layer.bitmap, null, layerDst, layerPaint)
-                drewWipedLayer = layer.dirty
+        if (e == lastExcluded) return lastExcluded
+        lastExcluded = e
+        return e
+    }
+
+    // ---- debug-only scripted zoom/pan benchmark (scripts/perf_zoom.py) ----
+    private var perfScript: PerfScript? = null
+
+    private inner class PerfScript : android.view.Choreographer.FrameCallback {
+        // Phases: zoom in to 3× fit width, hold, pan down, zoom back out, hold. Times in ms.
+        private val phases = listOf("zoom_in" to 1200L, "hold" to 1500L, "pan" to 1500L, "zoom_out" to 1200L, "settle" to 2500L)
+        private var phase = 0
+        private var phaseStart = 0L
+        private var lastFrame = 0L
+        private val intervals = ArrayList<Float>()
+        private var sharpAt = -1L
+        private var zoomEnd = 0L
+        val drawMs = ArrayList<Float>()
+
+        fun start() {
+            viewport.fitWidth(); syncMatrices(); requestRender()
+            android.view.Choreographer.getInstance().postFrameCallback(this)
+        }
+
+        override fun doFrame(now: Long) {
+            val t = now / 1_000_000
+            if (phaseStart == 0L) phaseStart = t
+            if (lastFrame != 0L && phase < 4) intervals += (now - lastFrame) / 1e6f
+            lastFrame = now
+            val (name, len) = phases[phase]
+            val f = ((t - phaseStart).toFloat() / len).coerceIn(0f, 1f)
+            val cx = width / 2f; val cy = height / 3f
+            when (name) {
+                "zoom_in", "zoom_out" -> {
+                    val from = if (name == "zoom_in") 1f else 3f; val to = if (name == "zoom_in") 3f else 1f
+                    val target = viewport.fitWidthScale * (from + (to - from) * f)
+                    viewport.zoomBy(target / viewport.scale, cx, cy)
+                }
+                "pan" -> viewport.panBy(0f, -height * 1.2f * (1f / 90f))
+                "hold" -> if (sharpAt < 0 && isSharp()) sharpAt = t
             }
-            return
+            syncMatrices(); requestRender()
+            if (name == "zoom_in" && f >= 1f) zoomEnd = t
+            if (f >= 1f) { phase++; phaseStart = t }
+            if (phase < phases.size) android.view.Choreographer.getInstance().postFrameCallback(this)
+            else finish()
         }
-        for (s in strokes) {
-            if (s.id in excluded) continue
-            drawStroke(canvas, s.color, s.tool, pathFor(s))
+
+        private fun finish() {
+            perfScript = null
+            fun pct(v: List<Float>, q: Float) = v.sorted().let { if (it.isEmpty()) -1f else it[((it.size - 1) * q).toInt()] }
+            val tileMs = synchronized(tiles.renderMs) { ArrayList(tiles.renderMs).also { tiles.renderMs.clear() } }
+            Log.d("FolioPerf", "tiles rendered=%d p50=%.1f p95=%.1f max=%.1f".format(tileMs.size, pct(tileMs, .5f), pct(tileMs, .95f), tileMs.maxOrNull() ?: -1f))
+            Log.d(
+                "FolioPerf",
+                "zoomscript skip=$perfSkip strokes=%d frames=%d interval_p50=%.1f interval_p95=%.1f interval_max=%.1f slow_frames=%d draw_p95=%.1f draw_max=%.1f sharp_after_zoom_ms=%d".format(
+                    strokes.size, intervals.size, pct(intervals, .5f), pct(intervals, .95f), intervals.maxOrNull() ?: -1f,
+                    intervals.count { it > 25f }, pct(drawMs, .95f), drawMs.maxOrNull() ?: -1f, if (sharpAt < 0) -1 else sharpAt - zoomEnd,
+                ),
+            )
+            perfSkip = null
         }
+    }
+
+    /** True when everything on screen is rendered sharp at the current zoom. */
+    private fun isSharp(): Boolean = tiles.lastDrawSharp
+
+    /** Debug only: a layer to leave out while benchmarking ("ink", "paper", "desk"), to find what costs GPU time. */
+    private var perfSkip: String? = null
+
+    /** Debug builds only: runs the scripted zoom/pan benchmark on the open page. */
+    fun runPerfScript(skip: String? = null) {
+        if (!debugInput || perfScript != null) return
+        perfSkip = skip
+        perfScript = PerfScript().also { it.start() }
     }
 
     override fun onDetachedFromWindow() {
-        removeCallbacks(rebuildAfterZoom)
-        inkLayer.release()
+        tiles.release()
         if (attached?.get() === this) attached = null
         super.onDetachedFromWindow()
     }
@@ -889,6 +1020,9 @@ class InkCanvasView(context: Context) : View(context) {
 
 
     companion object {
+        /** Computes partial-eraser pieces at pen-up, one wipe at a time, in order. */
+        private val wipeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "folio-erase") }
+
         /** The canvas currently on screen, for window-level routing of side-button gestures. */
         var attached: java.lang.ref.WeakReference<InkCanvasView>? = null
             private set
@@ -899,8 +1033,6 @@ class InkCanvasView(context: Context) : View(context) {
 
         private const val TAG = "FolioInput"
         private const val NO_PRESSURE_EFFORT = 0.6f
-        /** Above this many strokes, never vector-draw the whole page on the UI thread. */
-        private const val DIRECT_DRAW_LIMIT = 800
         // Samsung-specific MotionEvent actions sent while the S Pen side button is held.
         private const val SPEN_ACTION_DOWN = 211
         private const val SPEN_ACTION_UP = 212

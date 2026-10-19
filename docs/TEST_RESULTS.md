@@ -1,6 +1,6 @@
-# Test Results (2026-10-18)
+# Test Results (2026-10-19)
 
-## Unit tests: `./gradlew test`. 90 tests (step 3: + partial eraser ×6; earlier counts below), 0 failures (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
+## Unit tests: `./gradlew test`. 115 tests, 0 failures (+ tile zoom levels ×2, stroke index vs brute force ×2, bulk edit undo order ×1, whole-path erase ×2). Step 4 added 18 (interop ×12, codec ×4, import storage ×2): GoodNotes/Samsung importers (`core:interop`: binary helpers ×4, GoodNotes ×6, real `.goodnotes` and `.sdocx` files ×2; the real-file tests skip when the user's files aren't present), schema 2 packed strokes, schema 1 still loads, damaged packed data → corrupt, and a dense 7,500-stroke page decoding inside a 256 MB heap. Earlier: 90 tests (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
 | Module | Suites | Tests | Covers |
 |---|---|---|---|
 | core:model | CodecTest, PageEditorTest | 10 | Every stroke channel round-trips; Unicode; newer schema rejected; malformed, truncated, empty and inconsistent input → `CorruptDocumentException`; unknown fields tolerated; add/erase/undo/redo with z-order; redo cleared by a new edit; replace; snapshot isolation; bounded history |
@@ -8,7 +8,7 @@
 | core:storage | NotebookStoreTest | 10 | Reopen after "restart"; corrupt page → `.bak` recovery; corrupt with no backup → error, not silent loss; leftover `.tmp` after a crash ignored; nested folders and safe folder delete; unknown parent rejected; page insert position; delete removes files; path-traversal ids rejected; blank names |
 | app | InputPolicyTest | 6 | Finger draws until a stylus is seen, then navigates; barrel button / eraser end / eraser tool erase; large contact = palm; finger within 400 ms of pen = palm; multi-touch navigates; pen-only can be switched off |
 
-## End-to-end: `scripts/e2e_milestone.py`. 18 checks (milestone 6 + lasso 5 + PDF 3 + library 2 + eraser 2); latest run 18/18 on the Galaxy Tab S6 Lite
+## End-to-end: `scripts/e2e_milestone.py`. 18 checks (milestone 6 + lasso 5 + PDF 3 + library 2 + eraser 2); latest run 18/18 on the emulator after the tiled renderer (2026-10-19), and 18/18 on the Galaxy Tab S6 Lite before it. Not re-run on the Tab, because it clears app data and the Tab holds the user's imported notes
 
 Performance results are in `docs/PERFORMANCE.md` (`scripts/perf_tab.py`).
 - **Device**: Android emulator `sdk_gphone64_arm64`, API 35, 1080×2400 (a phone form factor, not a tablet).
@@ -51,6 +51,12 @@ Each step also fails the run if an error dialog is on screen.
 | 24 | user + benchmark | Partial erase lagged behind the pen (15–26 ms p95, up to 64% jank) | Pixel wipe on the cache, exact pieces at pen-up, wiped cache adopted; now about 5 ms |
 | 25 | Tab E2E | "Erase highlighter only": tapping the label didn't toggle it | The whole row toggles |
 | 20 | build | After moving to Desktop, builds ran stale copied outputs and iCloud created conflict copies (`Lasso 2.kt`); builds took 10 min | Project moved to `~/Developer/Folio` (not synced); clean rebuild; committed code re-verified (62/62) |
+| 26 | Tab | Opening an imported 7,106-stroke Samsung page crashed the app (OutOfMemoryError: the codec built a JSON tree of the 28 MB page just to read `schemaVersion`) | Key scan instead of a tree; regression test in a 256 MB heap, confirmed to fail with the old approach |
+| 27 | Tab perf log | That page then took 17.3 s to open (parsing about 7 million numbers) | Schema 2 packed points: 4.4 s, file 20% smaller |
+| 28 | user + perf_zoom | Zooming a dense page lagged (36–57% janky frames) and blurred for 2+ s | Page on its own SurfaceView; tiled renderer (ADR-8): 0–0.2% janky, sharp within one frame |
+| 29 | Tab screenshot | After the SurfaceView change the page was black (my `invalidate()` override swallowed SurfaceView's hole-punch invalidation) | Explicit `requestRender()`; `invalidate()` left alone |
+| 30 | build | Gradle cache files were deleted outside the project; builds failed with missing transforms, then damaged outputs restored from the build cache | Cleared `~/.gradle/caches/9.3.1/transforms` and `build-cache-1` (regenerable) |
+| 31 | user + perf_erase | The eraser lagged on a dense page (5–29 frames per rub, latency up to 260 ms) | Stroke grid index, id-based tile diffs, one-pass piece cutting in the background, O(n) split/undo (see PERFORMANCE.md) |
 | 12 | user | Wanted to zoom out further, page always centred | Zoom out to half of whole-page, centred on both axes in both orientations; Auto page size shaped like the screen. **Awaiting confirmation** |
 
 ## Physical device: Galaxy Tab S6 Lite (SM-P615, Android 13, One UI 5.1.1)

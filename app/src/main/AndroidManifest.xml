@@ -30,6 +30,17 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/pdf" />
             </intent-filter>
+            <!-- GoodNotes (.goodnotes) files have no registered type; file managers send them as zip
+                 or octet-stream. One UI labels Samsung Notes (.sdocx) files application/sdoc
+                 (seen in MediaStore on a Tab S6 Lite). The import sniffs the content either way. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="application/sdoc" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>

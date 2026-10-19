@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Folio"
 
-include(":core:model", ":core:ink", ":core:storage", ":app")
+include(":core:model", ":core:ink", ":core:storage", ":core:interop", ":app")

@@ -66,3 +66,32 @@ class PartialEraserTest {
         assertEquals(listOf(a), ed.currentStrokes)
     }
 }
+
+class ErasePathTest {
+    private fun line() = Stroke(
+        "L", ToolType.FOUNTAIN, 0xFF000000, 2f, FloatArray(101) { it * 10f }, FloatArray(101) { 100f },
+        FloatArray(101) { 0.5f }, FloatArray(101), FloatArray(101), IntArray(101) { it },
+    )
+
+    @Test fun wholePathCutsLikeSegmentByOneSegment() {
+        // Two vertical rubs across a horizontal line, joined by a pass far below it.
+        val path = floatArrayOf(300f, 50f, 300f, 150f, 300f, 400f, 700f, 400f, 700f, 150f, 700f, 50f)
+        val pieces = PartialEraser.erasePath(line(), path, 10f)!!
+        assertEquals(3, pieces.size)
+        // Sequential single-segment application gives the same cut points.
+        var seq = listOf(line())
+        for (k in 0 until path.size / 2 - 1) {
+            seq = seq.flatMap { PartialEraser.erase(it, path[2 * k], path[2 * k + 1], path[2 * k + 2], path[2 * k + 3], 10f) ?: listOf(it) }
+        }
+        assertEquals(seq.size, pieces.size)
+        for ((a, b) in seq.zip(pieces)) {
+            assertEquals(a.x.first(), b.x.first(), 0.6f); assertEquals(a.x.last(), b.x.last(), 0.6f)
+        }
+    }
+
+    @Test fun untouchedAndDab() {
+        assertNull(PartialEraser.erasePath(line(), floatArrayOf(0f, 500f, 1000f, 500f), 10f))
+        val dab = PartialEraser.erasePath(line(), floatArrayOf(500f, 100f), 10f)!!
+        assertEquals(2, dab.size)
+    }
+}

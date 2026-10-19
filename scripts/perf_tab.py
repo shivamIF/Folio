@@ -118,7 +118,7 @@ def main():
         pan, pan_gfx = perf_lines(d, "pan"), gfx(d)
 
         # Erase: partial eraser rubbed across existing writing.
-        d.tap("Eraser"); d.tap("Partial eraser")
+        d.eraser_menu(); d.tap("Partial eraser")
         d.sh("shell", "logcat", "-c"); d.sh("shell", "dumpsys", "gfxinfo", PKG, "reset")
         for k in range(8):
             xx = x1 + int(w * (0.2 + 0.08 * k))

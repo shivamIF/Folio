@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 import java.util.UUID
 
 /** Current on-disk schema version of every persisted model object. Bump together with a migration. */
-const val SCHEMA_VERSION = 1
+const val SCHEMA_VERSION = 2
 
 fun newId(): String = UUID.randomUUID().toString()
 
@@ -115,8 +115,10 @@ enum class ToolType {
  * [tilt] is radians from perpendicular (0 = upright) and [orientation] is the
  * radians azimuth reported by Android; both are 0 when the device doesn't report them.
  * [t] is milliseconds since [startedAt], which allows stroke replay.
+ *
+ * Stored packed (schema 2); see [StrokeSerializer].
  */
-@Serializable
+@Serializable(with = StrokeSerializer::class)
 class Stroke(
     val id: String = newId(),
     val tool: ToolType,
@@ -141,8 +143,15 @@ class Stroke(
     val size: Int get() = x.size
 
     /** Strokes are immutable once built, so the bounds are computed once (not serialised). */
-    @kotlinx.serialization.Transient
     private var boundsCache: Rect? = null
+
+    /**
+     * Owned by the platform renderer (e.g. the Android outline Path), computed once per
+     * stroke and shared by its render threads. Never serialised or read by core code.
+     */
+    @Volatile
+    @JvmField
+    var renderCache: Any? = null
 
     fun bounds(): Rect = boundsCache ?: computeBounds().also { boundsCache = it }
 

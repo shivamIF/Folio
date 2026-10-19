@@ -27,7 +27,10 @@
 - **Known gap**: unknown fields are not round-tripped yet (see KNOWN_LIMITATIONS).
 
 ### ADR-4: Native format = JSON per page, atomic writes
-- **Why JSON**: human-inspectable, easy to migrate, adequate size for v1 (about 30 bytes per point). A compact binary page codec can be added behind `DocumentCodec` once profiling shows the need.
+- **Why JSON**: human-inspectable and easy to migrate.
+- **Schema 2 (2026-10-19): packed points.** Each stroke's point channels are one base64 string (`pts`: little-endian float32 x, y, pressure, tilt, orientation, then int32 t; 24 bytes per point). Lossless. Measured on the Tab with an imported 7,106-stroke page: schema 1 took 17.3 s to open, schema 2 takes 4.4 s, and the file is 20% smaller. Schema 1 files still load and are rewritten as schema 2 on their next save. See `StrokeSerializer`.
+- **No JSON tree on read.** `schemaVersion` is found by a key scan. Building a `JsonElement` tree of a 28 MB page ran out of the 256 MB heap and crashed the app; `core:model` tests now run with a 256 MB heap to catch that.
+- **Still open**: a fully binary page file (and progressive drawing) would cut the remaining 4.4 s for very dense pages.
 - **Writes** (`AtomicFile`): write a temp file, fsync it, copy the previous file to `.bak`, then do an atomic rename.
 - **Reads**: fall back to `.bak` when the main file is corrupt. If no backup exists, raise an error rather than silently showing an empty page.
 - **Ids are validated** (`[A-Za-z0-9-]{1,64}`) before they're used as file names, which prevents path traversal.
@@ -38,6 +41,16 @@
 - Edits mutate state on the main thread. Saving takes an immutable snapshot and writes it on one ordered writer thread (`Dispatchers.IO.limitedParallelism(1)`).
 - Autosave is debounced by 800 ms, and is flushed at once on `ON_STOP`, back navigation and `onCleared`.
 - The same edit objects are the planned unit for the sync operation log (ADR-7).
+
+### ADR-8: Page rendering = own surface + tiles (2026-10-19)
+- **The page draws on a `SurfaceView`, not in the window.** The display hardware composites it under the toolbar, so page frames (pen, pinch, pan) never redraw the Compose UI.
+- **Ink is cached in opaque 512 px tiles** (paper + PDF + ink, so one paint per pixel) at zoom levels 2^(k/2). A level is never more than 11% coarser than the screen.
+  - Workers render only the strokes intersecting a tile.
+  - The UI thread only blits tiles, paints appended strokes onto them, and patches edited areas (re-rendering in the background above 300 strokes per area).
+  - The whole-page level stays cached as the fallback.
+- **The partial eraser wipes the visible tiles directly** (paper repainted along the path). The exact pieces then patch the same area.
+- **Stroke outline Paths are cached on the stroke** (`Stroke.renderCache`, opaque to core) and shared read-only by the render threads; bounds are computed before sharing.
+- Measurements are in `docs/PERFORMANCE.md`.
 
 ### ADR-6: Input pipeline and S Pen strategy
 ```
