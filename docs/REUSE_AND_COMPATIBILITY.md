@@ -8,6 +8,7 @@
 |---|---|---|
 | AndroidX (Compose, Activity, Lifecycle, input-motionprediction) | Apache-2.0 | UI, lifecycle, stroke prediction |
 | kotlinx.serialization, kotlinx.coroutines | Apache-2.0 | JSON codec, async I/O |
+| Material Symbols (Rounded): `res/drawable/ms_*.xml` (ink_pen, stylus, brush, edit, ink_highlighter, ink_eraser) | Apache-2.0 | Writing-tool icons |
 | JUnit 4 / kotlin-test | EPL-1.0 / Apache-2.0 | Tests only (not shipped) |
 
 ## Format compatibility matrix

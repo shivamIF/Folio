@@ -17,6 +17,8 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Library | Subject collections, multi-select, drag-and-drop, trash/recovery | ⏳ | |
 | Editor | Fountain, ballpoint, pencil, brush, highlighter | 🟡 | Profiles unit-tested; on-device look only on the emulator |
 | Editor | Colour palette, per-tool width, stabilisation slider | 🟡 | Persisted in prefs; not E2E tested |
+| Editor | Writing-tool slots (Pen / Pencil / Highlighter / Eraser) with Material Symbols icons; the active tool's icon takes the ink colour | 🟡 | `ToolStateTest` ×5; checked by eye on the emulator |
+| Editor | Tool dropdown (tap the active tool, or long-press any tool): pen style, live stroke preview, fine/medium/bold + slider, 30-swatch palette + recent colours, pressure, stabilisation | 🟡 | `ToolStateTest`; screenshots on the emulator; not E2E-scripted |
 | Editor | Pressure-sensitive width, calibrated to real S Pen data, with a sensitivity slider | 🟡 | Unit-tested; measured on the user's recorded strokes; awaiting their feel test |
 | Editor | Tilt-sensitive pencil/brush (shading beyond natural writing angle) | 🟡 | Unit-tested against measured tilt range |
 | Editor | Stroke eraser (tool) | ✅ | E2E step 4 |

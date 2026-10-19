@@ -2,9 +2,6 @@ package app.folio.notes.editor
 
 import android.app.Application
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,25 +9,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.NavigateBefore
 import androidx.compose.material.icons.automirrored.filled.NavigateNext
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
-import androidx.compose.material.icons.filled.Brush
-import androidx.compose.material.icons.filled.Create
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.outlined.AutoFixNormal
-import androidx.compose.material.icons.outlined.Draw
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,12 +29,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,15 +42,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -72,7 +57,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.folio.core.ink.PressureCurve
 import app.folio.core.model.Stroke
-import app.folio.core.model.ToolType
+import app.folio.notes.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -154,77 +139,33 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
     }
 }
 
-private data class ToolButton(val tool: ToolType, val label: String, val icon: ImageVector)
-
-private val TOOL_BUTTONS = listOf(
-    ToolButton(ToolType.FOUNTAIN, "Fountain pen", Icons.Default.Create),
-    ToolButton(ToolType.BALLPOINT, "Ballpoint pen", Icons.Default.Edit),
-    ToolButton(ToolType.PENCIL, "Pencil", Icons.Outlined.Draw),
-    ToolButton(ToolType.BRUSH, "Brush pen", Icons.Default.Brush),
-    ToolButton(ToolType.HIGHLIGHTER, "Highlighter", Icons.Default.Highlight),
-)
-
 @Composable
 private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit) {
     var settings by remember { mutableStateOf(false) }
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
         Row(
-            Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
+            Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            TOOL_BUTTONS.forEach { b ->
-                val on = !tools.eraser && tools.tool == b.tool
-                IconToggleButton(on, onCheckedChange = { update { it.copy(tool = b.tool, eraser = false) } },
-                    modifier = Modifier.testTag("tool-${b.tool.name}").semantics { selected = on }) {
-                    Icon(b.icon, contentDescription = b.label, tint = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
+            ToolSlot.entries.forEach { ToolSlotButton(it, tools, update) }
             IconToggleButton(tools.eraser, onCheckedChange = { e -> update { it.copy(eraser = e) } }, modifier = Modifier.testTag("tool-eraser")) {
-                Icon(Icons.Outlined.AutoFixNormal, contentDescription = "Stroke eraser", tint = if (tools.eraser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(painterResource(R.drawable.ms_ink_eraser), contentDescription = "Stroke eraser",
+                    tint = if (tools.eraser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Box(Modifier.width(12.dp))
-            ToolState.PALETTE.forEach { c ->
-                val sel = c == tools.color
-                Box(
-                    Modifier.padding(3.dp).size(28.dp).clip(CircleShape).background(Color(c))
-                        .border(if (sel) 3.dp else 1.dp, if (sel) MaterialTheme.colorScheme.primary else Color(0x33000000), CircleShape)
-                        .clickable { update { it.copy(color = c, eraser = false) } }
-                        .semantics { contentDescription = "Ink colour ${"%06X".format(c and 0xFFFFFF)}"; selected = sel },
-                )
-            }
-            Box(Modifier.width(12.dp))
-            Text("Size", style = MaterialTheme.typography.labelMedium)
-            Slider(
-                value = tools.width, onValueChange = { w -> update { it.copy(widths = it.widths + (it.tool to w)) } },
-                valueRange = if (tools.tool == ToolType.HIGHLIGHTER) 6f..40f else 0.8f..16f,
-                modifier = Modifier.width(160.dp).semantics { contentDescription = "Pen size" },
-            )
+            VerticalDivider(Modifier.height(28.dp).padding(horizontal = 6.dp))
+            ToolState.PALETTE.forEach { c -> Swatch(c, c == tools.color, 34.dp) { update { it.withColor(c) } } }
+            VerticalDivider(Modifier.height(28.dp).padding(horizontal = 6.dp))
+            SizePresets(tools.tool, tools, update)
             Box {
                 IconButton(onClick = { settings = true }) { Icon(Icons.Default.Tune, contentDescription = "Pen settings") }
                 DropdownMenu(settings, onDismissRequest = { settings = false }) {
                     Column(Modifier.padding(16.dp).width(260.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Stabilisation: ${(tools.stabilization * 100).toInt()}%", style = MaterialTheme.typography.labelLarge)
-                        Slider(tools.stabilization, { s -> update { it.copy(stabilization = s) } }, valueRange = 0f..1f,
-                            modifier = Modifier.semantics { contentDescription = "Stroke stabilisation" })
-                        Text("Pen pressure", style = MaterialTheme.typography.labelLarge)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Light hand", style = MaterialTheme.typography.bodySmall)
-                            Slider(
-                                tools.pressureSensitivity, { v -> update { it.copy(pressureSensitivity = v) } }, valueRange = 0f..1f,
-                                modifier = Modifier.weight(1f).semantics { contentDescription = "Pen pressure sensitivity" },
-                            )
-                            Text("Firm hand", style = MaterialTheme.typography.bodySmall)
-                        }
-                        Text(
-                            "Light hand: thick lines with a gentle touch. Applies to new strokes.",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Only the pen writes (fingers scroll and zoom)", modifier = Modifier.weight(1f))
                             Switch(tools.penOnly, { p -> update { it.copy(penOnly = p) } })
                         }
                         Text(
-                            "Hold the S Pen button while writing to erase.",
+                            "Hold the S Pen button while writing to erase. Tap the selected pen again for its style, size and colour.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -233,4 +174,3 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
         }
     }
 }
-

@@ -1,11 +1,12 @@
 # Test Results (2026-10-18)
 
-## Unit tests: `./gradlew test`. 62 tests, 0 failures (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
+## Unit tests: `./gradlew test`. 67 tests, 0 failures (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
 | Module | Suites | Tests | Covers |
 |---|---|---|---|
 | core:model | CodecTest, PageEditorTest | 10 | Every stroke channel round-trips; Unicode; newer schema rejected; malformed, truncated, empty and inconsistent input → `CorruptDocumentException`; unknown fields tolerated; add/erase/undo/redo with z-order; redo cleared by a new edit; replace; snapshot isolation; bounded history |
 | core:ink | PenProfileTest, StrokeBuilderTest, StrokeGeometryTest | 14 | Pressure→width; highlighter ignores pressure; tilt widens pencil; clamping; stabilisation reduces jitter; stroke ends at the pen-up point; monotonic time; duplicate merging; buffer growth; outline width and caps; dot; empty; eraser hit/miss; fast eraser swipe doesn't skip strokes |
 | core:storage | NotebookStoreTest | 10 | Reopen after "restart"; corrupt page → `.bak` recovery; corrupt with no backup → error, not silent loss; leftover `.tmp` after a crash ignored; nested folders and safe folder delete; unknown parent rejected; page insert position; delete removes files; path-traversal ids rejected; blank names |
+| app | ToolStateTest | 5 | Pen slot remembers the last pen across pencil/highlighter; selecting a tool turns the eraser off; recent colours are most-recent-first, de-duplicated and capped at 6; every tool has 3 size presets inside its range, including its default |
 | app | InputPolicyTest | 6 | Finger draws until a stylus is seen, then navigates; barrel button / eraser end / eraser tool erase; large contact = palm; finger within 400 ms of pen = palm; multi-touch navigates; pen-only can be switched off |
 
 ## End-to-end: `scripts/e2e_milestone.py`. 6/6 checks, 4 consecutive green runs
