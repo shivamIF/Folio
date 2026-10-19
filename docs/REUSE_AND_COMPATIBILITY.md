@@ -8,7 +8,7 @@
 |---|---|---|
 | AndroidX (Compose, Activity, Lifecycle, input-motionprediction) | Apache-2.0 | UI, lifecycle, stroke prediction |
 | kotlinx.serialization, kotlinx.coroutines | Apache-2.0 | JSON codec, async I/O |
-| Material Symbols (Rounded): `res/drawable/ms_*.xml` (ink_pen, stylus, brush, edit, ink_highlighter, ink_eraser) | Apache-2.0 | Writing-tool icons |
+| Material Symbols (Rounded): `res/drawable/ms_*.xml` (ink_pen, stylus, stylus_pen, brush, ink_marker, airwave, edit, ink_highlighter, ink_eraser) | Apache-2.0 | Writing-tool icons |
 | JUnit 4 / kotlin-test | EPL-1.0 / Apache-2.0 | Tests only (not shipped) |
 
 ## Format compatibility matrix
@@ -16,8 +16,8 @@
 | Format | Recognise | Open | Edit | Save/Export | Round-trip verified | Status |
 |---|---|---|---|---|---|---|
 | Folio native (JSON pages + library index, schema v1) | ✅ | ✅ | ✅ | ✅ | ✅ unit tests (`CodecTest`, `NotebookStoreTest`) | **Implemented** |
-| PDF import/annotate/export | – | – | – | – | – | Planned (Phase 5) |
-| `.goodnotes` (ZIP + protobuf) | – | – | – | – | – | Planned: read-only import of attachments and strokes, once the schema is decoded |
-| `.sdocx` (ZIP + custom binary pages) | – | – | – | – | – | Planned: read-only import. Blocked on sample files; locked (encrypted) notes will not be supported |
+| PDF import, annotate, export | ✅ | ✅ (as page backgrounds) | ✅ ink on top | ✅ export to PDF | ✅ 3-page fixture: page count and 612×792 pt size preserved (Tab E2E) | **Implemented**; backgrounds rasterised in export |
+| `.goodnotes` (ZIP + protobuf) | – | – | – | – | – | Import ✅: strokes (tpl curves and vector shapes), highlighters, PDF backgrounds. Text boxes and images skipped. See docs/formats/GOODNOTES.md |
+| `.sdocx` (ZIP + custom binary pages) | – | – | – | – | – | Import 🟡: strokes, colours, highlighters, pressure. Not yet: PDF backgrounds, text, images, shapes. Locked (encrypted) notes are refused, by design. See docs/formats/SDOCX.md |
 
 No external-format compatibility is claimed yet.

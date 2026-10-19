@@ -21,11 +21,63 @@ interface DocumentRepository {
         pageWidth: Float = NotebookMeta.PAGE_WIDTH, pageHeight: Float = NotebookMeta.PAGE_HEIGHT,
     ): NotebookMeta
     fun updateNotebook(meta: NotebookMeta)
+    /** Permanently deletes a notebook and its files. Prefer [trashNotebook] for user-facing deletes. */
     fun deleteNotebook(id: String)
+    /** Moves a notebook to Trash; it disappears from the library but keeps all its files. */
+    fun trashNotebook(id: String)
+    /** Brings a notebook back from Trash (to the root if its folder no longer exists). */
+    fun restoreNotebook(id: String)
+    /** Permanently deletes trashed notebooks deleted before [cutoff] (epoch ms). Returns how many. */
+    fun purgeTrash(cutoff: Long): Int
     fun addPage(notebookId: String, afterIndex: Int): NotebookMeta
+
+    /**
+     * Copies an incoming file into a private staging area, enforcing [maxBytes]
+     * and checking for a PDF header. Nothing is visible in the library yet.
+     */
+    fun stagePdf(source: java.io.InputStream, maxBytes: Long = MAX_PDF_BYTES): StagedFile
+
+    /** Copies a picture (PNG, JPEG, WebP, GIF or HEIF, checked by content) into staging. */
+    fun stageImage(source: java.io.InputStream, maxBytes: Long = MAX_IMAGE_BYTES): StagedFile
+
+    /** Moves a staged picture into an existing notebook's attachments; returns its attachment id. */
+    fun addImage(notebookId: String, staged: StagedFile): String
+
+    /** Discards a staged file that failed validation. */
+    fun discardStaged(staged: StagedFile)
+
+    /** Creates a notebook whose pages are backed by the staged PDF, moving the file into the notebook. */
+    fun createNotebookFromPdf(title: String, folderId: String?, cover: Cover, staged: StagedFile, pages: List<Page>): NotebookMeta
+
+    /** Creates a notebook from an imported document whose pages may reference several staged PDFs. */
+    fun createNotebookFromImport(title: String, folderId: String?, cover: Cover, staged: List<StagedFile>, pages: List<Page>, fromPdf: Boolean = false): NotebookMeta
+
+    /** The on-disk file of a notebook's PDF attachment. */
+    fun attachmentFile(notebookId: String, attachmentId: String): File
+
+    /** The on-disk file of a notebook's picture attachment. */
+    fun imageFile(notebookId: String, attachmentId: String): File
     fun loadPage(notebookId: String, pageId: String): Page
     fun savePage(notebookId: String, page: Page)
 }
+
+/** PNG, JPEG, WebP, GIF or HEIF/AVIF, by magic bytes. */
+internal fun isImage(h: ByteArray): Boolean {
+    fun at(i: Int, vararg b: Int) = h.size >= i + b.size && b.indices.all { (h[i + it].toInt() and 0xFF) == b[it] }
+    return at(0, 0x89, 0x50, 0x4E, 0x47) || at(0, 0xFF, 0xD8, 0xFF) ||
+        (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) || at(0, 0x47, 0x49, 0x46, 0x38) ||
+        at(4, 0x66, 0x74, 0x79, 0x70) // ISO-BMFF "ftyp" (HEIC/HEIF/AVIF)
+}
+
+/** A file copied into staging, not yet part of any notebook. */
+class StagedFile internal constructor(val id: String, val file: File, val kind: AttachmentKind = AttachmentKind.PDF)
+
+enum class AttachmentKind(val ext: String) { PDF("pdf"), IMAGE("img") }
+
+class InvalidImportException(message: String) : Exception(message)
+
+const val MAX_PDF_BYTES = 300L * 1024 * 1024
+const val MAX_IMAGE_BYTES = 60L * 1024 * 1024
 
 /**
  * File-system repository. Layout under [root]:
@@ -37,16 +89,19 @@ interface DocumentRepository {
  * on one lock, which is fine at notebook scale and keeps the index consistent.
  */
 class FileNotebookStore(
-    private val root: File,
-    private val clock: () -> Long = System::currentTimeMillis,
+    internal val root: File,
+    internal val clock: () -> Long = System::currentTimeMillis,
 ) : DocumentRepository {
-    private val lock = Any()
+    internal val lock = Any()
     private val indexFile = AtomicFile(File(root, "library.json"))
     private var cached: LibraryIndex? = null
 
     /** Set when the index was recovered from backup or reset; the UI can tell the user. */
     @Volatile var lastRecovery: String? = null
         private set
+
+    /** Called after every change to the library (page saves included), e.g. to schedule a sync. Runs under the store's lock: keep it quick. */
+    @Volatile var onChange: (() -> Unit)? = null
 
     override fun library(): LibraryIndex = synchronized(lock) { loadIndex() }
 
@@ -103,6 +158,34 @@ class FileNotebookStore(
         saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == meta.id) meta.copy(modifiedAt = clock()) else it }))
     }
 
+    override fun trashNotebook(id: String) = synchronized(lock) {
+        val idx = loadIndex()
+        require(idx.notebooks.any { it.id == id }) { "notebook not found" }
+        saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == id) it.copy(deletedAt = clock()) else it }))
+    }
+
+    override fun restoreNotebook(id: String) = synchronized(lock) {
+        val idx = loadIndex()
+        val folders = idx.folders.mapTo(HashSet()) { it.id }
+        saveIndex(
+            idx.copy(
+                notebooks = idx.notebooks.map {
+                    if (it.id == id) it.copy(deletedAt = null, folderId = it.folderId?.takeIf { f -> f in folders }) else it
+                },
+            ),
+        )
+    }
+
+    override fun purgeTrash(cutoff: Long): Int = synchronized(lock) {
+        val idx = loadIndex()
+        val doomed = idx.notebooks.filter { (it.deletedAt ?: Long.MAX_VALUE) < cutoff }
+        if (doomed.isEmpty()) return@synchronized 0
+        // Drop them from the index first: a crash mid-way then leaves orphan files, never a broken entry.
+        saveIndex(idx.copy(notebooks = idx.notebooks - doomed.toSet()))
+        doomed.forEach { notebookDir(it.id).deleteRecursively() }
+        doomed.size
+    }
+
     override fun deleteNotebook(id: String) = synchronized(lock) {
         val idx = loadIndex()
         saveIndex(idx.copy(notebooks = idx.notebooks.filter { it.id != id }))
@@ -119,6 +202,108 @@ class FileNotebookStore(
         val updated = meta.copy(pageIds = ids, modifiedAt = clock())
         saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == notebookId) updated else it }))
         updated
+    }
+
+    override fun stagePdf(source: java.io.InputStream, maxBytes: Long): StagedFile =
+        stage(source, maxBytes, AttachmentKind.PDF) { head ->
+            // The PDF spec allows the header anywhere in the first 1024 bytes.
+            if (!head.decodeToString().contains("%PDF-")) throw InvalidImportException("Not a PDF file")
+        }
+
+    override fun stageImage(source: java.io.InputStream, maxBytes: Long): StagedFile =
+        stage(source, maxBytes, AttachmentKind.IMAGE) { head ->
+            if (!isImage(head)) throw InvalidImportException("Not a supported picture (PNG, JPEG, WebP, GIF or HEIF)")
+        }
+
+    private fun stage(source: java.io.InputStream, maxBytes: Long, kind: AttachmentKind, check: (ByteArray) -> Unit): StagedFile {
+        val id = app.folio.core.model.newId()
+        val dir = File(root, "staging").apply { mkdirs() }
+        val out = File(dir, "$id.${kind.ext}")
+        try {
+            var total = 0L
+            val head = java.io.ByteArrayOutputStream()
+            java.io.FileOutputStream(out).use { o ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val n = source.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > maxBytes) throw InvalidImportException("File is larger than ${maxBytes / (1024 * 1024)} MB")
+                    if (head.size() < 1024) head.write(buf, 0, minOf(n, 1024 - head.size()))
+                    o.write(buf, 0, n)
+                }
+                o.fd.sync()
+            }
+            if (total == 0L) throw InvalidImportException("File is empty")
+            check(head.toByteArray())
+            return StagedFile(id, out, kind)
+        } catch (e: Exception) {
+            out.delete()
+            throw e
+        }
+    }
+
+    override fun addImage(notebookId: String, staged: StagedFile): String = synchronized(lock) {
+        require(staged.kind == AttachmentKind.IMAGE) { "not a staged picture" }
+        require(loadIndex().notebooks.any { it.id == notebookId }) { "unknown notebook" }
+        moveInto(staged, imageFile(notebookId, staged.id))
+        staged.id
+    }
+
+    private fun moveInto(st: StagedFile, target: File) {
+        target.parentFile.mkdirs()
+        try {
+            java.nio.file.Files.move(st.file.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+            java.nio.file.Files.move(st.file.toPath(), target.toPath())
+        }
+    }
+
+    override fun discardStaged(staged: StagedFile) { staged.file.delete() }
+
+    override fun createNotebookFromPdf(title: String, folderId: String?, cover: Cover, staged: StagedFile, pages: List<Page>): NotebookMeta {
+        require(pages.all { it.pdf?.attachmentId == staged.id }) { "pages must reference the staged PDF" }
+        return createNotebookFromImport(title.trim().ifEmpty { "Imported PDF" }, folderId, cover, listOf(staged), pages, fromPdf = true)
+    }
+
+    override fun createNotebookFromImport(
+        title: String, folderId: String?, cover: Cover, staged: List<StagedFile>, pages: List<Page>, fromPdf: Boolean,
+    ): NotebookMeta = synchronized(lock) {
+        require(pages.isNotEmpty()) { "an imported notebook needs at least one page" }
+        val pdfIds = staged.filter { it.kind == AttachmentKind.PDF }.mapTo(HashSet()) { it.id }
+        val imageIds = staged.filter { it.kind == AttachmentKind.IMAGE }.mapTo(HashSet()) { it.id }
+        require(pages.all { p -> p.pdf.let { it == null || it.attachmentId in pdfIds } && p.images.all { it.attachmentId in imageIds } }) {
+            "pages may only reference staged attachments"
+        }
+        require(staged.all { it.file.exists() }) { "staged file is gone" }
+        val idx = loadIndex()
+        val now = clock()
+        val first = pages.first()
+        val meta = NotebookMeta(
+            title = title.trim().ifEmpty { "Imported notebook" }, folderId = folderId, cover = cover, paper = PaperTemplate.BLANK, fromPdf = fromPdf,
+            pageWidth = first.width, pageHeight = first.height, pageIds = pages.map { it.id }, createdAt = now,
+        )
+        try {
+            for (st in staged) {
+                moveInto(st, if (st.kind == AttachmentKind.PDF) attachmentFile(meta.id, st.id) else imageFile(meta.id, st.id))
+            }
+            pages.forEach { writePage(meta.id, it) }
+            saveIndex(idx.copy(notebooks = idx.notebooks + meta))
+        } catch (e: Exception) {
+            notebookDir(meta.id).deleteRecursively() // never leave a half-imported notebook behind
+            throw e
+        }
+        meta
+    }
+
+    override fun attachmentFile(notebookId: String, attachmentId: String): File {
+        require(SAFE_ID.matches(attachmentId)) { "invalid id" }
+        return File(File(notebookDir(notebookId), "attachments"), "$attachmentId.pdf")
+    }
+
+    override fun imageFile(notebookId: String, attachmentId: String): File {
+        require(SAFE_ID.matches(attachmentId)) { "invalid id" }
+        return File(File(notebookDir(notebookId), "attachments"), "$attachmentId.img")
     }
 
     /**
@@ -141,16 +326,17 @@ class FileNotebookStore(
         pageFile(notebookId, page.id).write(DocumentCodec.encodePage(page).toByteArray())
     }
 
-    private fun loadIndex(): LibraryIndex {
+    internal fun loadIndex(): LibraryIndex {
         cached?.let { return it }
         val idx = readWithFallback(indexFile, DocumentCodec::decodeLibrary) ?: LibraryIndex()
         cached = idx
         return idx
     }
 
-    private fun saveIndex(idx: LibraryIndex) {
+    internal fun saveIndex(idx: LibraryIndex) {
         indexFile.write(DocumentCodec.encodeLibrary(idx).toByteArray())
         cached = idx
+        onChange?.invoke()
     }
 
     private fun <T> readWithFallback(f: AtomicFile, decode: (String) -> T): T? {
@@ -168,17 +354,17 @@ class FileNotebookStore(
         return decode(bak.decodeToString())
     }
 
-    private fun notebookDir(id: String): File {
+    internal fun notebookDir(id: String): File {
         require(SAFE_ID.matches(id)) { "invalid id" }
         return File(File(root, "notebooks"), id)
     }
 
-    private fun pageFile(notebookId: String, pageId: String): AtomicFile {
+    internal fun pageFile(notebookId: String, pageId: String): AtomicFile {
         require(SAFE_ID.matches(pageId)) { "invalid id" }
         return AtomicFile(File(notebookDir(notebookId), "$pageId.page.json"))
     }
 
-    private companion object {
+    internal companion object {
         /** Ids become file names; restrict them so a crafted index can't escape [root]. */
         val SAFE_ID = Regex("[A-Za-z0-9-]{1,64}")
     }

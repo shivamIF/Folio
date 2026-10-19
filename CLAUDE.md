@@ -3,8 +3,11 @@
 ## Build & test
 - `./gradlew test`: JVM unit tests for all modules (core + app input policy)
 - `./gradlew :app:assembleDebug`: debug APK at `app/build/outputs/apk/debug/app-debug.apk`
-- `python3 -I scripts/e2e_milestone.py -s <serial>`: end-to-end milestone check on a device or emulator. It needs the debug APK installed, uses stylus-source input, and reads saved files through `run-as`.
+- `python3 -I scripts/e2e_milestone.py -s <serial>`: end-to-end checks (milestone, lasso, PDF) on a device or emulator. Don't touch the device while it runs. It needs the debug APK installed, uses stylus-source input, and reads saved files through `run-as`.
 - `local.properties` must have `sdk.dir=$HOME/Library/Android/sdk`. Gradle runs on JDK 21; bytecode targets 17.
+
+## Location
+- Lives in `~/Developer/Folio`. Do **not** move it into Desktop/Documents: iCloud sync there made builds 10–60× slower and created conflict copies (`X 2.kt`). After any folder move, delete `.gradle/` and `build/` before building.
 
 ## Layout and rules
 - `core/model`, `core/ink`, `core/storage` are **pure Kotlin/JVM**. Never add Android imports there; they're the portable layer for future macOS/web clients.

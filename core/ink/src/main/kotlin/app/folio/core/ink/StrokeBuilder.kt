@@ -11,8 +11,13 @@ import kotlin.math.hypot
  * speed-adaptive stabilisation (1€-filter style). Slow, careful movement is
  * smoothed more; fast movement is smoothed less, so lag stays small.
  *
+ * Speed is judged on screen ([pxPerUnit] = current zoom), so smoothing and point merging
+ * behave the same at every zoom. Before, at 5× zoom the same hand movement looked 5× slower
+ * in page units: the filter smoothed harder and the line's end stuck up to ~4 px behind.
+ *
  * @param stabilization 0 = raw input, 1 = strongest smoothing.
- * @param minDistance samples closer than this to the previous kept point are merged.
+ * @param minDistance samples closer than this (page units) to the previous kept point are merged.
+ * @param pxPerUnit screen pixels per page unit while drawing.
  */
 class StrokeBuilder(
     private val tool: ToolType,
@@ -21,6 +26,7 @@ class StrokeBuilder(
     stabilization: Float = 0.3f,
     private val minDistance: Float = 0.4f,
     private val startedAt: Long = 0,
+    private val pxPerUnit: Float = REFERENCE_PX_PER_UNIT,
 ) {
     private val strength = stabilization.coerceIn(0f, 1f)
     private var xs = FloatArray(64); private var ys = FloatArray(64); private var ps = FloatArray(64)
@@ -38,7 +44,8 @@ class StrokeBuilder(
             return
         }
         val dt = (timeMs - lastT).coerceAtLeast(1).toFloat()
-        val dist = hypot(x - fx, y - fy)
+        // Screen speed, expressed at the reference zoom the tuning was made at.
+        val dist = hypot(x - fx, y - fy) * pxPerUnit / REFERENCE_PX_PER_UNIT
         speed = 0.7f * speed + 0.3f * (dist / dt)
         // The cutoff rises with speed: alpha → 1 (no smoothing) when moving fast.
         val minCutoff = 1f + (1f - strength) * 30f
@@ -75,6 +82,14 @@ class StrokeBuilder(
         val n = xs.size * 2
         xs = xs.copyOf(n); ys = ys.copyOf(n); ps = ps.copyOf(n)
         tilts = tilts.copyOf(n); oris = oris.copyOf(n); ts = ts.copyOf(n)
+    }
+
+    companion object {
+        /** Screen pixels per page unit the filter was tuned at (fit width on a 10" tablet). */
+        const val REFERENCE_PX_PER_UNIT = 1.6f
+
+        /** Point merging threshold for a zoom: about 0.65 screen pixels. */
+        fun minDistanceAt(pxPerUnit: Float) = 0.4f * REFERENCE_PX_PER_UNIT / pxPerUnit.coerceAtLeast(0.05f)
     }
 
     fun build(): Stroke = Stroke(

@@ -3,6 +3,7 @@ package app.folio.core.storage
 import app.folio.core.model.CorruptDocumentException
 import app.folio.core.model.Cover
 import app.folio.core.model.Page
+import app.folio.core.model.PageImage
 import app.folio.core.model.PaperTemplate
 import app.folio.core.model.Stroke
 import app.folio.core.model.ToolType
@@ -130,5 +131,146 @@ class NotebookStoreTest {
 
     @Test fun absurdPageSizeIsRejected() {
         assertFailsWith<IllegalArgumentException> { FileNotebookStore(root).createNotebook("x", null, Cover(), PaperTemplate.BLANK, 0f, 1e9f) }
+    }
+
+    private fun pdfBytes(size: Int = 2000) = ("%PDF-1.4\n" + "x".repeat(size)).toByteArray()
+
+    @Test fun importedPdfNotebookKeepsBackgroundsAcrossRestart() {
+        val store = FileNotebookStore(root)
+        val staged = store.stagePdf(pdfBytes().inputStream())
+        val pages = (0 until 3).map { Page(width = 1000f, height = 1294f, paper = PaperTemplate.BLANK, pdf = app.folio.core.model.PdfBackground(staged.id, it)) }
+        val nb = store.createNotebookFromPdf("Lecture 1", null, Cover(), staged, pages)
+        val reopened = FileNotebookStore(root)
+        val meta = reopened.library().notebooks.single()
+        assertEquals(3, meta.pageIds.size)
+        assertEquals(2, reopened.loadPage(meta.id, meta.pageIds[2]).pdf!!.pageIndex)
+        assertTrue(reopened.attachmentFile(nb.id, staged.id).exists())
+        assertTrue(!staged.file.exists(), "staged copy moved, not duplicated")
+    }
+
+    @Test fun nonPdfIsRejectedAndLeavesNothingBehind() {
+        val store = FileNotebookStore(root)
+        assertFailsWith<InvalidImportException> { store.stagePdf("hello world".toByteArray().inputStream()) }
+        assertFailsWith<InvalidImportException> { store.stagePdf(ByteArray(0).inputStream()) }
+        assertTrue(File(root, "staging").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun oversizedImportIsRejected() {
+        val store = FileNotebookStore(root)
+        assertFailsWith<InvalidImportException> { store.stagePdf(pdfBytes(5000).inputStream(), maxBytes = 1000) }
+        assertTrue(File(root, "staging").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun deletingImportedNotebookRemovesThePdf() {
+        val store = FileNotebookStore(root)
+        val staged = store.stagePdf(pdfBytes().inputStream())
+        val nb = store.createNotebookFromPdf("x", null, Cover(), staged, listOf(Page(pdf = app.folio.core.model.PdfBackground(staged.id, 0))))
+        val f = store.attachmentFile(nb.id, staged.id)
+        store.deleteNotebook(nb.id)
+        assertTrue(!f.exists())
+    }
+
+    @Test fun pagesMustReferenceTheStagedFile() {
+        val store = FileNotebookStore(root)
+        val staged = store.stagePdf(pdfBytes().inputStream())
+        assertFailsWith<IllegalArgumentException> { store.createNotebookFromPdf("x", null, Cover(), staged, listOf(Page())) }
+    }
+
+    @Test fun trashHidesThenRestoreBringsBackWithContent() {
+        var now = 1_000L
+        val store = FileNotebookStore(root) { now }
+        val nb = store.createNotebook("Bio", null, Cover(), PaperTemplate.RULED)
+        store.savePage(nb.id, Page(id = nb.pageIds.first(), strokes = listOf(stroke("s"))))
+        now = 2_000L
+        store.trashNotebook(nb.id)
+        val trashed = FileNotebookStore(root).library().notebooks.single()
+        assertEquals(2_000L, trashed.deletedAt)
+        store.restoreNotebook(nb.id)
+        val back = FileNotebookStore(root)
+        assertNull(back.library().notebooks.single().deletedAt)
+        assertEquals(listOf("s"), back.loadPage(nb.id, nb.pageIds.first()).strokes.map { it.id })
+    }
+
+    @Test fun restoreGoesToRootWhenFolderIsGone() {
+        val store = FileNotebookStore(root)
+        val f = store.createFolder("Old", null, 0)
+        val nb = store.createNotebook("x", f.id, Cover(), PaperTemplate.BLANK)
+        store.trashNotebook(nb.id)
+        store.deleteFolder(f.id)
+        store.restoreNotebook(nb.id)
+        assertNull(store.library().notebooks.single().folderId)
+    }
+
+    @Test fun purgeRemovesOnlyOldTrash() {
+        var now = 0L
+        val store = FileNotebookStore(root) { now }
+        val old = store.createNotebook("old", null, Cover(), PaperTemplate.BLANK)
+        val recent = store.createNotebook("recent", null, Cover(), PaperTemplate.BLANK)
+        val live = store.createNotebook("live", null, Cover(), PaperTemplate.BLANK)
+        now = 100L; store.trashNotebook(old.id)
+        now = 900L; store.trashNotebook(recent.id)
+        assertEquals(1, store.purgeTrash(cutoff = 500L))
+        val titles = FileNotebookStore(root).library().notebooks.map { it.title }.toSet()
+        assertEquals(setOf("recent", "live"), titles)
+        assertTrue(!File(root, "notebooks/${old.id}").exists())
+        assertTrue(File(root, "notebooks/${live.id}").exists())
+    }
+
+    @Test fun libraryFromBeforeTrashExistedStillLoads() {
+        val store = FileNotebookStore(root)
+        store.createNotebook("legacy", null, Cover(), PaperTemplate.BLANK)
+        val f = File(root, "library.json")
+        f.writeText(f.readText().replace(Regex(",?\"deletedAt\":null"), ""))
+        assertNull(FileNotebookStore(root).library().notebooks.single().deletedAt)
+    }
+
+    @Test fun importWithSeveralPdfsAndPlainPages() {
+        val store = FileNotebookStore(root)
+        val a = store.stagePdf(pdfBytes().inputStream()); val b = store.stagePdf(pdfBytes().inputStream())
+        val pages = listOf(
+            Page(pdf = app.folio.core.model.PdfBackground(a.id, 0)), Page(paper = PaperTemplate.BLANK),
+            Page(pdf = app.folio.core.model.PdfBackground(b.id, 3), strokes = listOf(stroke("s"))),
+        )
+        val nb = store.createNotebookFromImport("GN", null, Cover(), listOf(a, b), pages)
+        val back = FileNotebookStore(root)
+        assertEquals(3, back.library().notebooks.single().pageIds.size)
+        assertTrue(back.attachmentFile(nb.id, a.id).exists() && back.attachmentFile(nb.id, b.id).exists())
+        assertEquals(listOf("s"), back.loadPage(nb.id, pages[2].id).strokes.map { it.id })
+    }
+
+    @Test fun importRejectsPagesPointingAtUnstagedFiles() {
+        val store = FileNotebookStore(root)
+        val a = store.stagePdf(pdfBytes().inputStream())
+        assertFailsWith<IllegalArgumentException> {
+            store.createNotebookFromImport("x", null, Cover(), listOf(a), listOf(Page(pdf = app.folio.core.model.PdfBackground("other", 0))))
+        }
+    }
+
+    private val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(500)
+
+    @Test fun picturesAreStagedByContentAndMovedIntoTheNotebook() {
+        val store = FileNotebookStore(root)
+        assertFailsWith<InvalidImportException> { store.stageImage("just text, not a picture".toByteArray().inputStream()) }
+        assertFailsWith<InvalidImportException> { store.stageImage(pdfBytes().inputStream()) }
+        val nb = store.createNotebook("Pics", null, Cover(), PaperTemplate.BLANK)
+        val st = store.stageImage(png.inputStream())
+        val id = store.addImage(nb.id, st)
+        assertTrue(store.imageFile(nb.id, id).readBytes().contentEquals(png))
+        assertTrue(!st.file.exists())
+        // Pages keep their pictures across a restart.
+        val page = store.loadPage(nb.id, nb.pageIds.first())
+        val withImage = page.copy(images = listOf(PageImage(attachmentId = id, x = 10f, y = 20f, width = 300f, height = 200f)))
+        store.savePage(nb.id, withImage)
+        assertEquals(withImage.images, FileNotebookStore(root).loadPage(nb.id, nb.pageIds.first()).images)
+    }
+
+    @Test fun importedPagesMayOnlyUseStagedPictures() {
+        val store = FileNotebookStore(root)
+        val pic = store.stageImage(png.inputStream())
+        val ok = Page(images = listOf(PageImage(attachmentId = pic.id, x = 0f, y = 0f, width = 10f, height = 10f)))
+        val meta = store.createNotebookFromImport("Imported", null, Cover(), listOf(pic), listOf(ok))
+        assertTrue(store.imageFile(meta.id, pic.id).exists())
+        val bad = Page(images = listOf(PageImage(attachmentId = "not-staged", x = 0f, y = 0f, width = 10f, height = 10f)))
+        assertFailsWith<IllegalArgumentException> { store.createNotebookFromImport("Bad", null, Cover(), emptyList(), listOf(bad)) }
     }
 }

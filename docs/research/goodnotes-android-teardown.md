@@ -81,4 +81,4 @@ Read with REA from the `en.lproj/Tools.strings` and `GN6ToolbarUI.strings` strin
 - Pen options, in order: PEN STYLE (Fountain Pen / Ball Pen / Brush Pen), Pen thickness, colour picker (Presets / Custom / History segments; "last used colors" history), PRESSURE SENSITIVITY (Min–Max), STROKE STABILIZATION, SETTINGS (react to writing speed, pen rotation), saved styles ("palette shortcuts").
 - Pencil options: style (Standard, HB, H, B, Soft, Hard), TIP SHARPNESS (Sharp / Round / Blunt), opacity and thickness sensitivity.
 - Highlighter options: thickness, Tip Flatness, Draw in Straight Line.
-- Folio implemented: the pen style, thickness, colour (palette + recent), pressure and stabilisation sections. Pencil grades, tip sharpness, saved styles and straight-line highlighter need ink-engine work and are not built yet.
+- Folio implemented (toolbar slots + Material dropdown): the pen style, thickness, colour (palette + recent), pressure and stabilisation sections. Pencil grades, tip sharpness, saved styles and straight-line highlighter need ink-engine work and are not built yet.

@@ -70,6 +70,9 @@ fun toolIcon(t: ToolType): Int = when (t) {
     ToolType.FOUNTAIN -> R.drawable.ms_ink_pen
     ToolType.BALLPOINT -> R.drawable.ms_stylus
     ToolType.BRUSH -> R.drawable.ms_brush
+    ToolType.FINELINER -> R.drawable.ms_stylus_pen
+    ToolType.MARKER -> R.drawable.ms_ink_marker
+    ToolType.AIRBRUSH -> R.drawable.ms_airwave
     ToolType.PENCIL -> R.drawable.ms_edit
     ToolType.HIGHLIGHTER -> R.drawable.ms_ink_highlighter
 }
@@ -78,11 +81,14 @@ fun toolLabel(t: ToolType): String = when (t) {
     ToolType.FOUNTAIN -> "Fountain pen"
     ToolType.BALLPOINT -> "Ballpoint pen"
     ToolType.BRUSH -> "Brush pen"
+    ToolType.FINELINER -> "Fine liner"
+    ToolType.MARKER -> "Marker"
+    ToolType.AIRBRUSH -> "Airbrush"
     ToolType.PENCIL -> "Pencil"
     ToolType.HIGHLIGHTER -> "Highlighter"
 }
 
-/** The toolbar's writing slots: one pen slot (fountain/ballpoint/brush), pencil, highlighter. */
+/** The toolbar's writing slots: one pen slot (every pen style), pencil, highlighter. */
 enum class ToolSlot(val title: String) {
     PEN("Pen"), PENCIL("Pencil"), HIGHLIGHTER("Highlighter");
 
@@ -106,7 +112,7 @@ enum class ToolSlot(val title: String) {
 fun ToolSlotButton(slot: ToolSlot, tools: ToolState, update: ((ToolState) -> ToolState) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val tool = slot.toolIn(tools)
-    val active = !tools.eraser && ToolSlot.of(tools.tool) == slot
+    val active = !tools.eraser && !tools.lasso && !tools.text && ToolSlot.of(tools.tool) == slot
     val ink = Color(tools.color)
     Box {
         Column(
@@ -158,14 +164,16 @@ private fun ToolOptions(slot: ToolSlot, tools: ToolState, update: ((ToolState) -
 
         if (slot == ToolSlot.PEN) {
             Section("PEN STYLE")
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                ToolState.PENS.forEachIndexed { i, t ->
-                    SegmentedButton(
-                        selected = tools.tool == t, onClick = { update { it.select(t) } },
-                        shape = SegmentedButtonDefaults.itemShape(i, ToolState.PENS.size),
-                        icon = { Icon(painterResource(toolIcon(t)), contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        modifier = Modifier.testTag("pen-style-${t.name}"),
-                    ) { Text(toolLabel(t).removeSuffix(" pen"), maxLines = 1) }
+            ToolState.PENS.chunked(3).forEach { row ->
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    row.forEachIndexed { i, t ->
+                        SegmentedButton(
+                            selected = tools.tool == t, onClick = { update { it.select(t) } },
+                            shape = SegmentedButtonDefaults.itemShape(i, row.size),
+                            icon = { Icon(painterResource(toolIcon(t)), contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            modifier = Modifier.testTag("pen-style-${t.name}"),
+                        ) { Text(toolLabel(t).removeSuffix(" pen"), maxLines = 1) }
+                    }
                 }
             }
         }
@@ -250,7 +258,7 @@ fun SizePresets(tool: ToolType, tools: ToolState, update: ((ToolState) -> ToolSt
             Box(
                 Modifier.size(32.dp).clip(CircleShape)
                     .background(if (sel) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-                    .clickable { update { it.copy(widths = it.widths + (tool to w), eraser = false) } }
+                    .clickable { update { it.copy(widths = it.widths + (tool to w)) } }
                     .semantics { contentDescription = "${names[i]} size"; selected = sel },
                 contentAlignment = Alignment.Center,
             ) {
