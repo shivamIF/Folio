@@ -3,6 +3,7 @@ package app.folio.core.storage
 import app.folio.core.model.CorruptDocumentException
 import app.folio.core.model.Cover
 import app.folio.core.model.Page
+import app.folio.core.model.PageImage
 import app.folio.core.model.PaperTemplate
 import app.folio.core.model.Stroke
 import app.folio.core.model.ToolType
@@ -243,5 +244,33 @@ class NotebookStoreTest {
         assertFailsWith<IllegalArgumentException> {
             store.createNotebookFromImport("x", null, Cover(), listOf(a), listOf(Page(pdf = app.folio.core.model.PdfBackground("other", 0))))
         }
+    }
+
+    private val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(500)
+
+    @Test fun picturesAreStagedByContentAndMovedIntoTheNotebook() {
+        val store = FileNotebookStore(root)
+        assertFailsWith<InvalidImportException> { store.stageImage("just text, not a picture".toByteArray().inputStream()) }
+        assertFailsWith<InvalidImportException> { store.stageImage(pdfBytes().inputStream()) }
+        val nb = store.createNotebook("Pics", null, Cover(), PaperTemplate.BLANK)
+        val st = store.stageImage(png.inputStream())
+        val id = store.addImage(nb.id, st)
+        assertTrue(store.imageFile(nb.id, id).readBytes().contentEquals(png))
+        assertTrue(!st.file.exists())
+        // Pages keep their pictures across a restart.
+        val page = store.loadPage(nb.id, nb.pageIds.first())
+        val withImage = page.copy(images = listOf(PageImage(attachmentId = id, x = 10f, y = 20f, width = 300f, height = 200f)))
+        store.savePage(nb.id, withImage)
+        assertEquals(withImage.images, FileNotebookStore(root).loadPage(nb.id, nb.pageIds.first()).images)
+    }
+
+    @Test fun importedPagesMayOnlyUseStagedPictures() {
+        val store = FileNotebookStore(root)
+        val pic = store.stageImage(png.inputStream())
+        val ok = Page(images = listOf(PageImage(attachmentId = pic.id, x = 0f, y = 0f, width = 10f, height = 10f)))
+        val meta = store.createNotebookFromImport("Imported", null, Cover(), listOf(pic), listOf(ok))
+        assertTrue(store.imageFile(meta.id, pic.id).exists())
+        val bad = Page(images = listOf(PageImage(attachmentId = "not-staged", x = 0f, y = 0f, width = 10f, height = 10f)))
+        assertFailsWith<IllegalArgumentException> { store.createNotebookFromImport("Bad", null, Cover(), emptyList(), listOf(bad)) }
     }
 }

@@ -13,6 +13,10 @@ data class ToolState(
     /** Lasso select tool (not persisted: the app always reopens on a writing tool). */
     val lasso: Boolean = false,
     val lassoShape: LassoShape = LassoShape.FREEFORM,
+    /** Text tool (not persisted, like the lasso). */
+    val text: Boolean = false,
+    /** Font size for new text boxes, in page units (A4 width = 1000). */
+    val textSize: Float = 28f,
     val eraserPartial: Boolean = false,
     val eraserSizeDp: Float = 14f,
     val eraseHighlighterOnly: Boolean = false,
@@ -29,7 +33,7 @@ data class ToolState(
     companion object {
         val DEFAULT_WIDTHS = mapOf(
             ToolType.FOUNTAIN to 3.5f, ToolType.BALLPOINT to 2.5f, ToolType.PENCIL to 3f,
-            ToolType.BRUSH to 8f, ToolType.HIGHLIGHTER to 18f,
+            ToolType.BRUSH to 8f, ToolType.HIGHLIGHTER to 18f, ToolType.FINELINER to 1.8f, ToolType.MARKER to 6f,
         )
         val PALETTE: List<Argb> = listOf(
             0xFF1B1B1F, 0xFF3D5A80, 0xFF1565C0, 0xFF2E7D32, 0xFFC62828, 0xFFEF6C00, 0xFF6A1B9A, 0xFFF9D71C,
@@ -54,6 +58,7 @@ class ToolPrefs(context: Context) {
             eraserPartial = sp.getBoolean("eraserPartial", d.eraserPartial),
             eraserSizeDp = sp.getFloat("eraserSizeDp", d.eraserSizeDp),
             eraseHighlighterOnly = sp.getBoolean("eraseHighlighterOnly", d.eraseHighlighterOnly),
+            textSize = sp.getFloat("textSize", d.textSize),
             lassoShape = runCatching { LassoShape.valueOf(sp.getString("lassoShape", d.lassoShape.name)!!) }.getOrDefault(d.lassoShape),
         )
     }
@@ -70,6 +75,7 @@ class ToolPrefs(context: Context) {
             putBoolean("eraserPartial", s.eraserPartial)
             putFloat("eraserSizeDp", s.eraserSizeDp)
             putBoolean("eraseHighlighterOnly", s.eraseHighlighterOnly)
+            putFloat("textSize", s.textSize)
         }.apply()
     }
 }

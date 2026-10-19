@@ -85,6 +85,14 @@ import app.folio.core.model.Folder
 import app.folio.core.model.NotebookMeta
 import app.folio.core.model.PaperTemplate
 import app.folio.notes.ui.CoverColors
+import app.folio.notes.ui.GlassBackdrop
+import app.folio.notes.ui.LocalGlass
+import app.folio.notes.ui.ProvideGlass
+import app.folio.notes.ui.androidxClickable
+import app.folio.notes.ui.glass
+import app.folio.notes.ui.springy
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.statusBarsPadding
 import java.text.DateFormat
 import java.util.Date
 
@@ -126,14 +134,22 @@ fun LibraryScreen(
     BackHandler(enabled = !state.showingTrash && state.folderId != null) { vm.goUp() }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 
+    ProvideGlass {
+    val g = LocalGlass.current
+    Box(Modifier.fillMaxSize()) {
+    GlassBackdrop()
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
+                colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = g.ink, actionIconContentColor = g.ink, navigationIconContentColor = g.ink),
+                modifier = Modifier.statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp).glass(RoundedCornerShape(28.dp), elevation = 12.dp),
+                windowInsets = androidx.compose.foundation.layout.WindowInsets(0),
                 title = {
                     if (searching) OutlinedTextField(
                         value = state.query, onValueChange = vm::setQuery, singleLine = true,
                         placeholder = { Text("Search notebooks") }, modifier = Modifier.fillMaxWidth().testTag("search"),
-                    ) else Text(if (state.showingTrash) "Trash" else state.currentFolder?.name ?: "Notebooks", fontWeight = FontWeight.SemiBold)
+                    ) else Text(if (state.showingTrash) "Trash" else state.currentFolder?.name ?: "Notebooks", fontWeight = FontWeight.Bold, fontSize = 26.sp)
                 },
                 navigationIcon = {
                     if (state.showingTrash) IconButton(onClick = { vm.showTrash(false) }) {
@@ -170,12 +186,16 @@ fun LibraryScreen(
             )
         },
         floatingActionButton = {
-            if (!state.showingTrash) ExtendedFloatingActionButton(
-                onClick = { dialog = Dialog.NewNotebook },
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text("New notebook") },
-                modifier = Modifier.testTag("new-notebook").semantics { contentDescription = "New notebook" },
-            )
+            if (!state.showingTrash) Row(
+                Modifier.testTag("new-notebook").springy(hoverScale = 1.06f)
+                    .glass(RoundedCornerShape(30.dp), elevation = 18.dp, tint = g.accent)
+                    .androidxClickable("New notebook") { dialog = Dialog.NewNotebook }
+                    .padding(horizontal = 22.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, tint = g.ink)
+                Text("New notebook", color = g.ink, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 10.dp))
+            }
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
@@ -190,7 +210,8 @@ fun LibraryScreen(
         if (empty) {
             Box(Modifier.fillMaxSize().padding(pad).padding(24.dp), contentAlignment = Alignment.Center) {
                 if (!state.loading) Text(
-                    if (state.query.isNotBlank()) "No notebooks match \"${state.query}\"" else "No notebooks yet. Tap New notebook to start writing.",
+                    modifier = Modifier.glass(RoundedCornerShape(28.dp)).padding(28.dp),
+                    text = if (state.query.isNotBlank()) "No notebooks match \"${state.query}\"" else "No notebooks yet. Tap New notebook to start writing.",
                     style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -256,6 +277,8 @@ fun LibraryScreen(
             onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.deleteFolder(d.folder.id) },
         )
     }
+    }
+    }
 }
 
 @Composable
@@ -263,7 +286,9 @@ private fun FolderCard(f: Folder, onOpen: () -> Unit, onRename: () -> Unit, onDe
     var menu by remember { mutableStateOf(false) }
     Box {
         Column(
-            Modifier.clip(RoundedCornerShape(16.dp)).combinedClickable(onClick = onOpen, onLongClick = { menu = true })
+            Modifier.springy(pressedScale = 0.94f, hoverScale = 1.05f)
+                .glass(RoundedCornerShape(22.dp), elevation = 10.dp).padding(12.dp)
+                .combinedClickable(onClick = onOpen, onLongClick = { menu = true })
                 .semantics { contentDescription = "Folder ${f.name}" },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -285,7 +310,9 @@ private fun NotebookCard(nb: NotebookMeta, onOpen: () -> Unit, onEdit: () -> Uni
     var menu by remember { mutableStateOf(false) }
     Box {
         Column(
-            Modifier.combinedClickable(onClick = onOpen, onLongClick = { menu = true })
+            Modifier.springy(pressedScale = 0.94f, hoverScale = 1.05f)
+                .glass(RoundedCornerShape(22.dp), elevation = 10.dp).padding(12.dp)
+                .combinedClickable(onClick = onOpen, onLongClick = { menu = true })
                 .semantics { contentDescription = "Notebook ${nb.title}" }.testTag("notebook-${nb.title}"),
         ) {
             if (preview) PagePreview(nb, Modifier.fillMaxWidth().aspectRatio(0.75f))
@@ -490,6 +517,9 @@ private fun SettingsDialog(current: NotebookDefaults, onDismiss: () -> Unit, onS
         title = { Text("Settings") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                val folio = androidx.compose.ui.platform.LocalContext.current.applicationContext as app.folio.notes.FolioApp
+                app.folio.notes.sync.AutoSyncRow(folio.sync)
+                androidx.compose.material3.HorizontalDivider()
                 Text("Default page size for new notebooks", style = MaterialTheme.typography.labelLarge)
                 PageSizeChoice.entries.forEach { c ->
                     FilterChip(c == size, { size = c }, label = { Text(c.label) }, modifier = Modifier.fillMaxWidth())

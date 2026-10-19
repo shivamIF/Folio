@@ -14,6 +14,9 @@ class FolioApp : Application() {
         private set
     lateinit var thumbnails: app.folio.notes.library.Thumbnails
         private set
+    /** Google Drive sync (opt-in from Settings). */
+    lateinit var sync: app.folio.notes.sync.SyncManager
+        private set
 
     /** Outlives screens so a save started on exit still finishes. */
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -31,5 +34,6 @@ class FolioApp : Application() {
         super.onCreate()
         repository = FileNotebookStore(File(filesDir, "library"))
         thumbnails = app.folio.notes.library.Thumbnails(this, repository)
+        sync = app.folio.notes.sync.SyncManager(this, repository as FileNotebookStore, appScope, ioWriter)
     }
 }

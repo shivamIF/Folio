@@ -19,21 +19,22 @@ A ZIP. Entries may sit under a folder prefix; Folio finds them by the name of `p
 
 On Android, One UI labels these files with MIME type `application/sdoc`.
 
-## Page
-- `u32` width at 0x16 (1200 in every sample) and `u32` height at 0x1a.
-- Folio scales the page so its width is 1000 units (Folio's A4 width).
+## Page header
+- u16 flags at 0x0E; u32 width at 0x16 (1200 in every sample) and u32 height at 0x1A. Folio scales the page so its width is 1000 units (Folio's A4 width).
+- Optional blocks start at 0x80: flag 0x1 adds 32 bytes, flag 0x10 adds 4; then 8 bytes (colour, a width).
+- **Flag 0x100: PDF background.** Then comes `{u16 1, u32 media id, u32 PDF page (0-based), 8 zero bytes, u32 w, u32 h}`. The PDF is `media/<media id>@….pdf`. Verified on every page of both PDF-backed samples (one note switches between two PDFs).
 
 ## Object
-`u16 36` + object id as ASCII UUID, `i64` time, `f64` bbox[4] (left, top, right, bottom), more fields, then the page marker `u32 1200` + `u32 height`. Within about 64 bytes after the marker:
+`u16 36` + object id as ASCII UUID, `i64` time, `f64` bbox[4] (left, top, right, bottom, **after** any rotation), then 5 zero bytes and, when the object was rotated, an `f32` angle in degrees. Then come optional properties, e.g. `extra_key_stroke_shape` (shape tool) or `RecogUIFeature_MathStrokeUuidStr…` (handwriting recognition). These can be kilobytes long, so the header search covers the whole object. Then the page marker `u32 1200` + `u32 height`, and within about 64 bytes:
 
-`u32 size1`, `u16 type`, `u32 size2`, payload. For strokes `type = 1`, `size1 − size2 ∈ {24, 28}`, and the payload starts with `0x02`.
-
-Other types (text, images, shapes) are skipped. The import reports how many it skipped.
+`u32 size1`, `u16 type`, `u32 size2`, payload.
+- **Type 1, a stroke:** payload starts `0x02`; `size1 − size2` is 24/28 for pen strokes and 16–36 for shape-tool strokes.
+- **Type 6, a shape or text object:** payload `01 00 01 <subtype>`.
 
 ## Stroke payload
 | Offset | Field |
 |---|---|
-| 0 | 6-byte header (flags vary: `02 25 …`, `02 65 …`, `02 05 …`) |
+| 0 | 6-byte header. **Byte 4, bit 0x04: the stroke stores its own colour** (0x8E yes, 0x8A no) |
 | 6 | `u16` unknown |
 | 8 | `u16 n`, the point count |
 | 10 | `f64 x0`, `f64 y0`: the first point |
@@ -42,21 +43,34 @@ Other types (text, images, shapes) are skipped. The import reports how many it s
 | then | Time, tilt and orientation streams (not decoded yet) |
 
 **Trailer**, at `tail = payload + size2`:
-- If bytes `[tail−6, tail−2)` equal `[tail+2, tail+6)` and `[tail−2, tail+2)` is zero, the stroke has **no colour** (default black) and its size `f32` is at `tail − 6`.
-- Otherwise RGBA bytes are at `tail−6 … tail−3` and the size `f32` is at `tail − 2`.
-- Alpha below 0xF0 means a highlighter.
+- **With colour:** RGBA bytes at `tail−6 … tail−3`, size `f32` at `tail−2`. Alpha below 0xF0 means a highlighter.
+- **Without colour:** size `f32` at `tail−6`, repeated at `tail+2`. The colour is the default, black.
+- Before this rule, about 1,100 strokes were misread as translucent "highlighters"; with it, all 35,860 strokes have a plausible size.
 
-Folio width = size × `WIDTH_FACTOR` (2.0) × page scale. The factor was chosen by eye and still needs a side-by-side check against Samsung Notes.
+**Rotation:** if the points don't fit the object's box, rotate them by **−angle** about the box centre. This made all 367 rotated strokes in the samples fit exactly; the importer applies it only when it does.
 
-## Validation
-- 33,001 of about 33,105 strokes across the five notes decode with every point inside the object's own bounding box. 1,838 of them are highlighters.
-- The ~100 that don't are mostly rotated or transformed strokes (the transform isn't decoded yet).
-- On the Galaxy Tab S6 Lite, a 5-page, 25,303-stroke note imports in about 17 s, and its pages render as in Samsung Notes (checked visually).
+Folio width = size × `WIDTH_FACTOR` (2.0) × page scale. The user compared it with Samsung Notes and confirmed it.
+
+## Type 6
+- **Subtype 0x0C, a text box:** 4 frame points; then a text block `u16 6, u32 block length, u32 chars, UTF-16 text`; then style spans: `u32 count`, records of `length + 2` bytes `{u16 length, u16 kind, …, value at +18}`. Kind 3 is the font size (f32, in points on an A4-wide page) and kind 1 the colour (ARGB). Seen once: a red 23 pt title.
+- **Subtype 0x08, a vector shape:** `u32 n`, n × (f64 x, f64 y), and the line width (f32) 13 bytes after the points. Seen as an arrow (line plus two heads). Imported as an even-width stroke.
+
+## Validation (5 notes)
+| | Count |
+|---|---|
+| Strokes decoded, all inside their own boxes | 35,860, up from 33,105. Newly read: strokes with recognition data, shape-tool strokes, and 367 rotated strokes (categories overlap) |
+| Highlighters | 747 |
+| Pages with a PDF background | 49 |
+| Text boxes | 1 |
+| Vector shapes | 3 |
+| Not imported | 1 attached sticky memo (an embedded `.sdocx`), 2 objects |
+
+A synthetic test builds an `.sdocx` byte by byte covering each rule (`SamsungNotesImporterTest`).
 
 ## Title
 Samsung exports are named `<title>_<yyMMdd>_<HHmmss>.sdocx`. Folio takes the title from the file name, because the title inside `note.note` wasn't reliable across samples.
 
 ## Not imported yet
-- PDF backgrounds (the link from a page to its `media/*.pdf` page isn't decoded).
-- Text boxes, images, shapes and sticky memos.
-- Stroke rotation/transform, and the time/tilt/orientation streams.
+- Pictures: none of the samples contains one, so the format is unknown.
+- Attached sticky memos.
+- Stroke time, tilt and orientation streams.

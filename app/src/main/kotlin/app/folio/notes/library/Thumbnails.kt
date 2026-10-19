@@ -53,7 +53,7 @@ class Thumbnails(context: Context, private val repo: DocumentRepository) {
                 bg2.recycle()
             }
         }
-        for (s in page.strokes) r.drawStroke(c, s)
+        r.drawContent(c, page) { id -> app.folio.notes.editor.PageAssets.decode(repo.imageFile(meta.id, id), WIDTH_PX.toInt()) }
         bmp
     }.getOrNull()
 

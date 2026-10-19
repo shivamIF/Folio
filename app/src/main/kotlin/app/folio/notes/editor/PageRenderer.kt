@@ -66,6 +66,51 @@ class PageRenderer {
         canvas.drawPath(path, strokePaint)
     }
 
+    private val imagePaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val missingPaint = Paint().apply { color = 0xFFE3E1DC.toInt() }
+    private val textPaint = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG)
+
+    /** A placed picture, stretched to its frame. */
+    fun drawImage(canvas: Canvas, bitmap: Bitmap, img: app.folio.core.model.PageImage) {
+        dst.set(img.x, img.y, img.x + img.width, img.y + img.height)
+        canvas.drawBitmap(bitmap, null, dst, imagePaint)
+    }
+
+    /** Placeholder while a picture can't be shown (unreadable file). */
+    fun drawMissingImage(canvas: Canvas, img: app.folio.core.model.PageImage) {
+        canvas.drawRect(img.x, img.y, img.x + img.width, img.y + img.height, missingPaint)
+    }
+
+    /** A text box, wrapped at its width (page units; the canvas carries the zoom). */
+    fun drawText(canvas: Canvas, t: app.folio.core.model.TextBox) {
+        if (t.text.isEmpty()) return
+        val layout = layout(t.text, t.width, t.fontSize, t.color)
+        canvas.save()
+        canvas.translate(t.x, t.y)
+        layout.draw(canvas)
+        canvas.restore()
+    }
+
+    fun layout(text: String, width: Float, fontSize: Float, color: Argb): android.text.StaticLayout {
+        textPaint.textSize = fontSize
+        textPaint.color = color.toInt()
+        return android.text.StaticLayout.Builder.obtain(text, 0, text.length, textPaint, maxOf(1, width.toInt()))
+            .setIncludePad(false).build()
+    }
+
+    /**
+     * A page's own content above its paper/PDF: pictures, then ink, then text. Used for PDF
+     * export and thumbnails ([image] decodes an attachment, or null if it can't).
+     */
+    fun drawContent(canvas: Canvas, page: app.folio.core.model.Page, image: (String) -> Bitmap?) {
+        for (img in page.images) {
+            val bmp = image(img.attachmentId)
+            if (bmp != null) drawImage(canvas, bmp, img) else drawMissingImage(canvas, img)
+        }
+        for (s in page.strokes) drawStroke(canvas, s)
+        for (t in page.texts) drawText(canvas, t)
+    }
+
     fun drawStroke(canvas: Canvas, s: Stroke) = drawStroke(canvas, s.color, s.tool, pathOf(StrokeGeometry.outline(s)))
 
     companion object {

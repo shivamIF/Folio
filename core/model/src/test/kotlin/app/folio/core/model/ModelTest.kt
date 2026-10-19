@@ -76,6 +76,25 @@ class CodecTest {
         assertEquals(null, DocumentCodec.decodePage(old).pdf)
     }
 
+    @Test fun schema3PagesLoadAndAreUpgradedOnSave() {
+        val old = """{"schemaVersion":3,"id":"p","width":1000.0,"height":1414.0,"paper":"BLANK","strokes":[],"pdf":null,"texts":[],"images":[]}"""
+        val page = DocumentCodec.decodePage(old)
+        assertEquals(3, page.schemaVersion)
+        val edited = page.copy(strokes = listOf(testStroke(id = "fl").let {
+            Stroke(it.id, ToolType.FINELINER, it.color, it.width, it.x, it.y, it.pressure, it.tilt, it.orientation, it.t)
+        }))
+        val text = DocumentCodec.encodePage(edited)
+        assertTrue("\"schemaVersion\":$SCHEMA_VERSION" in text && SCHEMA_VERSION >= 4, text)
+        assertEquals(ToolType.FINELINER, DocumentCodec.decodePage(text).strokes.single().tool)
+    }
+
+    @Test fun newToolsRoundTrip() {
+        for (tool in listOf(ToolType.FINELINER, ToolType.MARKER)) {
+            val s = testStroke(id = "t-$tool").let { Stroke(it.id, tool, it.color, it.width, it.x, it.y, it.pressure, it.tilt, it.orientation, it.t) }
+            assertEquals(s, DocumentCodec.decodePage(DocumentCodec.encodePage(Page(strokes = listOf(s)))).strokes.single())
+        }
+    }
+
     @Test fun unknownFieldsFromNewerMinorVersionsAreTolerated() {
         val text = DocumentCodec.encodePage(Page()).replaceFirst("{", "{\"futureField\":42,")
         DocumentCodec.decodePage(text)
@@ -201,5 +220,47 @@ class BulkEditTest {
             ed.undo(); assertEquals(original, ed.currentStrokes)
             ed.redo(); ed.redo(); ed.undo(); ed.undo(); assertEquals(original, ed.currentStrokes)
         }
+    }
+}
+
+class ElementTest {
+    private val text = TextBox("t1", 100f, 200f, 300f, 40f, "Hello ✏️", fontSize = 28f, color = 0xFF2244AA)
+    private val img = PageImage("i1", "att-1", 50f, 60f, 400f, 300f)
+
+    @Test fun textsAndImagesRoundTripAndOldPagesLoad() {
+        val page = Page(strokes = listOf(testStroke()), texts = listOf(text), images = listOf(img))
+        assertEquals(page, DocumentCodec.decodePage(DocumentCodec.encodePage(page)))
+        // A schema 2 page has neither key.
+        val old = """{"schemaVersion":2,"id":"p","width":1000.0,"height":1414.0,"paper":"BLANK","strokes":[],"pdf":null}"""
+        val p = DocumentCodec.decodePage(old)
+        assertTrue(p.texts.isEmpty() && p.images.isEmpty())
+    }
+
+    @Test fun elementEditsShareTheUndoHistory() {
+        val ed = PageEditor(Page(texts = listOf(text)))
+        val moved = text.copy(x = 500f)
+        ed.perform(PageEdit.PutText(text, moved))
+        ed.perform(PageEdit.PutImage(null, img))
+        ed.perform(PageEdit.AddStroke(testStroke(id = "s")))
+        assertEquals(listOf(moved), ed.currentTexts); assertEquals(listOf(img), ed.currentImages)
+        ed.undo(); ed.undo()
+        assertTrue(ed.currentImages.isEmpty())
+        ed.undo()
+        assertEquals(listOf(text), ed.currentTexts)
+        ed.redo(); ed.redo(); ed.redo()
+        assertEquals(1, ed.currentStrokes.size)
+        assertEquals(Page(id = "x", texts = listOf(moved), images = listOf(img)).texts, ed.snapshot().texts)
+    }
+
+    @Test fun deletingKeepsOrderOnUndoAndCompositeIsOneStep() {
+        val a = text.copy(id = "a"); val b = text.copy(id = "b"); val c = text.copy(id = "c")
+        val ed = PageEditor(Page(texts = listOf(a, b, c), strokes = listOf(testStroke(id = "s1"))))
+        ed.perform(PageEdit.Composite(listOf(
+            PageEdit.PutText(b, null, index = 1),
+            PageEdit.RemoveStrokes.of(ed.currentStrokes, setOf("s1")),
+        )))
+        assertEquals(listOf(a, c), ed.currentTexts); assertTrue(ed.currentStrokes.isEmpty())
+        ed.undo()
+        assertEquals(listOf(a, b, c), ed.currentTexts); assertEquals(1, ed.currentStrokes.size)
     }
 }

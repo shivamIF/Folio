@@ -73,6 +73,25 @@ class Device:
         except AssertionError:
             self.tap("Eraser")
 
+    def lasso_menu(self):
+        """Opens the lasso shapes menu (first tap selects the lasso, a second tap opens the menu)."""
+        self.tap("Lasso select")
+        try:
+            self.find("Freeform lasso", timeout=1.5)
+        except AssertionError:
+            self.tap("Lasso select")
+
+    def stylus_path(self, pts, hold_s=0.0):
+        """Stylus down at pts[0], moves through the rest, optional hold, then up."""
+        self.sh("shell", "input", "stylus", "motionevent", "DOWN", str(pts[0][0]), str(pts[0][1]))
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            for k in range(1, 5):
+                self.sh("shell", "input", "stylus", "motionevent", "MOVE", str(x0 + (x1 - x0) * k // 4), str(y0 + (y1 - y0) * k // 4))
+        if hold_s:
+            time.sleep(hold_s)
+        self.sh("shell", "input", "stylus", "motionevent", "UP", str(pts[-1][0]), str(pts[-1][1]))
+        time.sleep(0.4)
+
     def stylus_swipe(self, x1, y1, x2, y2, ms=400):
         self.sh("shell", "input", "stylus", "swipe", *map(str, (x1, y1, x2, y2, ms)))
         time.sleep(0.4)
@@ -228,8 +247,8 @@ def main():
         raise AssertionError(what)
 
     def lasso_around_first(activate=True):
-        if activate:  # tapping the lasso tool opens a shape menu
-            d.tap("Lasso select")
+        if activate:
+            d.lasso_menu()
             d.tap("Freeform lasso")
         # Rectangle loop around stroke 1 only (stroke 2 starts well below it).
         pts = [(xl - 40, ya - 45), (xr + 40, ya - 45), (xr + 40, ya + 75), (xl - 40, ya + 75), (xl - 40, ya - 40)]
@@ -405,6 +424,44 @@ def main():
         d.tap("Erase highlighter only")  # restore default
         d.sh("shell", "input", "keyevent", "KEYCODE_ESCAPE")
     check("with 'Erase highlighter only' on, ink is protected", highlighter_only)
+
+    # ------------------------------------------------------- shapes and text
+    def shape_snap():
+        d.tap("Fountain pen")
+        n_before = len(strokes())
+        x0, x1 = cx1 + int(w * 0.25), cx1 + int(w * 0.6)
+        y0, y1 = cy1 + int(h * 0.58), cy1 + int(h * 0.72)
+        # A wobbly hand-drawn rectangle, then hold the pen still.
+        d.stylus_path([(x0, y0), (x1 + 6, y0 + 4), (x1 - 3, y1 + 5), (x0 + 4, y1 - 3), (x0 - 2, y0 + 8)], hold_s=1.0)
+        wait_for(lambda: len(strokes()) == n_before + 1, "shape stroke not saved")
+        c = channels(strokes()[-1])
+        xs, ys = c["x"], c["y"]
+        l, r, t, b = min(xs), max(xs), min(ys), max(ys)
+        off = max(min(abs(x - l), abs(x - r), abs(y - t), abs(y - b)) for x, y in zip(xs, ys))
+        assert off < 0.5, f"stroke was not snapped to a clean rectangle (a point is {off:.1f} units off the edges)"
+    check("holding the pen at the end snaps a rough rectangle to a clean one", shape_snap)
+
+    def texts():
+        return d.page(nb_id, pid).get("texts", [])
+
+    def text_box():
+        d.tap("Text")
+        tx, ty = cx1 + int(w * 0.3), cy1 + int(h * 0.85)
+        d.sh("shell", "input", "tap", str(tx), str(ty))
+        d.find("Text box")
+        d.sh("shell", "input", "text", "Hello%sFolio")
+        d.tap("Done typing")
+        wait_for(lambda: [t["text"] for t in texts()] == ["Hello Folio"], f"text box not saved: {texts()}")
+        # Lasso tap selects it; delete removes it; undo brings it back.
+        d.tap("Lasso select")
+        d.stylus_path([(tx + 20, ty), (tx + 21, ty)])  # a pen tap
+        d.find("1 selected")
+        d.tap("Delete selection")
+        wait_for(lambda: texts() == [], "text box not deleted")
+        d.tap("Undo")
+        wait_for(lambda: [t["text"] for t in texts()] == ["Hello Folio"], "undo did not restore the text box")
+        d.tap("Fountain pen")
+    check("text tool: type a box, select it with the lasso, delete and undo", text_box)
 
     print(f"\n{len(results)} checks passed. Screenshots in {a.out}")
 

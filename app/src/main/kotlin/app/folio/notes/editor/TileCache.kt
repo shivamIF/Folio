@@ -9,7 +9,10 @@ import android.os.Handler
 import android.os.Looper
 import app.folio.core.ink.StrokeGeometry
 import app.folio.core.ink.StrokeIndex
+import app.folio.core.model.PageImage
 import app.folio.core.model.PaperTemplate
+import app.folio.core.model.PdfBackground
+import app.folio.core.model.TextBox
 import app.folio.core.model.Rect
 import app.folio.core.model.Stroke
 import java.util.Collections
@@ -44,15 +47,24 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
 
     data class Key(val level: Int, val col: Int, val row: Int)
 
-    /** What tiles are rendered from. [gen] changes when the page, paper, size or PDF changes. */
+    /**
+     * What tiles are rendered from. [gen] changes when the page, paper, size or PDF changes.
+     * [pdfBitmap] is a low-resolution render of the PDF page, used only where a tile can't
+     * render the PDF itself (fallbacks, eraser wipes); tiles render it sharp via [assets].
+     */
     class Content(
         val gen: Int, val index: StrokeIndex, val excluded: Set<String>,
-        val paper: PaperTemplate, val pageW: Float, val pageH: Float, val pdf: Bitmap?,
+        val paper: PaperTemplate, val pageW: Float, val pageH: Float,
+        val pdf: PdfBackground?, val pdfBitmap: Bitmap?,
+        val texts: List<TextBox>, val images: List<PageImage>, val assets: PageAssets?,
     ) {
         val strokes: List<Stroke> get() = index.strokes
     }
 
-    class Tile(val key: Key, val bitmap: Bitmap, var strokes: List<Stroke>, var excluded: Set<String>, val gen: Int) {
+    class Tile(
+        val key: Key, val bitmap: Bitmap, var strokes: List<Stroke>, var excluded: Set<String>, val gen: Int,
+        var texts: List<TextBox>, var images: List<PageImage>,
+    ) {
         val scale = levelScale(key.level)
         val size = TILE_PX / scale
         val left = key.col * size
@@ -88,18 +100,24 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
     var lastDrawSharp = false
         private set
 
-    /** Main thread: sets what the page shows. Page/paper/size/PDF changes start over. */
-    fun setContent(pageKey: Any?, index: StrokeIndex, excluded: Set<String>, paper: PaperTemplate, pageW: Float, pageH: Float, pdf: Bitmap?) {
+    /** Main thread: sets what the page shows. Page/paper/size/PDF/asset changes start over. */
+    fun setContent(
+        pageKey: Any?, index: StrokeIndex, excluded: Set<String>, paper: PaperTemplate, pageW: Float, pageH: Float,
+        pdf: PdfBackground?, pdfBitmap: Bitmap?, texts: List<TextBox>, images: List<PageImage>, assets: PageAssets?,
+    ) {
         val strokes = index.strokes
         val c = content
-        val same = c != null && pageKey == this.pageKey && paper == c.paper && pageW == c.pageW && pageH == c.pageH && pdf === c.pdf
+        val same = c != null && pageKey == this.pageKey && paper == c.paper && pageW == c.pageW && pageH == c.pageH &&
+            pdf == c.pdf && assets === c.assets
         if (!same) {
             gen++
             tiles.clear()
             this.pageKey = pageKey
         }
-        if (c == null || !same || c.strokes !== strokes || c.excluded !== excluded) {
-            content = Content(gen, index, excluded, paper, pageW, pageH, pdf)
+        if (c == null || !same || c.strokes !== strokes || c.excluded !== excluded || c.texts !== texts ||
+            c.images !== images || c.pdfBitmap !== pdfBitmap
+        ) {
+            content = Content(gen, index, excluded, paper, pageW, pageH, pdf, pdfBitmap, texts, images, assets)
         }
     }
     private var pageKey: Any? = null
@@ -207,7 +225,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         canvas.save()
         canvas.translate(tx, ty); canvas.scale(scale, scale)
         renderer.drawPaper(canvas, c.paper, c.pageW, c.pageH, hasPdf = c.pdf != null)
-        c.pdf?.let { renderer.drawPdfBackground(canvas, it, c.pageW, c.pageH) }
+        c.pdfBitmap?.let { renderer.drawPdfBackground(canvas, it, c.pageW, c.pageH) }
         canvas.restore()
         // Coarse to fine, so the best available tile ends up on top.
         val pageL = (d.left - tx) / scale; val pageT = (d.top - ty) / scale
@@ -283,43 +301,70 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
 
     /** Brings a cached tile up to date with [c]: paint appended strokes, patch changed areas, or re-render. */
     private fun sync(tile: Tile, c: Content) {
-        if (tile.strokes === c.strokes && (tile.excluded === c.excluded || tile.excluded == c.excluded)) {
+        val sameElements = tile.texts === c.texts && tile.images === c.images
+        if (sameElements && tile.strokes === c.strokes && (tile.excluded === c.excluded || tile.excluded == c.excluded)) {
             tile.excluded = c.excluded
             return
         }
         if (tile.stale) return // a fresh render is on its way
-        when (val d = diff(tile.strokes, tile.excluded, c)) {
-            is Diff.Append -> {
-                for (s in d.added) if (s.id !in c.excluded && tile.intersects(s.bounds())) {
-                    threadRenderer.get()!!.drawStroke(tile.canvas, s.color, s.tool, outline(s))
-                }
-                tile.strokes = c.strokes; tile.excluded = c.excluded
+        val elementRects = if (sameElements && (tile.excluded === c.excluded || tile.excluded == c.excluded)) emptyList()
+        else elementChanges(tile, c)
+        val d = diff(tile.strokes, tile.excluded, c)
+        if (d is Diff.Append && elementRects.isEmpty()) {
+            for (s in d.added) if (s.id !in c.excluded && tile.intersects(s.bounds())) {
+                threadRenderer.get()!!.drawStroke(tile.canvas, s.color, s.tool, outline(s))
             }
-            is Diff.Changed -> {
-                var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
-                for (x in d.rects) if (tile.intersects(x)) {
-                    l = min(l, x.left); t = min(t, x.top); r = max(r, x.right); b = max(b, x.bottom)
-                }
-                if (l > r) { tile.strokes = c.strokes; tile.excluded = c.excluded; return }
-                val region = alignToPixels(tile, l, t, r, b)
-                if (c.index.query(region).size > PATCH_LIMIT) {
-                    tile.stale = true // keep showing it; re-render with priority (see draw)
-                    return
-                }
-                patch(tile, region, c)
-                perfPatches++
-                tile.strokes = c.strokes; tile.excluded = c.excluded
+            // Text sits above ink: repaint any text the new strokes went under.
+            for (t in c.texts) if (t.id !in c.excluded && tile.intersects(t.bounds) && d.added.any { it.bounds().intersects(t.bounds) }) {
+                threadRenderer.get()!!.drawText(tile.canvas, t)
             }
+            adopt(tile, c)
+            return
         }
+        val rects = when (d) { is Diff.Changed -> d.rects + elementRects; is Diff.Append -> d.added.map { it.bounds() } + elementRects }
+        var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
+        for (x in rects) if (tile.intersects(x)) {
+            l = min(l, x.left); t = min(t, x.top); r = max(r, x.right); b = max(b, x.bottom)
+        }
+        if (l > r) { adopt(tile, c); return }
+        val region = alignToPixels(tile, l, t, r, b)
+        if (c.index.query(region).size > PATCH_LIMIT || !patch(tile, region, c)) {
+            tile.stale = true // keep showing it; re-render with priority (see draw)
+            return
+        }
+        perfPatches++
+        adopt(tile, c)
     }
 
-    /** Repaints [region] (page units) of [tile] from scratch: paper, PDF, then the strokes there, in order. */
-    private fun patch(tile: Tile, region: Rect, c: Content) {
+    private fun adopt(tile: Tile, c: Content) {
+        tile.strokes = c.strokes; tile.excluded = c.excluded; tile.texts = c.texts; tile.images = c.images
+    }
+
+    /** Bounds of text boxes and pictures that were added, removed, changed, or hidden/shown since [tile] was drawn. */
+    private fun elementChanges(tile: Tile, c: Content): List<Rect> {
+        val out = ArrayList<Rect>()
+        fun <T : Any> compare(old: List<T>, new: List<T>, id: (T) -> String, bounds: (T) -> Rect) {
+            val oldSet = Collections.newSetFromMap(IdentityHashMap<T, Boolean>()).apply { addAll(old) }
+            val newSet = Collections.newSetFromMap(IdentityHashMap<T, Boolean>()).apply { addAll(new) }
+            for (e in old) if (e !in newSet || ((id(e) in tile.excluded) != (id(e) in c.excluded))) out += bounds(e)
+            for (e in new) if (e !in oldSet) out += bounds(e)
+        }
+        compare(tile.texts, c.texts, TextBox::id, TextBox::bounds)
+        compare(tile.images, c.images, PageImage::id, PageImage::bounds)
+        return out
+    }
+
+    /**
+     * Repaints [region] (page units) of [tile] from scratch: paper, PDF, pictures, strokes and
+     * text there, in order. False if a picture isn't decoded yet (the tile is re-rendered instead).
+     */
+    private fun patch(tile: Tile, region: Rect, c: Content): Boolean {
         val cv = tile.canvas
         cv.save()
         cv.clipRect(region.left, region.top, region.right, region.bottom)
-        paint(cv, c, region, threadRenderer.get()!!)
+        val ok = paint(cv, c, region, threadRenderer.get()!!, tile = tile, decode = false)
         cv.restore()
+        return ok
     }
 
     /** Region grown to whole tile pixels (plus one for anti-aliasing), so a patch has no partial-pixel seam. */
@@ -354,7 +399,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
             // Circle at the new pen position, plus the band joining it to the previous one.
             wipeClip.rewind()
             wipeClip.addCircle(x1, y1, radius, Path.Direction.CW)
-            cv.save(); cv.clipPath(wipeClip); paint(cv, c, box, rnd, inkToo = false); cv.restore()
+            cv.save(); cv.clipPath(wipeClip); paint(cv, c, box, rnd, inkToo = false, decode = false); cv.restore()
             val dx = x1 - x0; val dy = y1 - y0
             val len = kotlin.math.hypot(dx, dy)
             if (len > 0f) {
@@ -362,7 +407,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
                 wipeClip.rewind()
                 wipeClip.moveTo(x0 + nx, y0 + ny); wipeClip.lineTo(x1 + nx, y1 + ny)
                 wipeClip.lineTo(x1 - nx, y1 - ny); wipeClip.lineTo(x0 - nx, y0 - ny); wipeClip.close()
-                cv.save(); cv.clipPath(wipeClip); paint(cv, c, box, rnd, inkToo = false); cv.restore()
+                cv.save(); cv.clipPath(wipeClip); paint(cv, c, box, rnd, inkToo = false, decode = false); cv.restore()
             }
             wiped += tile.key
         }
@@ -417,25 +462,54 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
     /** Worker thread: a brand-new tile; never touches cached tiles. */
     private fun render(key: Key, c: Content): Tile {
         val bmp = Bitmap.createBitmap(TILE_PX, TILE_PX, Bitmap.Config.ARGB_8888)
-        val tile = Tile(key, bmp, c.strokes, c.excluded, c.gen)
-        paint(tile.canvas, c, Rect(tile.left, tile.top, tile.left + tile.size, tile.top + tile.size), threadRenderer.get()!!)
+        val tile = Tile(key, bmp, c.strokes, c.excluded, c.gen, c.texts, c.images)
+        paint(tile.canvas, c, Rect(tile.left, tile.top, tile.left + tile.size, tile.top + tile.size), threadRenderer.get()!!, tile = tile)
         bmp.setHasAlpha(false)
         bmp.prepareToDraw() // starts the GPU upload now, not in the frame that first shows it
         return tile
     }
 
-    /** Paper, PDF and (unless [inkToo] is false) the strokes intersecting [area], in page order. */
-    private fun paint(cv: Canvas, c: Content, area: Rect, rnd: PageRenderer, inkToo: Boolean = true) {
+    /**
+     * Paper, PDF, pictures, strokes and text intersecting [area], in that order (only the
+     * background unless [inkToo]). With a [tile] and a rectangular area, the PDF is rendered
+     * sharp at the tile's scale; otherwise the low-resolution page bitmap is used.
+     * Returns false if a picture wasn't decoded and [decode] is false.
+     */
+    private fun paint(
+        cv: Canvas, c: Content, area: Rect, rnd: PageRenderer,
+        inkToo: Boolean = true, tile: Tile? = null, decode: Boolean = true,
+    ): Boolean {
         cv.drawColor(DESK)
         rnd.drawPaper(cv, c.paper, c.pageW, c.pageH, hasPdf = c.pdf != null)
-        c.pdf?.let { rnd.drawPdfBackground(cv, it, c.pageW, c.pageH) }
-        if (!inkToo) return
+        val pdf = c.pdf
+        if (pdf != null) {
+            val sharp = tile != null && c.assets != null && c.assets.renderPdf(
+                tile.bitmap, pdf, c.pageW, c.pageH, tile.scale, tile.left, tile.top, pixelRect(tile, area),
+            )
+            if (!sharp) c.pdfBitmap?.let { rnd.drawPdfBackground(cv, it, c.pageW, c.pageH) }
+        }
+        if (!inkToo) return true
+        var complete = true
+        for (img in c.images) {
+            if (img.id in c.excluded || !img.bounds.intersects(area)) continue
+            val bmp = c.assets?.image(img.attachmentId, decode)
+            if (bmp == null) { if (!decode) complete = false; rnd.drawMissingImage(cv, img); continue }
+            rnd.drawImage(cv, bmp, img)
+        }
         for (i in c.index.query(area)) {
             val s = c.strokes[i]
             if (s.id in c.excluded) continue
             rnd.drawStroke(cv, s.color, s.tool, outline(s))
         }
+        for (t in c.texts) if (t.id !in c.excluded && t.bounds.intersects(area)) rnd.drawText(cv, t)
+        return complete
     }
+
+    /** [area] (page units) as a pixel rectangle inside [tile]'s bitmap. */
+    private fun pixelRect(tile: Tile, area: Rect) = android.graphics.Rect(
+        max(0, floor((area.left - tile.left) * tile.scale).toInt()), max(0, floor((area.top - tile.top) * tile.scale).toInt()),
+        min(TILE_PX, ceil((area.right - tile.left) * tile.scale).toInt()), min(TILE_PX, ceil((area.bottom - tile.top) * tile.scale).toInt()),
+    )
 
     private fun evict(level: Int, baseLevel: Int) {
         if (tiles.size <= MAX_TILES) return

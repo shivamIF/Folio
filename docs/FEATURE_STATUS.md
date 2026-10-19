@@ -16,7 +16,8 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Library | First-page previews (default: imported PDFs; Settings: all notebooks or covers only); refresh when edited | ✅ | Tab E2E checks the preview's pixels; cached as PNGs in the cache dir |
 | Library | Trash: Move to Trash (with Undo), Restore (to root if folder gone), Delete forever, Empty trash, auto-purge after 30 days | ✅ | Storage tests ×4; Tab E2E trash → restore with content intact |
 | Library | Subject collections, multi-select, drag-and-drop | ⏳ | |
-| Editor | Fountain, ballpoint, pencil, brush, highlighter | 🟡 | Profiles unit-tested; on-device look only on the emulator |
+| Editor | Fountain, ballpoint, fine liner, pencil, brush, marker, highlighter (glass shelf) | 🟡 | Profiles unit-tested; fine liner and marker added 2026-10-19 (schema 4), seen in the shelf on the Tab; feel not yet judged |
+| Editor | Brush Lab (debug builds only, no launcher icon): one capture replayed through v1, v2 (slot) and AndroidX Ink | 🟡 | Runs on the Tab; v2 column waits for engine v2. `adb shell am start -n app.folio.notes/.lab.BrushLabActivity --ez sample true` |
 | Editor | Colour palette, per-tool width, stabilisation slider | 🟡 | Persisted in prefs; not E2E tested |
 | Editor | Pressure-sensitive width, calibrated to real S Pen data, with a sensitivity slider | 🟡 | Unit-tested; measured on the user's recorded strokes; awaiting their feel test |
 | Editor | Tilt-sensitive pencil/brush (shading beyond natural writing angle) | 🟡 | Unit-tested against measured tilt range |
@@ -27,7 +28,11 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Editor | Paper: blank / ruled / grid / dotted | 🟡 | Rendered; seen on screenshot (ruled) |
 | Editor | Page locked to screen: fit-width on open, zoom out to whole page (centred), edge-stopped pan, fling, rotation keeps place | 🟡 | `PageViewportTest` ×9; awaiting the user's check on the Tab |
 | Editor | Lasso select (freeform or rectangle; any touch selects the whole stroke), move, resize, duplicate, delete, recolour; one undo step each | ✅ | `LassoTest` ×12; Tab E2E incl. on-screen pixel check after a move; resize by hand only |
-| Editor | Shapes, text boxes, images | ⏳ | |
+| Editor | Shapes: hold the pen still at the end of a stroke → clean line, ellipse/circle, rectangle, triangle, any polygon or straight zig-zag; keep moving to adjust. Closes even if the end stops short of or runs past the start (gap ≤ 20% of the size). Near-regular shapes become exact (square, circle, equilateral/right/isosceles triangle, regular polygon, level edges and lines); clearly irregular ones keep their corners | ✅ | ShapeRecognizerTest ×8 (incl. stop-short, overshoot, 40% gap stays open, handwriting/arcs/dots left alone), RegularizeTest ×6; E2E: rough rectangle snaps. Not yet tried by hand on the Tab |
+| Editor | Text boxes: Text tool (pen or finger tap), type in place, sizes S–XL, edit/delete; lasso-select, move, resize, recolour | ✅ | Model/codec tests; E2E: type, select, delete, undo |
+| Editor | Pictures: insert from photo picker (camera rotation baked in), move/resize/delete via lasso; in PDF export and thumbnails | 🟡 | Storage tests; picker flow not automated (needs a person) |
+| Editor | Big lasso selections (150+ strokes) drag as one picture | ✅ | Implemented; check on the Tab |
+| Editor | PDF backgrounds sharp at any zoom (rendered per tile) | ✅ | Emulator screenshot at 3× |
 | S Pen | Stylus vs finger detection, pen-only mode | 🟡 | Policy unit-tested; stylus-source E2E |
 | S Pen | Historical samples, unbuffered dispatch, motion prediction | 🟡 | Implemented; latency not measured |
 | Editor | Eraser button remembers the last type (stroke or partial); tap again for options | ✅ | E2E helper opens the menu with a second tap |
@@ -38,8 +43,8 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Formats | Native format, versioned | ✅ | CodecTest |
 | Formats | PDF import (library button or "Open with/Share to Folio"), annotate on top, keeps physical page size | ✅ | Storage tests ×5; Tab E2E: 3-page import, background visible, annotation saved |
 | Formats | PDF export to Downloads/Folio + Share (vector ink and ruling; PDF backgrounds as 180 dpi images) | ✅ | Tab E2E: 3 pages, 612×792 pt preserved, rendered and inspected |
-| Formats | `.goodnotes` import, editable (strokes incl. vector shapes, highlighters, PDF backgrounds) | ✅ | GoodNotesImporterTest ×6 + real notebook (79 pages, 2,020 strokes); on the Tab, highlights line up with the PDF text and erase normally |
-| Formats | `.sdocx` (Samsung Notes) import, editable (strokes, colours, highlighters, pressure) | 🟡 | Real-file test on 5 notes (33,105 strokes); on the Tab, a 25,303-stroke note imports, renders as in Samsung Notes and erases. Not yet: PDF backgrounds, text, images, shapes; stroke width not yet compared side by side. Locked notes are refused (by design). See docs/formats/SDOCX.md |
+| Formats | `.goodnotes` import, editable (strokes incl. vector shapes, highlighters, PDF backgrounds, text boxes) | ✅ | GoodNotesImporterTest ×6 + real notebook (79 pages, 2,020 strokes); on the Tab, highlights line up with the PDF text and erase normally |
+| Formats | `.sdocx` (Samsung Notes) import: strokes incl. shape-tool and rotated ones, colours, highlighters, pressure, PDF backgrounds, text boxes, vector shapes | ✅ | 35,860 strokes from 5 notes, all inside their boxes; synthetic byte-level test; on the Tab, a 22-page PDF note imports with backgrounds. Not yet: pictures (no sample), sticky memos. Locked notes are refused (by design) |
 | Formats | Open `.sdocx` / `.goodnotes` from Files or Share | ✅ | Intent filters for application/sdoc, zip, octet-stream; Folio listed beside Samsung Notes for an `.sdocx` |
-| Sync | Offline queue, cloud sync, conflicts | ⏳ | No backend exists; design in ADR-7 |
+| Sync | Google Drive sync (free, private app folder): Settings → Auto sync toggle; tap "Auto sync" to link/change/unlink the account; Sync now; edits offline sync later; conflicts keep both; live merge into an open notebook; background sync (on leaving the app + every ~15 min) | ✅ | Unit: engine, store-to-store, live-editor hand-off, page merge ×6, fake-Drive HTTP (multipart, resumable, change feed). Real devices (Tab S6 Lite + Motorola Edge 50 Neo, 2026-10-19): first upload 37 items, phone received all 33 files byte-identical (MD5), a phone stroke appeared live in the notebook open on the Tab, background worker ran on leaving the app, and the 15-min periodic job ran on schedule (17:02, SUCCESS; Folio's process was already running, so a run from a cold start is unconfirmed) |
 | Productivity | Search inside notes, OCR, handwriting recognition | ⏳ | |

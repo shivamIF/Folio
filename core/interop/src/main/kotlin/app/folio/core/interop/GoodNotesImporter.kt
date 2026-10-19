@@ -16,7 +16,13 @@ data class ImportedPage(
     /** Background PDF page: key of an attachment in [ImportedNotebook.attachmentKeys] and a 0-based page index. */
     val pdfKey: String? = null,
     val pdfPageIndex: Int = 0,
+    /** Typed text, in Folio page units. */
+    val texts: List<app.folio.core.model.TextBox> = emptyList(),
+    /** Pictures: attachment key (open with the importer's openAttachment) and frame in page units. */
+    val images: List<ImportedImage> = emptyList(),
 )
+
+data class ImportedImage(val key: String, val x: Float, val y: Float, val width: Float, val height: Float)
 
 data class ImportedNotebook(
     val title: String,
@@ -57,7 +63,9 @@ class GoodNotesImporter(file: File) : AutoCloseable {
         val pages = HashMap<String, GnPage>()
         val slots = ArrayList<Slot>()
         val attachmentFiles = HashMap<String, String>() // attachment record id → zip entry
-        var textBoxes = 0
+        // Text boxes: placement (130: page log name + position) and content (133), last record wins.
+        val textPlaces = LinkedHashMap<String, GnText>()
+        val textContent = HashMap<String, String>()
         if (zip.has("index.attachments.pb")) {
             for (r in Proto.stream(zip.read("index.attachments.pb"))) {
                 val id = r.string(1) ?: continue; val path = r.string(2) ?: continue
@@ -84,13 +92,22 @@ class GoodNotesImporter(file: File) : AutoCloseable {
                 val key = s.msg(4)?.string(1) ?: ""
                 slots += Slot(key, pageId, slotId)
             }
-            if (r.has(130)) textBoxes++
+            r.msg(130)?.let { t ->
+                val id = t.string(1) ?: return@let
+                val place = t.msg(4)?.msg(1)
+                val pos = place?.msg(2)
+                textPlaces[id] = GnText(place?.string(1), pos?.float(1) ?: 0f, pos?.float(2) ?: 0f, t.int(16)?.toFloat())
+            }
+            r.msg(133)?.let { c ->
+                val box = c.string(2) ?: return@let
+                c.msg(4)?.msg(1)?.string(1)?.let { textContent[box] = it }
+            }
         }
         if (slots.isEmpty()) throw FormatException("No pages found in this GoodNotes file")
 
         val out = ArrayList<ImportedPage>()
         val usedAttachments = HashSet<String>()
-        var images = 0; var otherElements = 0; var shapesSkipped = 0
+        var images = 0; var otherElements = 0; var shapesSkipped = 0; var importedTexts = 0
         for (slot in slots.sortedBy { it.key }) {
             val page = pages[slot.pageId] ?: continue
             val scale = UNITS_PER_GN
@@ -103,17 +120,33 @@ class GoodNotesImporter(file: File) : AutoCloseable {
             }
             val att = page.attachment?.let { attachmentFiles[it] }?.takeIf { zip.has(it) && isPdf(it) }
             if (att != null) usedAttachments += att
+            val pageW = (page.width * scale).coerceIn(100f, 10_000f)
+            val pageH = (page.height * scale).coerceIn(100f, 10_000f)
+            val texts = textPlaces.filter { (id, t) -> t.pageLog == slot.slotId && !textContent[id].isNullOrBlank() }.map { (id, t) ->
+                val size = (t.fontSize ?: DEFAULT_FONT) * scale
+                val x = (t.x * scale).coerceIn(0f, pageW - 40f)
+                val width = (pageW - x - 16f).coerceIn(80f, 700f)
+                val text = textContent.getValue(id).trimEnd()
+                app.folio.core.model.TextBox(
+                    x = x, y = (t.y * scale).coerceIn(0f, pageH - size), width = width,
+                    height = size * 1.25f * (text.count { it == '\n' } + 1), text = text, fontSize = size,
+                )
+            }
+            importedTexts += texts.size
             out += ImportedPage(
-                width = (page.width * scale).coerceIn(100f, 10_000f),
-                height = (page.height * scale).coerceIn(100f, 10_000f),
+                width = pageW,
+                height = pageH,
                 strokes = strokes,
                 pdfKey = att,
                 pdfPageIndex = ((page.pdfPage ?: 1) - 1).coerceAtLeast(0),
+                texts = texts,
             )
         }
-        if (textBoxes > 0) warnings += "$textBoxes typed text box(es) weren't imported (Folio has no text boxes yet)."
-        if (images > 0) warnings += "$images image(s) weren't imported (Folio has no images on pages yet)."
-        if (shapesSkipped > 0) warnings += "$shapesSkipped shape(s) such as rectangles or ellipses weren't imported yet."
+        val missedTexts = textPlaces.count { (id, _) -> !textContent[id].isNullOrBlank() } - importedTexts
+        if (missedTexts > 0) warnings += "$missedTexts text box(es) couldn't be placed on a page."
+        // Element type 5 is a GoodNotes shape (frame + small vector path), not a picture.
+        val shapes = shapesSkipped + images
+        if (shapes > 0) warnings += "$shapes shape(s) drawn with the GoodNotes shape tool weren't imported yet."
         if (otherElements > 0) warnings += "$otherElements other item(s) of an unknown kind were skipped."
         return ImportedNotebook(title, out, usedAttachments, warnings)
     }
@@ -121,6 +154,9 @@ class GoodNotesImporter(file: File) : AutoCloseable {
     private fun isPdf(entry: String): Boolean = runCatching {
         zip.open(entry).use { s -> val h = ByteArray(5); s.read(h) == 5 && String(h, Charsets.US_ASCII) == "%PDF-" }
     }.getOrDefault(false)
+
+    /** A text box's placement: the page slot it sits on, position and font size (GoodNotes units). */
+    private class GnText(val pageLog: String?, val x: Float, val y: Float, val fontSize: Float?)
 
     private class GnPage(val attachment: String?, val pdfPage: Int?, val width: Float, val height: Float)
     private class Slot(val key: String, val pageId: String, val slotId: String)
@@ -262,6 +298,8 @@ class GoodNotesImporter(file: File) : AutoCloseable {
     companion object {
         /** GoodNotes units are 132 per inch; Folio has 1000 units per 210 mm (A4 width). */
         const val UNITS_PER_GN = (72f / 132f) / (595.2756f / 1000f)
+        /** Text size when a box doesn't record one (GoodNotes units). */
+        private const val DEFAULT_FONT = 24f
         private const val DEFAULT_W = 1093f
         private const val DEFAULT_H = 1545f
 

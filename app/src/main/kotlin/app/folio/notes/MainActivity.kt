@@ -64,6 +64,16 @@ class MainActivity : ComponentActivity() {
         return super.dispatchTouchEvent(ev)
     }
 
+    override fun onStart() {
+        super.onStart()
+        (application as FolioApp).sync.onForeground()
+    }
+
+    override fun onStop() {
+        (application as FolioApp).sync.onBackground()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -73,6 +83,13 @@ class MainActivity : ComponentActivity() {
                 // Saved across rotation and process death, so the open notebook is restored.
                 var openNotebook by rememberSaveable { mutableStateOfNullableString() }
                 val id = openNotebook
+                // Sync leaves the open notebook alone, and catches it up shortly after it closes.
+                androidx.compose.runtime.LaunchedEffect(id) {
+                    val sync = (application as FolioApp).sync
+                    val was = sync.openNotebook
+                    sync.openNotebook = id
+                    if (id == null && was != null) sync.requestSync(delayMs = 2_000)
+                }
                 val pendingImport = importRequest.value
                 // An incoming PDF always lands in the library, which imports and then opens it.
                 if (pendingImport != null && id != null) openNotebook = null

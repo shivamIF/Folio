@@ -29,6 +29,8 @@
 ### ADR-4: Native format = JSON per page, atomic writes
 - **Why JSON**: human-inspectable and easy to migrate.
 - **Schema 2 (2026-10-19): packed points.** Each stroke's point channels are one base64 string (`pts`: little-endian float32 x, y, pressure, tilt, orientation, then int32 t; 24 bytes per point). Lossless. Measured on the Tab with an imported 7,106-stroke page: schema 1 took 17.3 s to open, schema 2 takes 4.4 s, and the file is 20% smaller. Schema 1 files still load and are rewritten as schema 2 on their next save. See `StrokeSerializer`.
+- **Schema 3 (2026-10-19): text boxes and pictures** (`Page.texts`, `Page.images`; pictures are notebook attachments `<id>.img`). An older app refuses these pages rather than dropping content on save. Element edits share the undo history (`PutText`, `PutImage`, `Composite`).
+- **Schema 4 (2026-10-19): fine-liner and marker tools** (`ToolType.FINELINER`, `MARKER`). No data migration is needed: schema 3 pages load as they are. Every encode now stamps the current version (before, a page loaded from an older schema kept its old number after edits, so an older app could misread newer content).
 - **No JSON tree on read.** `schemaVersion` is found by a key scan. Building a `JsonElement` tree of a 28 MB page ran out of the 256 MB heap and crashed the app; `core:model` tests now run with a 256 MB heap to catch that.
 - **Still open**: a fully binary page file (and progressive drawing) would cut the remaining 4.4 s for very dense pages.
 - **Writes** (`AtomicFile`): write a temp file, fsync it, copy the previous file to `.bak`, then do an atomic rename.
@@ -72,10 +74,17 @@ MotionEvent → InputPolicy (draw/erase/navigate/ignore)
 - **Pen-only mode** turns on automatically when a stylus is first seen (this can be switched off). Fingers then pan and zoom; two fingers always pan and zoom.
 - **Only public Android APIs** are used. Samsung-private APIs are avoided (see ARTIFACT_INVENTORY).
 
-### ADR-7: Sync (planned, not implemented)
-- **Plan**: local-first.
-  - Each page edit becomes an operation with a stable op id, kept in an outbox.
-  - The server orders operations per notebook with a revision counter, not device clocks.
-  - Strokes are immutable and addressed by id, so concurrent adds merge without conflict.
-  - Concurrent delete-vs-edit of the same stroke resolves "delete wins, unless the stroke was modified after the delete was issued". That case gets surfaced to the user.
-- **Status**: no backend exists. A `SyncEngine` interface and an in-process test server will be built in Phase 7.
+### ADR-7: Sync = Google Drive app folder, three-way file sync (2026-10-19)
+- **Remote:** the user's own Google Drive, in the app-private `appDataFolder` (scope `drive.appdata`). It's free and has no server of ours. Sign-in uses Play services authorisation; the app is registered by package plus SHA-1 in the user's own Cloud project (docs/SYNC_SETUP.md).
+- **Items:**
+  - `f/folders.json`, `n/<nb>/meta.json`, `n/<nb>/p/<page>.json` (gzip on Drive) and `n/<nb>/a/<id>.pdf|img`;
+  - the content MD5 is kept in `appProperties.h`, so a listing shows what changed;
+  - the local layout is unchanged; `StoreSync` maps keys to the store under its lock.
+- **Engine** (`core:sync`, pure Kotlin): a three-way compare per key (local, remote, base at last sync). Edits beat deletes; a true conflict keeps both (a page copy after the original) or merges (notebook details: newer wins, pages united; folders united by id). Attachments go first and details last; the base is saved as it goes; a pass restarts after a conflict.
+- **Safety:**
+  - remote input is validated (key shapes, ids, pages must decode and match their key);
+  - the open notebook still sends its edits; pages arriving for it go through the editor, which merges them with unsaved edits per element (`PageMerge`, three-way by id) and returns the page to store, written on the editor's own writer before any later save; deletions and conflicts there wait until it's closed;
+  - a notebook is removed only when none of its pages remain.
+- **When:** ~0.25 s after any local change; Drive's change feed every 1 s while a notebook is open; a full check every 30 s on screen; WorkManager when the app leaves the screen and every 15 min in the background (network required).
+- **Speed (measured 2026-10-19):** Drive answers a listing in ~0.6 s, saves a small file in ~2 s and serves one in 1–1.5 s, so device-to-device takes ~5–10 s. Small uploads are one multipart request, connections are kept alive, tokens are reused for 40 min. A same-network direct link was discussed for ~1 s and deferred by the user.
+- **Rejected:** a per-edit op-log. It would need a server or a much more complex Drive layout; per-page files fit Drive and our storage, and conflicts are per page.

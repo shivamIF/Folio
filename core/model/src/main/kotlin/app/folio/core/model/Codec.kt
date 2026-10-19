@@ -19,8 +19,11 @@ object DocumentCodec {
         encodeDefaults = true
     }
 
-    fun encodePage(page: Page): String = json.encodeToString(Page.serializer(), page)
-    fun encodeLibrary(index: LibraryIndex): String = json.encodeToString(LibraryIndex.serializer(), index)
+    // Always write the current version: a page loaded from an older schema may now hold
+    // content (text boxes, new tools) that an older app must refuse rather than misread.
+    fun encodePage(page: Page): String = json.encodeToString(Page.serializer(), page.copy(schemaVersion = SCHEMA_VERSION))
+    fun encodeLibrary(index: LibraryIndex): String =
+        json.encodeToString(LibraryIndex.serializer(), index.copy(schemaVersion = SCHEMA_VERSION))
 
     fun decodePage(text: String): Page = decode(text) { json.decodeFromString(Page.serializer(), it) }
     fun decodeLibrary(text: String): LibraryIndex = decode(text) { json.decodeFromString(LibraryIndex.serializer(), it) }

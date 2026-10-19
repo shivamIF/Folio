@@ -21,11 +21,14 @@ object NotebookPdfExporter {
     const val POINTS_PER_UNIT = 595.2756f / 1000f
     /** Background image resolution relative to PDF points (2.5 × 72 = 180 dpi). */
     private const val BACKGROUND_OVERSAMPLE = 2.5f
+    /** Pictures are embedded at most this many pixels on the long side. */
+    private const val EXPORT_IMAGE_PX = 2400
 
     fun write(repo: DocumentRepository, meta: NotebookMeta, out: OutputStream) {
         val doc = PdfDocument()
         val renderer = PageRenderer()
         val sources = HashMap<String, PdfFile>()
+        val pictures = HashMap<String, android.graphics.Bitmap?>()
         try {
             for ((i, pageId) in meta.pageIds.withIndex()) {
                 val page = repo.loadPage(meta.id, pageId)
@@ -41,7 +44,9 @@ object NotebookPdfExporter {
                     renderer.drawPdfBackground(c, bmp, page.width, page.height)
                     bmp.recycle()
                 }
-                for (s in page.strokes) renderer.drawStroke(c, s)
+                renderer.drawContent(c, page) { id ->
+                    pictures.getOrPut(id) { app.folio.notes.editor.PageAssets.decode(repo.imageFile(meta.id, id), EXPORT_IMAGE_PX) }
+                }
                 doc.finishPage(pdfPage)
             }
             doc.writeTo(out)

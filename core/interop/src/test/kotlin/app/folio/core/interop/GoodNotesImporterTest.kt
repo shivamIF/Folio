@@ -110,7 +110,9 @@ class GoodNotesImporterTest {
             // Slots: page 2 is ordered first by its fractional key.
             Pb().str(1, slotA).msg(54, Pb().str(2, slotA).msg(3, Pb().str(1, "p1")).msg(4, Pb().str(1, "a5"))),
             Pb().str(1, slotB).msg(54, Pb().str(2, slotB).msg(3, Pb().str(1, "p2")).msg(4, Pb().str(1, "a1"))),
-            Pb().str(1, "t1").msg(130, Pb().str(1, "t1")),
+            // A text box on slot B at (110, 220), font 24, and its content.
+            Pb().str(1, "t1").msg(130, Pb().str(1, "t1").msg(4, Pb().msg(1, Pb().str(1, slotB).msg(2, Pb().f32(1, 110f).f32(2, 220f)))).int(16, 24)),
+            Pb().str(1, "c1").msg(133, Pb().str(1, "c1").str(2, "t1").msg(4, Pb().msg(1, Pb().str(1, "Hello\nworld")))),
         )
         val notesA = Pb.stream(header("s1"), stroke("s1", 50f), header("s2"), stroke("s2", 300f, alpha = 0.4f), header("gone", deleted = true), header("s3"), stroke("s3", 600f), header("s3", deleted = true))
         // A header that also carries a field 7 must still count as a header.
@@ -139,7 +141,12 @@ class GoodNotesImporterTest {
         assertEquals(setOf("attachments/F1"), nb.attachmentKeys)
         // s3 was deleted after being drawn; "gone" never had content.
         assertEquals(listOf("s1", "s2"), second.strokes.map { it.id })
-        assertTrue(nb.warnings.any { "text box" in it })
+        // The text box lands on its own page (slot B, ordered first by key "a1"), in Folio units.
+        assertTrue(second.texts.isEmpty())
+        val t = first.texts.single()
+        val u = GoodNotesImporter.UNITS_PER_GN
+        assertEquals("Hello\nworld", t.text)
+        assertEquals(110f * u, t.x, 0.01f); assertEquals(220f * u, t.y, 0.01f); assertEquals(24f * u, t.fontSize, 0.01f)
     }
 
     @Test fun convertsUnitsColoursAndHighlighters() {
@@ -226,6 +233,10 @@ class GoodNotesRealFileTest {
         if (!sample.exists()) { println("skipped: no local sample"); return }
         val nb = GoodNotesImporter(sample).use { it.read() }
         println("title=${nb.title} pages=${nb.pages.size} strokes=${nb.pages.sumOf { it.strokes.size }} pdfs=${nb.attachmentKeys.size} warnings=${nb.warnings}")
+        val texts = nb.pages.flatMap { it.texts }
+        println("texts=" + texts.joinToString { "[%.0f,%.0f w%.0f s%.1f '%s']".format(it.x, it.y, it.width, it.fontSize, it.text.take(30)) } +
+            " on pages " + nb.pages.withIndex().filter { it.value.texts.isNotEmpty() }.map { it.index + 1 })
+        assertEquals(3, texts.size, "all three typed text boxes are imported")
         assertTrue(nb.title.isNotBlank())
         assertEquals(79, nb.pages.size)
         // 2,022 live curve strokes (368 more are deletions in the document's history).

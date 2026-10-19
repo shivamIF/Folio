@@ -73,7 +73,20 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material.icons.outlined.AddPhotoAlternate
+import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import app.folio.notes.ui.GlassIconButton
+import app.folio.notes.ui.ProvideGlass
+import app.folio.notes.ui.LocalGlass
+import app.folio.notes.ui.GlassBackdrop
+import app.folio.notes.ui.GlassDivider
+import app.folio.notes.ui.glass
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -100,41 +113,47 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
     val close = { vm.flush(); onClose() }
     BackHandler(onBack = close)
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(state.meta?.title ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            "Page ${state.pageIndex + 1} of ${state.meta?.pageIds?.size ?: 1} · " + when (state.save) {
-                                SaveStatus.SAVED -> "Saved"; SaveStatus.PENDING -> "Editing…"; SaveStatus.SAVING -> "Saving…"; SaveStatus.ERROR -> "Not saved"
-                            },
-                            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.testTag("save-status"),
-                        )
-                    }
-                },
-                navigationIcon = { IconButton(onClick = close) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to library") } },
-                actions = {
-                    IconButton(onClick = vm::undo, enabled = state.canUndo, modifier = Modifier.testTag("undo")) { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo") }
-                    IconButton(onClick = vm::redo, enabled = state.canRedo, modifier = Modifier.testTag("redo")) { Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo") }
-                    IconButton(onClick = { vm.openPage(state.pageIndex - 1) }, enabled = state.pageIndex > 0) {
-                        Icon(Icons.AutoMirrored.Filled.NavigateBefore, contentDescription = "Previous page")
-                    }
-                    IconButton(onClick = { vm.openPage(state.pageIndex + 1) }, enabled = state.pageIndex < (state.meta?.pageIds?.size ?: 1) - 1) {
-                        Icon(Icons.AutoMirrored.Filled.NavigateNext, contentDescription = "Next page")
-                    }
-                    IconButton(onClick = vm::exportPdf, enabled = !state.exporting) {
-                        Icon(Icons.Default.PictureAsPdf, contentDescription = "Export as PDF")
-                    }
-                    IconButton(onClick = vm::addPage) { Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = "Add page after this one") }
+    ProvideGlass {
+    val g = LocalGlass.current
+    Box(Modifier.fillMaxSize()) {
+        GlassBackdrop()
+        Column(Modifier.fillMaxSize().systemBarsPadding()) {
+            // Glass top bar: back, title and save state, then undo/redo and page actions.
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
+                    .glass(RoundedCornerShape(26.dp), elevation = 12.dp).padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                GlassIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back to library", close)
+                Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                    Text(state.meta?.title ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis, color = g.ink, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                    Text(
+                        "Page ${state.pageIndex + 1} of ${state.meta?.pageIds?.size ?: 1} · " + when (state.save) {
+                            SaveStatus.SAVED -> "Saved"; SaveStatus.PENDING -> "Editing…"; SaveStatus.SAVING -> "Saving…"; SaveStatus.ERROR -> "Not saved"
+                        },
+                        style = MaterialTheme.typography.labelMedium, color = g.inkSoft,
+                        modifier = Modifier.testTag("save-status"),
+                    )
+                }
+                GlassIconButton(Icons.AutoMirrored.Filled.Undo, "Undo", vm::undo, enabled = state.canUndo, modifier = Modifier.testTag("undo"))
+                GlassIconButton(Icons.AutoMirrored.Filled.Redo, "Redo", vm::redo, enabled = state.canRedo, modifier = Modifier.testTag("redo"))
+                GlassDivider(Modifier.padding(horizontal = 4.dp))
+                GlassIconButton(Icons.AutoMirrored.Filled.NavigateBefore, "Previous page", { vm.openPage(state.pageIndex - 1) }, enabled = state.pageIndex > 0)
+                GlassIconButton(Icons.AutoMirrored.Filled.NavigateNext, "Next page", { vm.openPage(state.pageIndex + 1) }, enabled = state.pageIndex < (state.meta?.pageIds?.size ?: 1) - 1)
+                GlassIconButton(Icons.AutoMirrored.Filled.NoteAdd, "Add page after this one", vm::addPage)
+                GlassIconButton(Icons.Default.PictureAsPdf, "Export as PDF", vm::exportPdf, enabled = !state.exporting)
+            }
+            var canvasRef by remember { mutableStateOf<InkCanvasView?>(null) }
+            var viewportTick by remember { mutableStateOf(0) }
+            val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+            ) { uri -> val c = canvasRef; if (uri != null && c != null) vm.insertImage(uri, c.visiblePageArea()) }
+            ToolShelf(
+                state.tools, vm::updateTools, onColorWithSelection = if (state.selection.isNotEmpty()) vm::recolorSelection else null,
+                onInsertImage = {
+                    pickImage.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
             )
-        },
-    ) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad)) {
-            ToolBar(state.tools, vm::updateTools, onColorWithSelection = if (state.selection.isNotEmpty()) vm::recolorSelection else null)
             Box(Modifier.fillMaxSize().clipToBounds()) {
                 val page = state.page
                 if (page != null) {
@@ -149,8 +168,10 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                                     override fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform) =
                                         vm.transformSelection(ids, transform)
                                     override fun onStrokesSplit(pieces: Map<String, List<Stroke>>) = vm.onStrokesSplit(pieces)
+                                    override fun onTextTap(x: Float, y: Float, textId: String?) = vm.onTextTap(x, y, textId)
+                                    override fun onViewportChanged() { viewportTick++ }
                                 }
-                            }
+                            }.also { canvasRef = it }
                         },
                         update = { v ->
                             v.tool = tools.tool; v.color = tools.color; v.penWidth = tools.width
@@ -158,13 +179,27 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                             v.pdfBackground = state.background
                             v.eraserPartial = tools.eraserPartial; v.eraserSizeDp = tools.eraserSizeDp
                             v.eraseHighlighterOnly = tools.eraseHighlighterOnly
+                            v.textMode = tools.text
+                            v.hiddenIds = state.editingText?.let { setOf(it.box.id) } ?: emptySet()
+                            v.reportViewport = state.editingText != null
                             v.lassoMode = tools.lasso; v.lassoRectangle = tools.lassoShape == LassoShape.RECTANGLE; v.selection = state.selection
                             v.pressureCurve = PressureCurve.fromSensitivity(tools.pressureSensitivity)
                             v.penOnlyPreference = tools.penOnly
-                            v.setPage(page.id, state.strokes, page.paper, page.width, page.height)
+                            v.assets = vm.assets
+                            v.setPage(page.id, state.strokes, page.paper, page.width, page.height, state.texts, state.images, page.pdf)
                         },
                         modifier = Modifier.fillMaxSize().clipToBounds().testTag("canvas"),
                     )
+                    val editing = state.editingText
+                    val cv = canvasRef
+                    if (editing != null && cv != null) {
+                        @Suppress("UNUSED_EXPRESSION") viewportTick // re-place the field when the page zooms or scrolls
+                        TextBoxField(editing, cv, onChange = vm::updateEditingText)
+                        TextEditBar(
+                            onDelete = { vm.updateEditingText(""); vm.commitText() }, onDone = vm::commitText,
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                        )
+                    }
                     if (state.selection.isNotEmpty()) SelectionBar(
                         count = state.selection.size,
                         onDuplicate = vm::duplicateSelection, onDelete = vm::deleteSelection, onDone = vm::clearSelection,
@@ -173,6 +208,7 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                 }
             }
         }
+    }
     }
 
     if (state.exporting) AlertDialog(
@@ -218,7 +254,7 @@ private val TOOL_BUTTONS = listOf(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit, onColorWithSelection: ((Long) -> Unit)?) {
+private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit, onColorWithSelection: ((Long) -> Unit)?, onInsertImage: () -> Unit) {
     var settings by remember { mutableStateOf(false) }
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
         // Three groups (tools · colours · size/settings) that wrap onto extra rows
@@ -228,18 +264,23 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             itemVerticalAlignment = Alignment.CenterVertically,
         ) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
+          // Tools wrap too, so narrow screens never push a tool (e.g. the eraser) off the edge.
+          FlowRow(itemVerticalAlignment = Alignment.CenterVertically) {
             TOOL_BUTTONS.forEach { b ->
-                val on = !tools.eraser && !tools.lasso && tools.tool == b.tool
-                IconToggleButton(on, onCheckedChange = { update { it.copy(tool = b.tool, eraser = false, lasso = false) } },
+                val on = !tools.eraser && !tools.lasso && !tools.text && tools.tool == b.tool
+                IconToggleButton(on, onCheckedChange = { update { it.copy(tool = b.tool, eraser = false, lasso = false, text = false) } },
                     modifier = Modifier.testTag("tool-${b.tool.name}").semantics { selected = on }) {
                     Icon(b.icon, contentDescription = b.label, tint = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             Box {
                 var lassoMenu by remember { mutableStateOf(false) }
-                // Tapping the lasso always offers both shapes, like the pen chooser in note apps.
-                IconToggleButton(tools.lasso, onCheckedChange = { lassoMenu = true }, modifier = Modifier.testTag("tool-lasso")) {
+                // Like the eraser: the first tap picks the lasso (last shape used); a second tap offers the shapes.
+                IconToggleButton(
+                    tools.lasso,
+                    onCheckedChange = { if (tools.lasso) lassoMenu = true else update { it.copy(lasso = true, eraser = false, text = false) } },
+                    modifier = Modifier.testTag("tool-lasso"),
+                ) {
                     Icon(
                         if (tools.lassoShape == LassoShape.RECTANGLE) Icons.Outlined.HighlightAlt else Icons.Outlined.Gesture,
                         contentDescription = "Lasso select",
@@ -253,10 +294,32 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
                             text = { Text(label) },
                             leadingIcon = { Icon(if (shape == LassoShape.FREEFORM) Icons.Outlined.Gesture else Icons.Outlined.HighlightAlt, contentDescription = null) },
                             trailingIcon = { if (tools.lasso && tools.lassoShape == shape) Icon(Icons.Default.Check, contentDescription = "Selected") },
-                            onClick = { lassoMenu = false; update { it.copy(lasso = true, eraser = false, lassoShape = shape) } },
+                            onClick = { lassoMenu = false; update { it.copy(lasso = true, eraser = false, text = false, lassoShape = shape) } },
                         )
                     }
                 }
+            }
+            Box {
+                var textMenu by remember { mutableStateOf(false) }
+                IconToggleButton(
+                    tools.text,
+                    onCheckedChange = { if (tools.text) textMenu = true else update { it.copy(text = true, eraser = false, lasso = false) } },
+                    modifier = Modifier.testTag("tool-text"),
+                ) {
+                    Icon(Icons.Outlined.TextFields, contentDescription = "Text", tint = if (tools.text) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                DropdownMenu(textMenu, onDismissRequest = { textMenu = false }) {
+                    listOf(20f to "Small", 28f to "Medium", 40f to "Large", 56f to "Extra large").forEach { (size, label) ->
+                        DropdownMenuItem(
+                            text = { Text("$label text") },
+                            trailingIcon = { if (tools.textSize == size) Icon(Icons.Default.Check, contentDescription = "Selected") },
+                            onClick = { textMenu = false; update { it.copy(textSize = size) } },
+                        )
+                    }
+                }
+            }
+            IconButton(onClick = onInsertImage, modifier = Modifier.testTag("insert-image")) {
+                Icon(Icons.Outlined.AddPhotoAlternate, contentDescription = "Insert picture", tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Box {
                 var eraserMenu by remember { mutableStateOf(false) }
@@ -264,7 +327,7 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
                 // while it's selected opens the options (type, size, highlighter only).
                 IconToggleButton(
                     tools.eraser,
-                    onCheckedChange = { if (tools.eraser) eraserMenu = true else update { it.copy(eraser = true, lasso = false) } },
+                    onCheckedChange = { if (tools.eraser) eraserMenu = true else update { it.copy(eraser = true, lasso = false, text = false) } },
                     modifier = Modifier.testTag("tool-eraser"),
                 ) {
                     Icon(Icons.Outlined.AutoFixNormal, contentDescription = "Eraser", tint = if (tools.eraser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
@@ -282,7 +345,7 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
                                 }
                             },
                             trailingIcon = { if (tools.eraser && tools.eraserPartial == partial) Icon(Icons.Default.Check, contentDescription = "Selected") },
-                            onClick = { eraserMenu = false; update { it.copy(eraser = true, eraserPartial = partial, lasso = false) } },
+                            onClick = { eraserMenu = false; update { it.copy(eraser = true, eraserPartial = partial, lasso = false, text = false) } },
                         )
                     }
                     // The whole row toggles (not just the small switch).
@@ -364,14 +427,55 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
     }
 }
 
+/** The box being typed, drawn in place over the page at the current zoom. */
+@Composable
+private fun TextBoxField(edit: TextEdit, canvas: InkCanvasView, onChange: (String) -> Unit) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val b = edit.box
+    val scale = canvas.pageScale
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    androidx.compose.foundation.text.BasicTextField(
+        value = b.text,
+        onValueChange = onChange,
+        textStyle = androidx.compose.ui.text.TextStyle(
+            color = Color(b.color.toInt()),
+            fontSize = with(density) { (b.fontSize * scale).toSp() },
+        ),
+        cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+        modifier = Modifier
+            .offset { androidx.compose.ui.unit.IntOffset((canvas.pageTx + b.x * scale).toInt(), (canvas.pageTy + b.y * scale).toInt()) }
+            .width(with(density) { (b.width * scale).toDp() })
+            .background(Color(0x143D5A80))
+            .focusRequester(focus)
+            .testTag("text-box-field")
+            .semantics { contentDescription = "Text box" },
+    )
+    LaunchedEffect(edit.box.id) { focus.requestFocus() }
+}
+
+@Composable
+private fun TextEditBar(onDelete: () -> Unit, onDone: () -> Unit, modifier: Modifier = Modifier) {
+    ProvideGlass {
+    Box(modifier.glass(RoundedCornerShape(26.dp))) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Text", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 8.dp))
+            IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, contentDescription = "Delete text box") }
+            IconButton(onClick = onDone) { Icon(Icons.Default.Check, contentDescription = "Done typing") }
+        }
+    }
+    }
+}
+
 @Composable
 private fun SelectionBar(count: Int, onDuplicate: () -> Unit, onDelete: () -> Unit, onDone: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp), tonalElevation = 6.dp, shadowElevation = 6.dp, modifier = modifier) {
+    ProvideGlass {
+    Box(modifier.glass(RoundedCornerShape(26.dp))) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("$count selected", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 8.dp))
             IconButton(onClick = onDuplicate) { Icon(Icons.Outlined.ContentCopy, contentDescription = "Duplicate selection") }
             IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, contentDescription = "Delete selection") }
             IconButton(onClick = onDone) { Icon(Icons.Default.Check, contentDescription = "Clear selection") }
         }
+    }
     }
 }

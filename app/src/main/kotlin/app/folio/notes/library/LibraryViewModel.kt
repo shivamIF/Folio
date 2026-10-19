@@ -61,6 +61,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // Trash keeps notebooks for 30 days.
         io { repo.purgeTrash(System.currentTimeMillis() - TRASH_DAYS * 24L * 60 * 60 * 1000) }
+        // Notebooks that arrive (or change) through Drive sync show up without reopening the app.
+        viewModelScope.launch { folio.sync.changes.collect { refresh() } }
     }
 
     fun refresh() = io { /* re-read */ }
@@ -183,36 +185,53 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun importSamsungNotes(file: java.io.File, name: String): Pair<NotebookMeta, List<String>> {
+    private fun importSamsungNotes(file: java.io.File, name: String): Pair<NotebookMeta, List<String>> =
         app.folio.core.interop.SamsungNotesImporter(file).use { sn ->
-            val nb = sn.read(name)
-            val pages = nb.pages.map { p -> Page(width = p.width, height = p.height, paper = PaperTemplate.BLANK, strokes = p.strokes) }
-            val meta = repo.createNotebookFromImport(nb.title, _state.value.folderId, Cover(color = 0xFF3D5A80), emptyList(), pages)
-            return meta to nb.warnings
+            createFromImport(sn.read(name), sn::openAttachment, Cover(color = 0xFF3D5A80))
         }
-    }
 
-    private fun importGoodNotes(file: java.io.File): Pair<NotebookMeta, List<String>> {
+    private fun importGoodNotes(file: java.io.File): Pair<NotebookMeta, List<String>> =
         app.folio.core.interop.GoodNotesImporter(file).use { gn ->
-            val nb = gn.read()
-            val staged = LinkedHashMap<String, app.folio.core.storage.StagedFile>()
-            try {
-                for (key in nb.attachmentKeys) staged[key] = gn.openAttachment(key).use { repo.stagePdf(it) }
-                val pages = nb.pages.map { p ->
-                    Page(
-                        width = p.width, height = p.height, paper = PaperTemplate.BLANK, strokes = p.strokes,
-                        pdf = p.pdfKey?.let { k -> staged[k]?.let { PdfBackground(it.id, p.pdfPageIndex) } },
-                    )
-                }
-                val meta = repo.createNotebookFromImport(
-                    nb.title, _state.value.folderId, Cover(color = 0xFF2A9D8F), staged.values.toList(), pages,
-                    fromPdf = pages.any { it.pdf != null },
-                )
-                return meta to nb.warnings
-            } catch (e: Exception) {
-                staged.values.forEach { repo.discardStaged(it) }
-                throw e
+            createFromImport(gn.read(), gn::openAttachment, Cover(color = 0xFF2A9D8F))
+        }
+
+    /**
+     * Stages an imported notebook's PDFs and pictures, then creates it with strokes, PDF
+     * backgrounds, text boxes and pictures. Nothing is left behind if anything fails.
+     */
+    private fun createFromImport(
+        nb: app.folio.core.interop.ImportedNotebook,
+        open: (String) -> java.io.InputStream,
+        cover: Cover,
+    ): Pair<NotebookMeta, List<String>> {
+        val pdfs = LinkedHashMap<String, app.folio.core.storage.StagedFile>()
+        val pictures = LinkedHashMap<String, app.folio.core.storage.StagedFile>()
+        val warnings = ArrayList(nb.warnings)
+        try {
+            for (key in nb.attachmentKeys) pdfs[key] = open(key).use { repo.stagePdf(it) }
+            var unreadable = 0
+            for (key in nb.pages.flatMap { p -> p.images.map { it.key } }.distinct()) {
+                runCatching { open(key).use { repo.stageImage(it) } }.onSuccess { pictures[key] = it }.onFailure { unreadable++ }
             }
+            if (unreadable > 0) warnings += "$unreadable picture(s) couldn't be read and were left out."
+            val pages = nb.pages.map { p ->
+                Page(
+                    width = p.width, height = p.height, paper = PaperTemplate.BLANK, strokes = p.strokes,
+                    pdf = p.pdfKey?.let { k -> pdfs[k]?.let { PdfBackground(it.id, p.pdfPageIndex) } },
+                    texts = p.texts,
+                    images = p.images.mapNotNull { img ->
+                        pictures[img.key]?.let { st -> app.folio.core.model.PageImage(attachmentId = st.id, x = img.x, y = img.y, width = img.width, height = img.height) }
+                    },
+                )
+            }
+            val meta = repo.createNotebookFromImport(
+                nb.title, _state.value.folderId, cover, (pdfs.values + pictures.values).toList(), pages,
+                fromPdf = pages.any { it.pdf != null },
+            )
+            return meta to warnings
+        } catch (e: Exception) {
+            (pdfs.values + pictures.values).forEach { repo.discardStaged(it) }
+            throw e
         }
     }
 

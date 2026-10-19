@@ -1,6 +1,6 @@
 # Test Results (2026-10-19)
 
-## Unit tests: `./gradlew test`. 115 tests, 0 failures (+ tile zoom levels ×2, stroke index vs brute force ×2, bulk edit undo order ×1, whole-path erase ×2). Step 4 added 18 (interop ×12, codec ×4, import storage ×2): GoodNotes/Samsung importers (`core:interop`: binary helpers ×4, GoodNotes ×6, real `.goodnotes` and `.sdocx` files ×2; the real-file tests skip when the user's files aren't present), schema 2 packed strokes, schema 1 still loads, damaged packed data → corrupt, and a dense 7,500-stroke page decoding inside a 256 MB heap. Earlier: 90 tests (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
+## Unit tests: `./gradlew test`. 170 tests, 0 failures (brush work: schema 3 → 4 upgrade and new tool round-trip ×2, Brush Lab input ×5; shape refinement: closing and level lines ×2, regularisation ×6; sync work since: open-notebook sends/live receive ×3, store live hand-off ×1, page merge ×6, Drive multipart/resumable ×1 and change feed ×1; sync before that added 17: engine ×9, store-to-store ×6, fake-Drive HTTP ×2; step 5 added 12; earlier: 115).
 | Module | Suites | Tests | Covers |
 |---|---|---|---|
 | core:model | CodecTest, PageEditorTest | 10 | Every stroke channel round-trips; Unicode; newer schema rejected; malformed, truncated, empty and inconsistent input → `CorruptDocumentException`; unknown fields tolerated; add/erase/undo/redo with z-order; redo cleared by a new edit; replace; snapshot isolation; bounded history |
@@ -8,7 +8,7 @@
 | core:storage | NotebookStoreTest | 10 | Reopen after "restart"; corrupt page → `.bak` recovery; corrupt with no backup → error, not silent loss; leftover `.tmp` after a crash ignored; nested folders and safe folder delete; unknown parent rejected; page insert position; delete removes files; path-traversal ids rejected; blank names |
 | app | InputPolicyTest | 6 | Finger draws until a stylus is seen, then navigates; barrel button / eraser end / eraser tool erase; large contact = palm; finger within 400 ms of pen = palm; multi-touch navigates; pen-only can be switched off |
 
-## End-to-end: `scripts/e2e_milestone.py`. 18 checks (milestone 6 + lasso 5 + PDF 3 + library 2 + eraser 2); latest run 18/18 on the emulator after the tiled renderer (2026-10-19), and 18/18 on the Galaxy Tab S6 Lite before it. Not re-run on the Tab, because it clears app data and the Tab holds the user's imported notes
+## End-to-end: `scripts/e2e_milestone.py`. 18 checks (milestone 6 + lasso 5 + PDF 3 + library 2 + eraser 2); latest run 20/20 on the emulator (2026-10-19, adds shape snap and text box checks), and 18/18 on the Galaxy Tab S6 Lite before it. Not re-run on the Tab, because it clears app data and the Tab holds the user's imported notes
 
 Performance results are in `docs/PERFORMANCE.md` (`scripts/perf_tab.py`).
 - **Device**: Android emulator `sdk_gphone64_arm64`, API 35, 1080×2400 (a phone form factor, not a tablet).
@@ -57,6 +57,9 @@ Each step also fails the run if an error dialog is on screen.
 | 29 | Tab screenshot | After the SurfaceView change the page was black (my `invalidate()` override swallowed SurfaceView's hole-punch invalidation) | Explicit `requestRender()`; `invalidate()` left alone |
 | 30 | build | Gradle cache files were deleted outside the project; builds failed with missing transforms, then damaged outputs restored from the build cache | Cleared `~/.gradle/caches/9.3.1/transforms` and `build-cache-1` (regenerable) |
 | 31 | user + perf_erase | The eraser lagged on a dense page (5–29 frames per rub, latency up to 260 ms) | Stroke grid index, id-based tile diffs, one-pass piece cutting in the background, O(n) split/undo (see PERFORMANCE.md) |
+| 32 | E2E | A finger tap in the Text tool did nothing (fingers only scroll once a pen has been seen) | Quick single-finger taps place or edit text |
+| 33 | emulator screenshot | On narrow screens the new buttons pushed the eraser off the toolbar | The tool group wraps |
+| 34 | research | Samsung: 1,896 strokes with recognition data, 588 shape-tool strokes and 367 rotated strokes were skipped; about 1,100 strokes were misread as highlighters | Whole-object header search, header-size range 8–64, colour flag in header byte 4, validated rotation |
 | 12 | user | Wanted to zoom out further, page always centred | Zoom out to half of whole-page, centred on both axes in both orientations; Auto page size shaped like the screen. **Awaiting confirmation** |
 
 ## Physical device: Galaxy Tab S6 Lite (SM-P615, Android 13, One UI 5.1.1)

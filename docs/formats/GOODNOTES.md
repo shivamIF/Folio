@@ -25,7 +25,7 @@ Many values are last-writer-wins registers of the form `{1: value, 2: {1: counte
 | 2 | Page | `2` page id; `4` attachment record id; `5` PDF page number (1-based); `8 = {1: w, 2: h}` size in f32 |
 | 54 | Page slot | `2` slot id; `3.1` page id; `4.1` **fractional order key**, sorted as strings to get page order |
 | 6 | Attachment link | `1` record id; `2` file id |
-| 130 / 133 | Text box: position / content | Not imported yet |
+| 130 / 133 | Text box: placement / content | Imported. 130: `1` id, `4.1.1` **page slot id**, `4.1.2` (x, y) f32, `5` content id, `16` font size. 133: `2` box id, `4.1.1` UTF-8 text. Last record wins. Width isn't stored: Folio wraps at the page edge |
 | 240–244 | Stopwatch | Ignored |
 | 103, 104, 105, 102, 60, 10, 65 | Metadata | Ignored |
 
@@ -54,3 +54,7 @@ The ink file of a slot is `notes/<slot id + 1>`: the UUID incremented by one. Th
 - Unit tests build synthetic files covering each rule above.
 - The user's notebook imports as 79 pages, 2,020 strokes and 2 PDFs.
 - On a Galaxy Tab S6 Lite, the highlighter marks line up exactly with the highlighted PDF text.
+
+## Page elements found later
+- **Type 5 is a shape** from the GoodNotes shape tool, not a picture. Field 9.4 holds the frame: centre, half-size and rotation in radians. Field 2 holds a small vector path in a different tpl layout. Not imported yet (2 in the sample notebook).
+- **Pictures:** the sample has one PNG attachment, but no page element references it. Picture placement can be decoded once a notebook with a placed picture is available.

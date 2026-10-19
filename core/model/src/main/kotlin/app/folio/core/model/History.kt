@@ -1,9 +1,42 @@
 package app.folio.core.model
 
 /** A reversible edit to a page's stroke list. */
+/** The editable content of a page; edits mutate it in place. */
+class PageContent(
+    val strokes: MutableList<Stroke>,
+    val texts: MutableList<TextBox> = ArrayList(),
+    val images: MutableList<PageImage> = ArrayList(),
+)
+
 sealed interface PageEdit {
-    fun apply(strokes: MutableList<Stroke>)
-    fun revert(strokes: MutableList<Stroke>)
+    /** Stroke edits implement these two; element edits override the [PageContent] versions instead. */
+    fun apply(strokes: MutableList<Stroke>) {}
+    fun revert(strokes: MutableList<Stroke>) {}
+    fun apply(content: PageContent) = apply(content.strokes)
+    fun revert(content: PageContent) = revert(content.strokes)
+
+    /** Several edits as one undo step (e.g. moving strokes and a text box together). */
+    class Composite(val edits: List<PageEdit>) : PageEdit {
+        override fun apply(content: PageContent) { for (e in edits) e.apply(content) }
+        override fun revert(content: PageContent) { for (e in edits.asReversed()) e.revert(content) }
+    }
+
+    /**
+     * Adds ([before] null), replaces, or removes ([after] null) one text box, by id.
+     * [index] is where it sat (or goes), so undo restores the order.
+     */
+    class PutText(val before: TextBox?, val after: TextBox?, val index: Int = Int.MAX_VALUE) : PageEdit {
+        init { require(before != null || after != null) }
+        override fun apply(content: PageContent) = put(content.texts, before, after, index, TextBox::id)
+        override fun revert(content: PageContent) = put(content.texts, after, before, index, TextBox::id)
+    }
+
+    /** Same as [PutText], for images. */
+    class PutImage(val before: PageImage?, val after: PageImage?, val index: Int = Int.MAX_VALUE) : PageEdit {
+        init { require(before != null || after != null) }
+        override fun apply(content: PageContent) = put(content.images, before, after, index, PageImage::id)
+        override fun revert(content: PageContent) = put(content.images, after, before, index, PageImage::id)
+    }
 
     class AddStroke(val stroke: Stroke) : PageEdit {
         override fun apply(strokes: MutableList<Stroke>) { strokes.add(stroke) }
@@ -109,8 +142,17 @@ private fun insertAtOriginalPositions(strokes: MutableList<Stroke>, items: List<
     strokes.clear(); strokes.addAll(out)
 }
 
+private fun <T> put(list: MutableList<T>, old: T?, new: T?, index: Int, id: (T) -> String) {
+    when {
+        old == null -> list.add(index.coerceIn(0, list.size), new!!)
+        new == null -> { val at = list.indexOfFirst { id(it) == id(old) }; if (at >= 0) list.removeAt(at) }
+        else -> { val at = list.indexOfFirst { id(it) == id(old) }; if (at >= 0) list[at] = new else list.add(new) }
+    }
+}
+
 class PageEditor(page: Page, private val maxHistory: Int = 500) {
     private val strokes = page.strokes.toMutableList()
+    private val content = PageContent(strokes, page.texts.toMutableList(), page.images.toMutableList())
     private val undoStack = ArrayDeque<PageEdit>()
     private val redoStack = ArrayDeque<PageEdit>()
     private var base = page
@@ -120,11 +162,13 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
         private set
 
     val currentStrokes: List<Stroke> get() = strokes
+    val currentTexts: List<TextBox> get() = content.texts
+    val currentImages: List<PageImage> get() = content.images
     val canUndo get() = undoStack.isNotEmpty()
     val canRedo get() = redoStack.isNotEmpty()
 
     fun perform(edit: PageEdit) {
-        edit.apply(strokes)
+        edit.apply(content)
         undoStack.addLast(edit)
         if (undoStack.size > maxHistory) undoStack.removeFirst()
         redoStack.clear()
@@ -133,7 +177,7 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
 
     fun undo(): Boolean {
         val edit = undoStack.removeLastOrNull() ?: return false
-        edit.revert(strokes)
+        edit.revert(content)
         redoStack.addLast(edit)
         revision++
         return true
@@ -141,11 +185,11 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
 
     fun redo(): Boolean {
         val edit = redoStack.removeLastOrNull() ?: return false
-        edit.apply(strokes)
+        edit.apply(content)
         undoStack.addLast(edit)
         revision++
         return true
     }
 
-    fun snapshot(): Page = base.copy(strokes = strokes.toList())
+    fun snapshot(): Page = base.copy(strokes = strokes.toList(), texts = content.texts.toList(), images = content.images.toList())
 }

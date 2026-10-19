@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 import java.util.UUID
 
 /** Current on-disk schema version of every persisted model object. Bump together with a migration. */
-const val SCHEMA_VERSION = 2
+const val SCHEMA_VERSION = 4
 
 fun newId(): String = UUID.randomUUID().toString()
 
@@ -100,9 +100,10 @@ data class LibraryIndex(
     val notebooks: List<NotebookMeta> = emptyList(),
 )
 
+/** Persisted by name. FINELINER and MARKER arrived in schema 4. */
 @Serializable
 enum class ToolType {
-    FOUNTAIN, BALLPOINT, PENCIL, BRUSH, HIGHLIGHTER;
+    FOUNTAIN, BALLPOINT, PENCIL, BRUSH, HIGHLIGHTER, FINELINER, MARKER;
 
     val isHighlighter get() = this == HIGHLIGHTER
 }
@@ -212,6 +213,53 @@ data class Rect(val left: Float, val top: Float, val right: Float, val bottom: F
 @Serializable
 data class PdfBackground(val attachmentId: String, val pageIndex: Int)
 
+/**
+ * A typed text box. [x], [y] is the top-left corner in page units; text wraps at [width].
+ * [height] is the laid-out height, kept for hit-testing and selection (renderers may
+ * re-measure). [fontSize] is in page units (A4 width = 1000).
+ */
+@Serializable
+data class TextBox(
+    val id: String = newId(),
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val text: String,
+    val fontSize: Float = 24f,
+    val color: Argb = 0xFF1B1B1F,
+) {
+    val bounds: Rect get() = Rect(x, y, x + width, y + height)
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false) = copy(
+        id = if (newId) newId() else id,
+        x = ax + (x - ax) * scale + dx, y = ay + (y - ay) * scale + dy,
+        width = width * scale, height = height * scale, fontSize = fontSize * scale,
+    )
+}
+
+/** A picture placed on the page; the file is the notebook attachment [attachmentId]. */
+@Serializable
+data class PageImage(
+    val id: String = newId(),
+    val attachmentId: String,
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+) {
+    val bounds: Rect get() = Rect(x, y, x + width, y + height)
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false) = copy(
+        id = if (newId) newId() else id,
+        x = ax + (x - ax) * scale + dx, y = ay + (y - ay) * scale + dy, width = width * scale, height = height * scale,
+    )
+}
+
+/**
+ * Schema history: 1 = stroke channels as number arrays; 2 = packed points;
+ * 3 = text boxes and images (an older app refuses these pages instead of dropping them);
+ * 4 = fine-liner and marker tools (an older app would reject the unknown tool names).
+ * Pages are stamped with the current version whenever they are encoded.
+ */
 @Serializable
 data class Page(
     val schemaVersion: Int = SCHEMA_VERSION,
@@ -222,4 +270,8 @@ data class Page(
     val strokes: List<Stroke> = emptyList(),
     /** Optional; absent in notebooks created before PDF import existed. */
     val pdf: PdfBackground? = null,
+    /** Drawn over the ink. Absent before schema 3. */
+    val texts: List<TextBox> = emptyList(),
+    /** Drawn under the ink. Absent before schema 3. */
+    val images: List<PageImage> = emptyList(),
 )

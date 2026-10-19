@@ -24,8 +24,14 @@ import app.folio.core.ink.SelectionTransform
 import app.folio.core.ink.StrokeBuilder
 import app.folio.core.ink.StrokeGeometry
 import app.folio.core.ink.StrokeIndex
+import app.folio.core.ink.Shape
+import app.folio.core.ink.ShapeKind
+import app.folio.core.ink.ShapeRecognizer
 import app.folio.core.model.Argb
+import app.folio.core.model.PageImage
 import app.folio.core.model.PaperTemplate
+import app.folio.core.model.PdfBackground
+import app.folio.core.model.TextBox
 import app.folio.core.model.Stroke
 import app.folio.core.model.ToolType
 import app.folio.notes.input.GestureAction
@@ -92,6 +98,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform)
         /** Partial eraser finished: each original stroke id maps to the pieces that remain. */
         fun onStrokesSplit(pieces: Map<String, List<Stroke>>)
+        /** Text tool: the page was tapped at ([x], [y]); [textId] is the text box there, if any. */
+        fun onTextTap(x: Float, y: Float, textId: String?) {}
+        /** Zoom or scroll changed (only reported while [InkCanvasView.reportViewport] is on). */
+        fun onViewportChanged() {}
     }
 
     var listener: Listener? = null
@@ -113,6 +123,25 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     /** Lasso tool active: the pen selects instead of writing. */
     var lassoMode: Boolean = false
         set(value) { field = value; requestRender() }
+    /** Text tool active: a tap places or edits a text box. */
+    var textMode: Boolean = false
+    /** Elements hidden from the page while being edited elsewhere (the text box being typed). */
+    var hiddenIds: Set<String> = emptySet()
+        set(value) { if (field != value) { field = value; requestRender() } }
+    /** Report zoom/scroll changes to the listener (e.g. to keep a text field over its box). */
+    var reportViewport: Boolean = false
+
+    /** Current view transform: view = page × scale + (tx, ty). */
+    val pageScale: Float get() = viewport.scale
+    val pageTx: Float get() = viewport.tx
+    val pageTy: Float get() = viewport.ty
+
+    /** The visible part of the page, in page units. */
+    fun visiblePageArea(): app.folio.core.model.Rect {
+        val (l, t) = viewport.toPage(0f, 0f)
+        val (r, b) = viewport.toPage(width.toFloat(), height.toFloat())
+        return app.folio.core.model.Rect(maxOf(0f, l), maxOf(0f, t), minOf(pageW, r), minOf(pageH, b))
+    }
     /** Rendered PDF page shown under the ink, or null for plain paper. */
     var pdfBackground: android.graphics.Bitmap? = null
         set(value) { if (field !== value) { field = value; requestRender() } }
@@ -120,7 +149,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     var lassoRectangle: Boolean = false
     /** Currently selected stroke ids (owned by the view model). */
     var selection: Set<String> = emptySet()
-        set(value) { if (field != value) { field = value; requestRender() } }
+        set(value) { if (field != value) { field = value; maybeSnapshotSelection(); requestRender() } }
 
     val policy = InputPolicy(palmTouchMajorPx = 48f * resources.displayMetrics.density)
 
@@ -130,6 +159,14 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
     // ---- page content ----
     private var strokes: List<Stroke> = emptyList()
+    /** Text boxes and pictures on the page (owned by the view model). */
+    private var texts: List<TextBox> = emptyList()
+    private var images: List<PageImage> = emptyList()
+    /** The PDF page under the ink, rendered sharp per tile through [assets]. */
+    private var pdfPage: PdfBackground? = null
+    /** Pictures and PDF files of the open notebook. */
+    internal var assets: PageAssets? = null
+        set(value) { if (field !== value) { field = value; requestRender() } }
     /** Spatial index of [strokes], rebuilt whenever the list changes. */
     private var index = StrokeIndex(emptyList())
     /** Finished strokes not yet echoed back through [setPage]; drawn so pen-up never blinks. */
@@ -142,7 +179,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private var pageW = 1000f
     private var pageH = 1414f
 
-    fun setPage(pageId: String, strokes: List<Stroke>, paper: PaperTemplate, width: Float, height: Float) {
+    fun setPage(
+        pageId: String, strokes: List<Stroke>, paper: PaperTemplate, width: Float, height: Float,
+        texts: List<TextBox> = emptyList(), images: List<PageImage> = emptyList(), pdf: PdfBackground? = null,
+    ) {
+        if (texts !== this.texts || images !== this.images) { this.texts = texts; this.images = images; requestRender() }
+        this.pdfPage = pdf
         // Any new stroke list is the echo of the last edit, wipe included.
         if (strokes !== this.strokes) wipeAwaitingEcho = false
         val setPageStart = System.nanoTime()
@@ -175,6 +217,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             tiles.keepWiped() // the wiped tiles now match; the edit patches them exactly
         }
         if (selGesture == SelGesture.NONE) selTransform = SelectionTransform()
+        if (selection.isNotEmpty()) maybeSnapshotSelection()
         if (debugInput && strokes.size > 1000) Log.d("FolioPerf", "setPage ms=%.1f".format((System.nanoTime() - setPageStart) / 1e6))
         viewport.setPage(width, height)
         syncMatrices()
@@ -294,6 +337,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         pageToView.setScale(viewport.scale, viewport.scale)
         pageToView.postTranslate(viewport.tx, viewport.ty)
         pageToView.invert(viewToPage)
+        if (reportViewport) listener?.onViewportChanged()
     }
 
     /** Momentum scroll, advanced once per surface frame. */
@@ -365,7 +409,11 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             MotionEvent.ACTION_DOWN -> { sideButtonGesture = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0; raw }
             else -> raw
         }
-        if (masked == MotionEvent.ACTION_DOWN) scroller.forceFinished(true)
+        if (masked == MotionEvent.ACTION_DOWN) {
+            scroller.forceFinished(true)
+            tapDownX = e.x; tapDownY = e.y; tapDownTime = e.eventTime; tapMultiTouch = false
+        }
+        if (masked == MotionEvent.ACTION_POINTER_DOWN) tapMultiTouch = true
         if (debugInput) perfLastInputNanos = e.eventTime * 1_000_000L
         when (masked) {
             MotionEvent.ACTION_DOWN -> beginGesture(e, 0)
@@ -385,8 +433,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 if (action == GestureAction.NAVIGATE) startPan(e)
             }
             MotionEvent.ACTION_MOVE -> when (action) {
-                GestureAction.DRAW -> if (selGesture != SelGesture.NONE) moveSelectionGesture(e) else {
-                    predictor.record(e); appendSamples(e); updatePrediction(); requestRender()
+                GestureAction.DRAW -> if (textMode) Unit else if (selGesture != SelGesture.NONE) moveSelectionGesture(e) else {
+                    predictor.record(e); appendSamples(e); updatePrediction()
+                    e.findPointerIndex(activePointerId).takeIf { it >= 0 }?.let { i ->
+                        if (snapped != null) adjustSnap(e.getX(i), e.getY(i)) else watchHold(e.getX(i), e.getY(i))
+                    }
+                    requestRender()
                 }
                 GestureAction.ERASE -> eraseAlong(e)
                 GestureAction.NAVIGATE -> navigate(e)
@@ -414,6 +466,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         if (policy.stylusSeen) policy.penOnly = penOnlyPreference
         activePointerId = e.getPointerId(index)
         when (action) {
+            GestureAction.DRAW if textMode -> {
+                val p = toPage(e.getX(index), e.getY(index))
+                textDownX = p[0]; textDownY = p[1]; textDownVX = e.getX(index); textDownVY = e.getY(index)
+            }
             GestureAction.DRAW if lassoMode -> {
                 requestUnbufferedDispatch(e)
                 beginSelectionGesture(e.getX(index), e.getY(index))
@@ -425,6 +481,9 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 strokeIsFromPen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
                 predictor.record(e)
                 appendSamples(e)
+                snapped = null; snapBase = null
+                holdX = e.getX(index); holdY = e.getY(index)
+                removeCallbacks(holdRunnable); postDelayed(holdRunnable, HOLD_TO_SNAP_MS)
             }
             GestureAction.ERASE -> {
                 requestUnbufferedDispatch(e)
@@ -471,6 +530,13 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
     private fun finishGesture(e: MotionEvent, index: Int, canceled: Boolean) {
         when (action) {
+            GestureAction.DRAW if textMode -> {
+                val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
+                val slop = 12f * resources.displayMetrics.density
+                if (!canceled && kotlin.math.abs(e.getX(idx) - textDownVX) < slop && kotlin.math.abs(e.getY(idx) - textDownVY) < slop) {
+                    listener?.onTextTap(textDownX, textDownY, textAt(textDownX, textDownY))
+                }
+            }
             GestureAction.DRAW if selGesture != SelGesture.NONE -> finishSelectionGesture(canceled)
             GestureAction.DRAW -> {
                 val b = builder
@@ -486,7 +552,8 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                         b.finishAt(p[0], p[1], effort(e, idx, e.getPressure(idx)), e.getAxisValue(MotionEvent.AXIS_TILT, idx), e.getAxisValue(MotionEvent.AXIS_ORIENTATION, idx), e.eventTime)
                     }
                     if (b.size > 0) {
-                        val stroke = b.build()
+                        val shape = snapped
+                        val stroke = if (shape != null && !canceled) shape.toStroke(tool, color, penWidth, snapPressure, b.build().startedAt) else b.build()
                         pathFor(stroke)
                         pendingCommits += stroke
                         pendingSince[stroke.id] = SystemClock.uptimeMillis()
@@ -511,7 +578,11 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             else -> Unit
         }
         perfReport(when { navigating -> "pan"; action == GestureAction.DRAW -> "ink"; action == GestureAction.ERASE -> "erase"; else -> "other" })
-        if (navigating && !canceled) fling()
+        // Text tool: a quick finger tap places or edits text too (fingers otherwise only scroll).
+        if (textMode && action == GestureAction.NAVIGATE && !canceled && !tapMultiTouch && isQuickTap(e)) {
+            val p = toPage(tapDownX, tapDownY)
+            listener?.onTextTap(p[0], p[1], textAt(p[0], p[1]))
+        } else if (navigating && !canceled) fling()
         velocity?.recycle(); velocity = null
         navigating = false
         sideButtonGesture = false
@@ -520,8 +591,133 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         requestRender()
     }
 
+    // ---- text boxes and pictures ----
+    private var tapDownX = 0f
+    private var tapDownY = 0f
+    private var tapDownTime = 0L
+    private var tapMultiTouch = false
+
+    private fun isQuickTap(e: MotionEvent): Boolean {
+        val slop = 12f * resources.displayMetrics.density
+        return e.eventTime - tapDownTime < 350 && kotlin.math.abs(e.x - tapDownX) < slop && kotlin.math.abs(e.y - tapDownY) < slop
+    }
+    private var textDownX = 0f
+    private var textDownY = 0f
+    private var textDownVX = 0f
+    private var textDownVY = 0f
+
+    /** The topmost text box at a page point (a little slack around it), or null. */
+    private fun textAt(px: Float, py: Float): String? {
+        val slack = 8f / scale
+        return texts.lastOrNull { it.bounds.inflate(slack).contains(px, py) }?.id
+    }
+
+    /** The topmost element (text above pictures) at a page point, or null. */
+    private fun elementAt(px: Float, py: Float): String? =
+        textAt(px, py) ?: images.lastOrNull { it.bounds.contains(px, py) }?.id
+
+    private fun selectedElementBounds(): app.folio.core.model.Rect? {
+        var r: app.folio.core.model.Rect? = null
+        for (t in texts) if (t.id in selection) r = r?.union(t.bounds) ?: t.bounds
+        for (i in images) if (i.id in selection) r = r?.union(i.bounds) ?: i.bounds
+        return r
+    }
+
+    /** Selected pictures and text drawn live while the selection is being moved or resized. */
+    private fun drawMovingElements(canvas: Canvas) {
+        for (img in images) if (img.id in selection) {
+            val bmp = assets?.image(img.attachmentId, decode = false)
+            if (bmp != null) renderer.drawImage(canvas, bmp, img) else renderer.drawMissingImage(canvas, img)
+        }
+        for (t in texts) if (t.id in selection) renderer.drawText(canvas, t)
+    }
+
+    // ---- big selections move as one picture ----
+    private class SelectionSnapshot(val selection: Set<String>, val strokes: List<Stroke>, val bitmap: android.graphics.Bitmap, val dst: android.graphics.RectF)
+    @Volatile private var selSnapshot: SelectionSnapshot? = null
+    private val snapshotPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    /**
+     * Above [SNAPSHOT_MIN_STROKES] selected strokes, drawing them as vectors every frame of a
+     * drag lags; render the selection once in the background and move that bitmap instead.
+     */
+    private fun maybeSnapshotSelection() {
+        val sel = selection; val list = strokes
+        val cur = selSnapshot
+        if (cur != null && cur.selection === sel && cur.strokes === list) return
+        selSnapshot = null
+        if (sel.size < SNAPSHOT_MIN_STROKES) return
+        val chosen = list.filter { it.id in sel }
+        if (chosen.size < SNAPSHOT_MIN_STROKES) return
+        val chosenTexts = texts.filter { it.id in sel }; val chosenImages = images.filter { it.id in sel }
+        val box = currentSelectionBox() ?: return
+        val viewScale = scale
+        val a = assets
+        selectionExecutor.execute {
+            val w = box.width; val h = box.height
+            if (w <= 0f || h <= 0f) return@execute
+            val sc = minOf(viewScale, kotlin.math.sqrt(SNAPSHOT_MAX_PX / (w * h)))
+            val bw = kotlin.math.ceil(w * sc).toInt().coerceAtLeast(1); val bh = kotlin.math.ceil(h * sc).toInt().coerceAtLeast(1)
+            val bmp = try { android.graphics.Bitmap.createBitmap(bw, bh, android.graphics.Bitmap.Config.ARGB_8888) } catch (_: OutOfMemoryError) { return@execute }
+            val c = Canvas(bmp)
+            c.scale(sc, sc); c.translate(-box.left, -box.top)
+            val r = PageRenderer()
+            for (img in chosenImages) a?.image(img.attachmentId, decode = true)?.let { r.drawImage(c, it, img) }
+            for (s in chosen) r.drawStroke(c, s.color, s.tool, TileCache.outline(s))
+            for (t in chosenTexts) r.drawText(c, t)
+            bmp.prepareToDraw()
+            val snap = SelectionSnapshot(sel, list, bmp, android.graphics.RectF(box.left, box.top, box.right, box.bottom))
+            post { if (selection === sel && strokes === list) { selSnapshot = snap; requestRender() } }
+        }
+    }
+
+    // ---- hold the pen still at the end of a stroke to snap it to a clean shape ----
+    private var snapped: Shape? = null
+    private var snapBase: Shape? = null
+    private var snapRefX = 0f
+    private var snapRefY = 0f
+    private var snapPressure = 0.5f
+    private var holdX = 0f
+    private var holdY = 0f
+    private val holdRunnable = Runnable { trySnap() }
+
+    /** Restarts the hold timer whenever the pen moves more than a few pixels. */
+    private fun watchHold(vx: Float, vy: Float) {
+        val slop = HOLD_SLOP_DP * resources.displayMetrics.density
+        if (kotlin.math.abs(vx - holdX) <= slop && kotlin.math.abs(vy - holdY) <= slop) return
+        holdX = vx; holdY = vy
+        removeCallbacks(holdRunnable)
+        postDelayed(holdRunnable, HOLD_TO_SNAP_MS)
+    }
+
+    private fun trySnap() {
+        val b = builder ?: return
+        if (action != GestureAction.DRAW || selGesture != SelGesture.NONE || snapped != null) return
+        val s = b.build()
+        val shape = ShapeRecognizer.recognize(s.x, s.y) ?: return
+        snapped = shape; snapBase = shape
+        val p = toPage(holdX, holdY); snapRefX = p[0]; snapRefY = p[1]
+        snapPressure = if (s.size > 0) s.pressure.average().toFloat().coerceIn(0.15f, 1f) else 0.5f
+        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        requestRender()
+    }
+
+    /** After snapping, moving the pen drags a line's end, or resizes other shapes about their centre. */
+    private fun adjustSnap(vx: Float, vy: Float) {
+        val base = snapBase ?: return
+        val p = toPage(vx, vy)
+        snapped = if (base.kind == ShapeKind.LINE) ShapeRecognizer.line(base.xs[0], base.ys[0], p[0], p[1]) else {
+            val cx = base.centerX; val cy = base.centerY
+            val d0 = kotlin.math.hypot(snapRefX - cx, snapRefY - cy)
+            val f = if (d0 > 1f) (kotlin.math.hypot(p[0] - cx, p[1] - cy) / d0).coerceIn(0.2f, 5f) else 1f
+            base.scaled(f, cx, cy)
+        }
+    }
+
     private fun abortInk() {
         builder = null
+        removeCallbacks(holdRunnable)
+        snapped = null; snapBase = null
         predicted?.recycle(); predicted = null
     }
 
@@ -739,7 +935,9 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     /** Selection bounds in page units, including any live transform. */
     private fun currentSelectionBox(): app.folio.core.model.Rect? {
         if (selection.isEmpty()) return null
-        val b = app.folio.core.ink.Lasso.bounds(strokes.filter { it.id in selection }) ?: return null
+        val sb = app.folio.core.ink.Lasso.bounds(strokes.filter { it.id in selection })
+        val eb = selectedElementBounds()
+        val b = when { sb == null -> eb; eb == null -> sb; else -> sb.union(eb) } ?: return null
         val t = selTransform
         return app.folio.core.model.Rect(t.mapX(b.left), t.mapY(b.top), t.mapX(b.right), t.mapY(b.bottom))
     }
@@ -797,7 +995,15 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 val polygon = if (lassoRectangle && lassoPoints.size >= 4) {
                     app.folio.core.ink.Lasso.rectangle(lassoPoints[0], lassoPoints[1], lassoPoints[lassoPoints.size - 2], lassoPoints[lassoPoints.size - 1])
                 } else lassoPoints.toFloatArray()
-                val ids = app.folio.core.ink.Lasso.select(strokes, polygon)
+                val ids = LinkedHashSet(app.folio.core.ink.Lasso.select(strokes, polygon))
+                // Text boxes and pictures whose centre is inside the loop.
+                for (t in texts) if (app.folio.core.ink.Lasso.contains(polygon, t.x + t.width / 2, t.y + t.height / 2)) ids += t.id
+                for (i in images) if (app.folio.core.ink.Lasso.contains(polygon, i.x + i.width / 2, i.y + i.height / 2)) ids += i.id
+                // A tap (no real loop) selects the text box or picture under the pen.
+                val loop = app.folio.core.ink.Lasso.polygonBounds(polygon)
+                if (ids.isEmpty() && maxOf(loop.width, loop.height) * scale < 24f * resources.displayMetrics.density) {
+                    elementAt(lassoPoints.getOrElse(0) { 0f }, lassoPoints.getOrElse(1) { 0f })?.let { ids += it }
+                }
                 lassoPoints.clear()
                 listener?.onLassoSelected(ids)
             }
@@ -866,7 +1072,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         canvas.restore()
         val moving = !selTransform.isIdentity && selection.isNotEmpty()
         val frozen = wiping || wipeAwaitingEcho
-        tiles.setContent(pageKey, index, excludedFromLayer(moving), paper, pageW, pageH, pdfBackground)
+        tiles.setContent(pageKey, index, excludedFromLayer(moving), paper, pageW, pageH, pdfPage, pdfBackground, texts, images, assets)
         if (perfSkip?.contains("ink") != true) {
             tiles.draw(canvas, scale, viewport.tx, viewport.ty, width.toFloat(), height.toFloat(), viewport.fitPageScale, frozen)
         }
@@ -878,7 +1084,13 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         if (moving) {
             canvas.save()
             canvas.concat(transformMatrix(selTransform))
-            for (s in strokes) if (s.id in selection) drawStroke(canvas, s.color, s.tool, pathFor(s))
+            val snap = selSnapshot
+            if (snap != null && snap.selection === selection && snap.strokes === strokes) {
+                canvas.drawBitmap(snap.bitmap, null, snap.dst, snapshotPaint)
+            } else {
+                for (s in strokes) if (s.id in selection) drawStroke(canvas, s.color, s.tool, pathFor(s))
+                drawMovingElements(canvas)
+            }
             canvas.restore()
         }
         drawSelectionOverlay(canvas)
@@ -901,9 +1113,9 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
      */
     private fun excludedFromLayer(moving: Boolean): Set<String> {
         val e = when {
-            erasedPending.isEmpty() && partialPieces.isEmpty() && !moving -> emptySet()
+            erasedPending.isEmpty() && partialPieces.isEmpty() && !moving && hiddenIds.isEmpty() -> emptySet()
             else -> buildSet {
-                addAll(erasedPending); addAll(partialPieces.keys)
+                addAll(erasedPending); addAll(partialPieces.keys); addAll(hiddenIds)
                 if (moving) addAll(selection)
             }
         }
@@ -991,6 +1203,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     }
 
     private fun drawLive(canvas: Canvas, b: StrokeBuilder) {
+        snapped?.let { shape ->
+            val st = shape.toStroke(tool, color, penWidth, snapPressure)
+            PageRenderer.fillPath(livePath, StrokeGeometry.outline(st))
+            drawStroke(canvas, color, tool, livePath)
+            return
+        }
         val s = b.build()
         val pred = predicted
         val extra = if (pred != null && action == GestureAction.DRAW) pred.historySize + 1 else 0
@@ -1022,6 +1240,11 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     companion object {
         /** Computes partial-eraser pieces at pen-up, one wipe at a time, in order. */
         private val wipeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "folio-erase") }
+        /** Renders big selections into a bitmap for smooth dragging. */
+        private val selectionExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "folio-selection") }
+        private const val SNAPSHOT_MIN_STROKES = 150
+        /** Largest selection bitmap (pixels): about 24 MB. */
+        private const val SNAPSHOT_MAX_PX = 6_000_000f
 
         /** The canvas currently on screen, for window-level routing of side-button gestures. */
         var attached: java.lang.ref.WeakReference<InkCanvasView>? = null
@@ -1033,6 +1256,9 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
         private const val TAG = "FolioInput"
         private const val NO_PRESSURE_EFFORT = 0.6f
+        /** Pen held this still (dp) for this long (ms) at the end of a stroke snaps it to a shape. */
+        private const val HOLD_SLOP_DP = 4f
+        private const val HOLD_TO_SNAP_MS = 450L
         // Samsung-specific MotionEvent actions sent while the S Pen side button is held.
         private const val SPEN_ACTION_DOWN = 211
         private const val SPEN_ACTION_UP = 212
