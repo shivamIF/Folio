@@ -16,7 +16,7 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Library | First-page previews (default: imported PDFs; Settings: all notebooks or covers only); refresh when edited | ✅ | Tab E2E checks the preview's pixels; cached as PNGs in the cache dir |
 | Library | Trash: Move to Trash (with Undo), Restore (to root if folder gone), Delete forever, Empty trash, auto-purge after 30 days | ✅ | Storage tests ×4; Tab E2E trash → restore with content intact |
 | Library | Subject collections, multi-select, drag-and-drop | ⏳ | |
-| Editor | Fountain, ballpoint, fine liner, pencil, brush, marker, highlighter (glass shelf) | 🟡 | Profiles unit-tested; fine liner and marker added 2026-10-19 (schema 4), seen in the shelf on the Tab; feel not yet judged |
+| Editor | Fountain, ballpoint, fine liner, pencil, brush, airbrush, marker, highlighter (glass shelf: pen tray + utilities tray) | 🟡 | Profiles unit-tested; `everyPenStyleIsDistinct` checks no two tools look alike. Airbrush added 2026-10-19 (schema 5, docs/research/pen-styles.md); calligraphy, crayon and watercolour tried on the Tab and withdrawn |
 | Editor | Brush Lab (debug builds only, no launcher icon): one capture replayed through v1, v2 (slot) and AndroidX Ink | 🟡 | Runs on the Tab; v2 column waits for engine v2. `adb shell am start -n app.folio.notes/.lab.BrushLabActivity --ez sample true` |
 | Editor | Colour palette, per-tool width, stabilisation slider | 🟡 | Persisted in prefs; not E2E tested |
 | Editor | Pressure-sensitive width, calibrated to real S Pen data, with a sensitivity slider | 🟡 | Unit-tested; measured on the user's recorded strokes; awaiting their feel test |

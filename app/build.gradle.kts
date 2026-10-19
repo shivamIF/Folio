@@ -56,6 +56,7 @@ dependencies {
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.motion.prediction)
+    implementation(libs.graphics.core)
 
     // Brush Lab (src/debug) compares Folio's engine with AndroidX Ink. Never in release builds.
     debugImplementation(libs.ink.brush)

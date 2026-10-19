@@ -59,6 +59,7 @@ val LAB_PRESETS = listOf(
     LabPreset("brushpen", "Brush pen", ToolType.BRUSH, 8f, 0xFF1B1B1F, InkFamily.PRESSURE_PEN),
     LabPreset("highlighter", "Highlighter", ToolType.HIGHLIGHTER, 18f, 0xFFF9D71C, InkFamily.HIGHLIGHTER),
     LabPreset("marker", "Marker", ToolType.MARKER, 6f, 0xFF1565C0, InkFamily.MARKER),
+    LabPreset("airbrush", "Airbrush", ToolType.AIRBRUSH, 14f, 0xFF6A1B9A, InkFamily.MARKER, note = "Ink has no soft brush."),
 )
 
 /** Android reports orientation in -π..π; Ink wants 0..2π. */
@@ -123,6 +124,42 @@ object LabSamples {
     fun flick(): RawStroke = sampled(25_000L, 40) { i, n ->
         val t = i.toFloat() / (n - 1)
         RawSample(560f + 340f * t, 190f - 50f * t * t, 0.8f * (1f - t) + 0.05f, 0.9f, 0.4f, 0)
+    }
+
+    /**
+     * Tilt and overlap set: the same back-and-forth hatch drawn with the pen leaning flat
+     * (tilt 1.35 rad, azimuth up the page) and upright (0.5 rad), a hatch moving along the
+     * azimuth, light vs firm pressure, and two crossing passes for highlighter overlap.
+     */
+    fun tiltSet(): List<RawStroke> = listOf(
+        hatch(30_000L, 40f, 30f, horizontal = true, tilt = 1.35f, pressure = 0.5f),
+        hatch(32_000L, 300f, 30f, horizontal = true, tilt = 0.5f, pressure = 0.5f),
+        hatch(34_000L, 560f, 30f, horizontal = false, tilt = 1.35f, pressure = 0.5f),
+        line(36_000L, 40f, 150f, 0.15f), line(37_000L, 40f, 185f, 0.95f),
+        line(38_000L, 560f, 160f, 0.6f), cross(39_000L),
+    )
+
+    /** Zig-zag shading in a 200 × 90 box: rows sideways ([horizontal]) or columns. */
+    private fun hatch(start: Long, x0: Float, y0: Float, horizontal: Boolean, tilt: Float, pressure: Float) = sampled(start, 400) { i, n ->
+        val t = i.toFloat() / (n - 1)
+        val passes = 9f
+        val phase = t * passes
+        val k = phase.toInt().coerceAtMost(8)
+        val f = phase - k
+        val sweep = if (k % 2 == 0) f else 1f - f
+        val (x, y) = if (horizontal) (x0 + 200f * sweep) to (y0 + 90f * t) else (x0 + 200f * t) to (y0 + 90f * sweep)
+        RawSample(x, y, pressure * envelope(t).coerceAtLeast(0.6f), tilt, 0f, 0)
+    }
+
+    private fun line(start: Long, x0: Float, y: Float, pressure: Float) = sampled(start, 120) { i, n ->
+        val t = i.toFloat() / (n - 1)
+        RawSample(x0 + 420f * t, y, pressure, 0.7f, 0.4f, 0)
+    }
+
+    /** A stroke crossing back over the previous line: overlap behaviour. */
+    private fun cross(start: Long) = sampled(start, 120) { i, n ->
+        val t = i.toFloat() / (n - 1)
+        RawSample(600f + 340f * t, 120f + 70f * t, 0.6f, 0.7f, 0.4f, 0)
     }
 
     /** Pressure rises over the first 10% and falls over the last 15%, like a real stroke. */

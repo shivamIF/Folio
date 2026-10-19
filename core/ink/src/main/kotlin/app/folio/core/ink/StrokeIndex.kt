@@ -16,8 +16,58 @@ import kotlin.math.min
  *
  * Immutable once built, so it can be queried from several threads. Results are stroke
  * indices in page (z) order, so drawing them in that order keeps the original stacking.
+ *
+ * Writing only appends strokes, so [appending] reuses the grid and keeps new strokes in a
+ * short tail that queries scan directly. Rebuilding the grid for every stroke took ~70 ms
+ * of UI-thread time on a 7,000-stroke page (Tab S6 Lite), right as the next stroke began.
  */
-class StrokeIndex(val strokes: List<Stroke>, cellSize: Float = DEFAULT_CELL) {
+class StrokeIndex private constructor(val strokes: List<Stroke>, private val grid: Grid) {
+    constructor(strokes: List<Stroke>, cellSize: Float = DEFAULT_CELL) : this(strokes, Grid(strokes, cellSize))
+
+    /** Strokes [grid] covers: the first [Grid.count]; the rest are the appended tail. */
+    private val tailStart = grid.count
+
+    /**
+     * An index for [newStrokes] that reuses this one's grid, if [newStrokes] is this page with
+     * strokes added at the end (same objects in front) and the tail is still short;
+     * otherwise a fresh index.
+     */
+    fun appending(newStrokes: List<Stroke>): StrokeIndex {
+        val n = strokes.size
+        if (newStrokes.size <= n || newStrokes.size - grid.count > MAX_TAIL) return StrokeIndex(newStrokes)
+        for (i in 0 until n) if (newStrokes[i] !== strokes[i]) return StrokeIndex(newStrokes)
+        return StrokeIndex(newStrokes, grid)
+    }
+
+    /** Index of the stroke with [id] in [strokes], or -1. */
+    fun indexOf(id: String): Int {
+        grid.ids[id]?.let { return it }
+        for (i in tailStart until strokes.size) if (strokes[i].id == id) return i
+        return -1
+    }
+
+    /** Indices of strokes whose bounds intersect the rectangle, ascending (page order). */
+    fun query(l: Float, t: Float, r: Float, b: Float): IntArray {
+        if (strokes.isEmpty() || r < l || b < t) return EMPTY
+        val base = grid.query(l, t, r, b)
+        if (tailStart == strokes.size) return base
+        var out = base.copyOf(base.size + 8)
+        var n = base.size
+        for (i in tailStart until strokes.size) {
+            val bb = strokes[i].bounds()
+            if (bb.right < l || bb.left > r || bb.bottom < t || bb.top > b) continue
+            if (n == out.size) out = out.copyOf(n * 2)
+            out[n++] = i // tail indices are above every grid index, so order is kept
+        }
+        return out.copyOf(n)
+    }
+
+    fun query(area: Rect): IntArray = query(area.left, area.top, area.right, area.bottom)
+
+    /** The grid over the first [count] strokes of a page. Never changed after it's built. */
+    private class Grid(strokes: List<Stroke>, cellSize: Float) {
+    val count = strokes.size
+    private val strokes = strokes
     private val ox: Float
     private val oy: Float
     private val cell: Float
@@ -29,7 +79,7 @@ class StrokeIndex(val strokes: List<Stroke>, cellSize: Float = DEFAULT_CELL) {
     /** Strokes spanning more than [MAX_CELLS_PER_STROKE] cells; checked on every query. */
     private val big: IntArray
     /** Built on first use: most indexes never need it. */
-    private val ids: HashMap<String, Int> by lazy {
+    val ids: HashMap<String, Int> by lazy {
         HashMap<String, Int>(strokes.size * 2).also { m -> for (i in strokes.indices) m[strokes[i].id] = i }
     }
 
@@ -73,12 +123,8 @@ class StrokeIndex(val strokes: List<Stroke>, cellSize: Float = DEFAULT_CELL) {
     private fun col(x: Float) = floor((x - ox) / cell).toInt().coerceIn(0, cols - 1)
     private fun row(y: Float) = floor((y - oy) / cell).toInt().coerceIn(0, rows - 1)
 
-    /** Index of the stroke with [id] in [strokes], or -1. */
-    fun indexOf(id: String): Int = ids[id] ?: -1
-
-    /** Indices of strokes whose bounds intersect the rectangle, ascending (page order). */
     fun query(l: Float, t: Float, r: Float, b: Float): IntArray {
-        if (strokes.isEmpty() || r < l || b < t) return EMPTY
+        if (strokes.isEmpty()) return EMPTY
         var out = IntArray(16)
         var n = 0
         val qc0 = col(l); val qc1 = col(r); val qr0 = row(t); val qr1 = row(b)
@@ -105,10 +151,11 @@ class StrokeIndex(val strokes: List<Stroke>, cellSize: Float = DEFAULT_CELL) {
         res.sort()
         return res
     }
-
-    fun query(area: Rect): IntArray = query(area.left, area.top, area.right, area.bottom)
+    }
 
     companion object {
+        /** Appended strokes kept outside the grid before it is rebuilt. */
+        const val MAX_TAIL = 256
         /** Page units per cell (A4 page = 1000 wide): about the size of a written word. */
         const val DEFAULT_CELL = 48f
         private const val MAX_DIM = 512

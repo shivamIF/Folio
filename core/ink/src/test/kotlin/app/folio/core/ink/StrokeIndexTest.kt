@@ -37,6 +37,34 @@ class StrokeIndexTest {
         assertContentEquals(brute(strokes, p.left, p.top, p.left, p.top), idx.query(p.left, p.top, p.left, p.top))
     }
 
+    @Test fun appendingReusesTheGridAndMatchesAFreshIndex() {
+        val rnd = Random(5)
+        fun word(k: Int): Stroke {
+            val x = rnd.nextFloat() * 1000f; val y = rnd.nextFloat() * 1414f
+            return stroke("a$k", FloatArray(6) { x + it * 7f }, FloatArray(6) { y + rnd.nextFloat() * 10f })
+        }
+        var strokes = List(2000) { word(it) }
+        var idx = StrokeIndex(strokes)
+        // Pen strokes arrive one at a time; each new list keeps the same objects in front.
+        repeat(40) { k ->
+            strokes = strokes + word(2000 + k)
+            idx = idx.appending(strokes)
+            assertEquals(strokes.size - 1, idx.indexOf(strokes.last().id))
+        }
+        val fresh = StrokeIndex(strokes)
+        repeat(200) {
+            val l = rnd.nextFloat() * 1000f; val t = rnd.nextFloat() * 1400f
+            assertContentEquals(fresh.query(l, t, l + 150f, t + 150f), idx.query(l, t, l + 150f, t + 150f))
+        }
+        assertEquals(17, idx.indexOf("a17"))
+        assertEquals(-1, idx.indexOf("missing"))
+        // A changed prefix (erase, undo) or a long tail builds a fresh index.
+        val erased = strokes.drop(1)
+        assertContentEquals(StrokeIndex(erased).query(0f, 0f, 1000f, 1414f), idx.appending(erased).query(0f, 0f, 1000f, 1414f))
+        val many = strokes + List(StrokeIndex.MAX_TAIL + 1) { word(5000 + it) }
+        assertContentEquals(StrokeIndex(many).query(0f, 0f, 500f, 700f), idx.appending(many).query(0f, 0f, 500f, 700f))
+    }
+
     @Test fun idsEmptyPagesAndStrokesOffThePage() {
         assertEquals(0, StrokeIndex(emptyList()).query(0f, 0f, 1000f, 1000f).size)
         val strokes = listOf(

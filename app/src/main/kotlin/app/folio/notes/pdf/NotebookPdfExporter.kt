@@ -26,7 +26,7 @@ object NotebookPdfExporter {
 
     fun write(repo: DocumentRepository, meta: NotebookMeta, out: OutputStream) {
         val doc = PdfDocument()
-        val renderer = PageRenderer()
+        val renderer = PageRenderer(forPdf = true)
         val sources = HashMap<String, PdfFile>()
         val pictures = HashMap<String, android.graphics.Bitmap?>()
         try {

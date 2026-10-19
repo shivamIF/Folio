@@ -44,16 +44,18 @@ class BrushLabActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // Hooks for screenshots and scripts: `--ez sample true --es preset fountain --ef zoom 6`.
+        // `--es set tilt` starts with the tilt/overlap strokes instead.
         val sample = intent.getBooleanExtra("sample", false)
+        val tiltSet = intent.getStringExtra("set") == "tilt"
         val presetId = intent.getStringExtra("preset")
         val zoom = intent.getFloatExtra("zoom", 1f)
-        setContent { MaterialTheme { Surface { BrushLab(sample, presetId, zoom) } } }
+        setContent { MaterialTheme { Surface { BrushLab(sample, tiltSet, presetId, zoom) } } }
     }
 }
 
 @Composable
-private fun BrushLab(startWithSample: Boolean, startPreset: String?, startZoom: Float) {
-    val raw = remember { ArrayList<RawStroke>().apply { if (startWithSample) addAll(LabSamples.all()) } }
+private fun BrushLab(startWithSample: Boolean, tiltSet: Boolean, startPreset: String?, startZoom: Float) {
+    val raw = remember { ArrayList<RawStroke>().apply { if (startWithSample) addAll(if (tiltSet) LabSamples.tiltSet() else LabSamples.all()) } }
     var version by remember { mutableIntStateOf(0) }
     var preset by remember { mutableStateOf(LAB_PRESETS.firstOrNull { it.id == startPreset } ?: LAB_PRESETS.first()) }
     var widthScale by remember { mutableFloatStateOf(1f) }
@@ -87,6 +89,7 @@ private fun BrushLab(startWithSample: Boolean, startPreset: String?, startZoom: 
             Text("Width ×%.1f".format(widthScale))
             Slider(value = widthScale, onValueChange = { widthScale = it }, valueRange = 0.5f..3f, modifier = Modifier.width(180.dp))
             OutlinedButton(onClick = { raw.addAll(LabSamples.all()); version++ }) { Text("Sample strokes") }
+            OutlinedButton(onClick = { raw.addAll(LabSamples.tiltSet()); version++ }) { Text("Tilt + overlap") }
             OutlinedButton(onClick = { if (raw.isNotEmpty()) { raw.removeAt(raw.lastIndex); version++ } }) { Text("Undo") }
             OutlinedButton(onClick = { raw.clear(); version++ }) { Text("Clear") }
             OutlinedButton(onClick = { fitRequest++ }) { Text("Fit") }

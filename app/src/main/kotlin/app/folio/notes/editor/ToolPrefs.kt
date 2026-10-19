@@ -34,7 +34,15 @@ data class ToolState(
         val DEFAULT_WIDTHS = mapOf(
             ToolType.FOUNTAIN to 3.5f, ToolType.BALLPOINT to 2.5f, ToolType.PENCIL to 3f,
             ToolType.BRUSH to 8f, ToolType.HIGHLIGHTER to 18f, ToolType.FINELINER to 1.8f, ToolType.MARKER to 6f,
+            ToolType.AIRBRUSH to 14f,
         )
+
+        /** The size slider's range: broad tools (highlighter, spray) go much wider. */
+        fun sizeRange(tool: ToolType): ClosedFloatingPointRange<Float> = when (tool) {
+            ToolType.HIGHLIGHTER -> 6f..40f
+            ToolType.AIRBRUSH -> 3f..48f
+            else -> 0.8f..16f
+        }
         val PALETTE: List<Argb> = listOf(
             0xFF1B1B1F, 0xFF3D5A80, 0xFF1565C0, 0xFF2E7D32, 0xFFC62828, 0xFFEF6C00, 0xFF6A1B9A, 0xFFF9D71C,
         )

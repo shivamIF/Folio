@@ -1,10 +1,12 @@
 package app.folio.core.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonNames
+import kotlinx.serialization.ExperimentalSerializationApi
 import java.util.UUID
 
 /** Current on-disk schema version of every persisted model object. Bump together with a migration. */
-const val SCHEMA_VERSION = 4
+const val SCHEMA_VERSION = 5
 
 fun newId(): String = UUID.randomUUID().toString()
 
@@ -100,10 +102,30 @@ data class LibraryIndex(
     val notebooks: List<NotebookMeta> = emptyList(),
 )
 
-/** Persisted by name. FINELINER and MARKER arrived in schema 4. */
+/**
+ * Persisted by name. FINELINER and MARKER arrived in schema 4, AIRBRUSH in schema 5.
+ *
+ * Calligraphy, crayon and watercolour existed only in test builds and were withdrawn; strokes
+ * saved with them load as the nearest remaining tool (the [JsonNames] aliases).
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 enum class ToolType {
-    FOUNTAIN, BALLPOINT, PENCIL, BRUSH, HIGHLIGHTER, FINELINER, MARKER;
+    @JsonNames("CALLIGRAPHY") FOUNTAIN, BALLPOINT, @JsonNames("CRAYON") PENCIL, BRUSH,
+    @JsonNames("WATERCOLOR") HIGHLIGHTER, FINELINER, MARKER, AIRBRUSH;
+
+    /**
+     * Furthest the drawn ink can reach from the centreline, in nominal widths (a tilted pencil
+     * spreads wide; square caps reach their corners). Used for bounds and hit-testing; the brush
+     * engine's BrushSpec.reach is tested to match. Not persisted.
+     */
+    val inkReach: Float get() = when (this) {
+        PENCIL -> 1.6f
+        AIRBRUSH -> 1.0f
+        BRUSH -> 0.85f
+        MARKER, HIGHLIGHTER -> 0.71f
+        FOUNTAIN, BALLPOINT, FINELINER -> 0.5f
+    }
 
     val isHighlighter get() = this == HIGHLIGHTER
 }
@@ -163,7 +185,7 @@ class Stroke(
             if (x[i] < l) l = x[i]; if (x[i] > r) r = x[i]
             if (y[i] < tp) tp = y[i]; if (y[i] > b) b = y[i]
         }
-        val pad = width
+        val pad = width * maxOf(1f, tool.inkReach)
         return Rect(l - pad, tp - pad, r + pad, b + pad)
     }
 

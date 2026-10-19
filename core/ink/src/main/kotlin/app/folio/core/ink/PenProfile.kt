@@ -48,6 +48,7 @@ data class PenProfile(
             // Felt tips: nearly even width; the marker spreads a little when pressed or leaned.
             ToolType.FINELINER -> PenProfile(minWidthFactor = 0.85f, pressureGamma = 1f, tiltWidthGain = 0f, opacity = 1f)
             ToolType.MARKER -> PenProfile(minWidthFactor = 0.7f, pressureGamma = 1.2f, tiltWidthGain = 0.3f, opacity = 1f)
+            ToolType.AIRBRUSH -> PenProfile(minWidthFactor = 0.7f, pressureGamma = 1f, tiltWidthGain = 0f, opacity = 0.35f)
         }
     }
 }

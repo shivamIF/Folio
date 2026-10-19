@@ -40,8 +40,8 @@ import kotlin.math.roundToInt
  * - edits patch only the changed area of the tiles they touch (appends are painted on).
  *
  * All bookkeeping is on the main thread. Workers only render new bitmaps; they never
- * touch a tile that's already cached. Stroke outline Paths are built once per stroke
- * ([outline]) and shared read-only by all threads.
+ * touch a tile that's already cached. Stroke art (outline Paths, pencil meshes) is built
+ * once per stroke ([art]) and shared read-only by all threads.
  */
 internal class TileCache(private val onTilesChanged: () -> Unit) {
 
@@ -312,7 +312,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         val d = diff(tile.strokes, tile.excluded, c)
         if (d is Diff.Append && elementRects.isEmpty()) {
             for (s in d.added) if (s.id !in c.excluded && tile.intersects(s.bounds())) {
-                threadRenderer.get()!!.drawStroke(tile.canvas, s.color, s.tool, outline(s))
+                threadRenderer.get()!!.drawStroke(tile.canvas, StrokeArt.of(s))
             }
             // Text sits above ink: repaint any text the new strokes went under.
             for (t in c.texts) if (t.id !in c.excluded && tile.intersects(t.bounds) && d.added.any { it.bounds().intersects(t.bounds) }) {
@@ -499,7 +499,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         for (i in c.index.query(area)) {
             val s = c.strokes[i]
             if (s.id in c.excluded) continue
-            rnd.drawStroke(cv, s.color, s.tool, outline(s))
+            rnd.drawStroke(cv, StrokeArt.of(s))
         }
         for (t in c.texts) if (t.id !in c.excluded && t.bounds.intersects(area)) rnd.drawText(cv, t)
         return complete
@@ -538,18 +538,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
             Thread(r, "folio-tiles").apply { priority = Thread.NORM_PRIORITY - 1 }
         }
         private val threadRenderer = ThreadLocal.withInitial { PageRenderer() }
-        private val boundsTmp = ThreadLocal.withInitial { RectF() }
-
-        /**
-         * The stroke's outline as a Path, built once and cached on the stroke. Bounds are
-         * computed before it's shared, so concurrent read-only drawing is safe.
-         */
-        fun outline(s: Stroke): Path {
-            (s.renderCache as? Path)?.let { return it }
-            val p = PageRenderer.pathOf(StrokeGeometry.outline(s))
-            p.computeBounds(boundsTmp.get()!!, true)
-            s.renderCache = p
-            return p
-        }
+        /** The stroke's drawable art (outline Path or pencil mesh), built once and cached on the stroke. */
+        fun art(s: Stroke): StrokeArt = StrokeArt.of(s)
     }
 }

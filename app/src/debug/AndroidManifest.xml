@@ -9,5 +9,12 @@
             android:label="Folio Brush Lab"
             android:taskAffinity="app.folio.notes.lab"
             android:resizeableActivity="true" />
+        <!-- Latency/brush bench: the real writing surface on an in-memory page. -->
+        <activity
+            android:name=".lab.InkBenchActivity"
+            android:exported="true"
+            android:label="Folio Ink Bench"
+            android:taskAffinity="app.folio.notes.lab"
+            android:theme="@style/Theme.Folio" />
     </application>
 </manifest>

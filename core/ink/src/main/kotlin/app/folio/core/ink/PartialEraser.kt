@@ -27,7 +27,7 @@ object PartialEraser {
      */
     fun erasePath(stroke: Stroke, path: FloatArray, radius: Float): List<Stroke>? {
         if (stroke.size == 0 || path.size < 2) return null
-        val reach = radius + stroke.width / 2f
+        val reach = radius + stroke.width * stroke.tool.inkReach
         val b = stroke.bounds().inflate(radius)
         // Segments whose box touches the stroke's box, with their own boxes grown by the
         // reach: a point outside a segment's box can't be within reach of it.

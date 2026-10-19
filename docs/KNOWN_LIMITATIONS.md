@@ -12,7 +12,7 @@
 6. **Unknown JSON fields are dropped on re-save.** A newer minor version's extra fields survive reading but not writing.
 7. **The library index is rewritten on every page save.** That's fine at hundreds of notebooks; for thousands, it should become per-notebook metadata files or SQLite.
 8. **Very dense pages open slowly.** A 7,000-stroke page (imported from Samsung Notes) takes about 4.4 s to load plus 2.6 s to draw on a Tab S6 Lite. Typical handwritten pages (hundreds of strokes) are well under a second. A binary page file and progressive drawing would fix it.
-9. **Schema 4 needs this build on every synced device.** Any page saved by this build is stamped schema 4, and an older build refuses it ("update the app"). Install the same APK on the phone and the Tab before syncing.
+9. **Schema 5 needs this build on every synced device.** Any page saved by this build is stamped schema 5 (the airbrush tool), and an older build refuses it ("update the app"). The airbrush exports to PDF without its blur. Install the same APK on the phone and the Tab before syncing.
 10. **Sync speed is bounded by Google Drive:**
    - another device's edit shows up about 5–10 s after it's written while a notebook is open, 30 s in the library and about 15 min while Folio is closed (Android may stretch this);
    - Drive takes ~2 s per saved file and 1–1.5 s per fetched one, so 1–2 s would need a direct device-to-device link (discussed, not built);

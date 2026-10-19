@@ -12,7 +12,6 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import app.folio.core.ink.PressureCurve
-import app.folio.core.ink.StrokeGeometry
 import app.folio.core.model.Rect
 import app.folio.core.model.Stroke
 import app.folio.notes.editor.PageRenderer
@@ -101,10 +100,7 @@ class CapturePad(context: Context, private val onStroke: (RawStroke) -> Unit) : 
         canvas.concat(toView)
         drawUnderlay(canvas, preset, PAGE_WIDTH, height / s)
         for (stroke in strokes) renderer.drawStroke(canvas, stroke)
-        if (samples.isNotEmpty()) {
-            val live = RawStroke(samples).toStroke(preset.tool, preset.color, preset.width * widthScale)
-            renderer.drawStroke(canvas, live.color, live.tool, PageRenderer.pathOf(StrokeGeometry.outline(live)))
-        }
+        if (samples.isNotEmpty()) renderer.drawStroke(canvas, RawStroke(samples).toStroke(preset.tool, preset.color, preset.width * widthScale))
         canvas.restore()
     }
 }
@@ -184,6 +180,8 @@ class ComparePanel(context: Context, private val engine: LabEngine, private val 
     }
 
     override fun onDraw(canvas: Canvas) {
+        // Compose doesn't clip AndroidViews: keep zoomed strokes inside this column.
+        canvas.clipRect(0, 0, width, height)
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bg)
         val reason = engine.unavailableReason
         if (reason != null) {

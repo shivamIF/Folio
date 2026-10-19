@@ -88,8 +88,33 @@ class CodecTest {
         assertEquals(ToolType.FINELINER, DocumentCodec.decodePage(text).strokes.single().tool)
     }
 
+    @Test fun schema4PagesLoadAndGainTheAirbrushOnSave() {
+        val old = """{"schemaVersion":4,"id":"p","width":1000.0,"height":1414.0,"paper":"BLANK","strokes":[],"pdf":null,"texts":[],"images":[]}"""
+        val page = DocumentCodec.decodePage(old)
+        assertEquals(4, page.schemaVersion)
+        val edited = page.copy(strokes = listOf(testStroke(id = "wc").let {
+            Stroke(it.id, ToolType.AIRBRUSH, it.color, it.width, it.x, it.y, it.pressure, it.tilt, it.orientation, it.t)
+        }))
+        val text = DocumentCodec.encodePage(edited)
+        // Stamped 5, so a schema-4 build refuses it instead of failing on an unknown tool name.
+        assertTrue("\"schemaVersion\":5" in text, text)
+        assertEquals(ToolType.AIRBRUSH, DocumentCodec.decodePage(text).strokes.single().tool)
+    }
+
+    @Test fun withdrawnTestToolsLoadAsTheirNearestTool() {
+        // Calligraphy, crayon and watercolour shipped only in test builds; their strokes still open.
+        val s = testStroke(id = "w")
+        val text = DocumentCodec.encodePage(Page(strokes = listOf(s)))
+        val tag = "\"tool\":\"${s.tool.name}\""
+        assertTrue(tag in text, text)
+        for ((old, now) in listOf("CALLIGRAPHY" to ToolType.FOUNTAIN, "CRAYON" to ToolType.PENCIL, "WATERCOLOR" to ToolType.HIGHLIGHTER)) {
+            val page = DocumentCodec.decodePage(text.replace(tag, "\"tool\":\"$old\""))
+            assertEquals(now, page.strokes.single().tool, old)
+        }
+    }
+
     @Test fun newToolsRoundTrip() {
-        for (tool in listOf(ToolType.FINELINER, ToolType.MARKER)) {
+        for (tool in listOf(ToolType.FINELINER, ToolType.MARKER, ToolType.AIRBRUSH)) {
             val s = testStroke(id = "t-$tool").let { Stroke(it.id, tool, it.color, it.width, it.x, it.y, it.pressure, it.tilt, it.orientation, it.t) }
             assertEquals(s, DocumentCodec.decodePage(DocumentCodec.encodePage(Page(strokes = listOf(s)))).strokes.single())
         }

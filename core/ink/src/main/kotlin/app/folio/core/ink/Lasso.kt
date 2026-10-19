@@ -19,7 +19,7 @@ object Lasso {
         val out = LinkedHashSet<String>()
         for (s in strokes) {
             if (s.size == 0) continue
-            val reach = s.width / 2f + tolerance
+            val reach = s.width * s.tool.inkReach + tolerance
             if (!s.bounds().intersects(bounds.inflate(reach))) continue
             if (anyPointInside(s, polygon) || outlineTouches(s, polygon, reach)) out += s.id
         }

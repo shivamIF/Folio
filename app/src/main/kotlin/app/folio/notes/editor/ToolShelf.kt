@@ -4,6 +4,8 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,19 +62,24 @@ import app.folio.notes.ui.glass
 /** What a shelf slot holds. */
 private enum class Kit(val label: String, val tag: String) {
     FOUNTAIN("Fountain pen", "tool-FOUNTAIN"), BALLPOINT("Ballpoint pen", "tool-BALLPOINT"), FINELINER("Fine liner", "tool-FINELINER"),
-    PENCIL("Pencil", "tool-PENCIL"), BRUSH("Brush pen", "tool-BRUSH"), MARKER("Marker", "tool-MARKER"),
+    PENCIL("Pencil", "tool-PENCIL"), BRUSH("Brush pen", "tool-BRUSH"),
+    AIRBRUSH("Airbrush", "tool-AIRBRUSH"), MARKER("Marker", "tool-MARKER"),
     HIGHLIGHTER("Highlighter", "tool-HIGHLIGHTER"), ERASER("Eraser", "tool-eraser"),
     LASSO("Lasso select", "tool-lasso"), TEXT("Text", "tool-text"), IMAGE("Insert picture", "insert-image"),
 }
 
+private val UTILITY_KITS = listOf(Kit.ERASER, Kit.LASSO, Kit.TEXT, Kit.IMAGE)
+private val PEN_KITS = Kit.entries - UTILITY_KITS
+
 private fun Kit.tool(): ToolType? = when (this) {
     Kit.FOUNTAIN -> ToolType.FOUNTAIN; Kit.BALLPOINT -> ToolType.BALLPOINT; Kit.PENCIL -> ToolType.PENCIL
     Kit.BRUSH -> ToolType.BRUSH; Kit.HIGHLIGHTER -> ToolType.HIGHLIGHTER
-    Kit.FINELINER -> ToolType.FINELINER; Kit.MARKER -> ToolType.MARKER; else -> null
+    Kit.FINELINER -> ToolType.FINELINER; Kit.MARKER -> ToolType.MARKER
+    Kit.AIRBRUSH -> ToolType.AIRBRUSH; else -> null
 }
 
 /**
- * The tool shelf: pens, fine liner, pencil, brush, marker, highlighter, eraser, lasso, text and picture standing in a glass
+ * The tool shelf: pens, fine liner, pencil, brush pen, airbrush, marker, highlighter, eraser, lasso, text and picture standing in a glass
  * tray. A hovering S Pen makes a tool grow and rise; the chosen one pops out of the tray;
  * tapping the chosen one again opens its options in a glass popover.
  */
@@ -105,11 +112,17 @@ fun ToolShelf(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit, onCo
         horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
         itemVerticalAlignment = Alignment.Bottom,
     ) {
-        // The tray with its tools.
-        Box(contentAlignment = Alignment.BottomCenter) {
-            Box(Modifier.matchParentSize().padding(top = 44.dp).glass(RoundedCornerShape(18.dp), elevation = 10.dp))
-            Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {
-                Kit.entries.forEach { k ->
+        // Two trays: pens and brushes, then the utilities. They wrap onto separate rows on a
+        // narrow screen, and the pen tray scrolls sideways if it's still wider than the screen,
+        // so no tool is ever out of reach.
+        for (kits in listOf(PEN_KITS, UTILITY_KITS)) Box(contentAlignment = Alignment.BottomCenter) {
+            Box(Modifier.matchParentSize().padding(top = 56.dp).glass(RoundedCornerShape(18.dp), elevation = 10.dp))
+            Row(
+                // Top room so a chosen tool can rise and grow without the scroll clip cutting it.
+                Modifier.horizontalScroll(rememberScrollState()).padding(start = 10.dp, end = 10.dp, top = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom,
+            ) {
+                kits.forEach { k ->
                     Box {
                         ShelfTool(k, selected(k), Color(tools.color), onTap = { tap(k) })
                         if (options == k) ToolOptions(k, tools, update, onDismiss = { options = null })
@@ -118,7 +131,7 @@ fun ToolShelf(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit, onCo
             }
             // The tray's front lip sits over the tools' bases.
             Box(
-                Modifier.matchParentSize().padding(top = 64.dp).clip(RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp))
+                Modifier.matchParentSize().padding(top = 76.dp).clip(RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp))
                     .background(Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.55f), Color.White.copy(alpha = 0.25f)))),
             )
         }
@@ -150,7 +163,7 @@ fun ToolShelf(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit, onCo
             Canvas(Modifier.size(18.dp)) { drawCircle(Color(tools.color), radius = (tools.width / 16f * size.width / 2).coerceIn(1.5f, size.width / 2)) }
             GlassSlider(
                 tools.width, { w -> update { it.copy(widths = it.widths + (it.tool to w)) } },
-                valueRange = if (tools.tool == ToolType.HIGHLIGHTER) 6f..40f else 0.8f..16f,
+                valueRange = ToolState.sizeRange(tools.tool),
                 description = "Pen size", modifier = Modifier.width(150.dp), accent = Color(tools.color),
             )
         }
@@ -248,6 +261,13 @@ private fun DrawScope.drawTool(k: Kit, ink: Color) {
             cone(14f * density, 30f * density, 16f * density, Color(0xFF2A2E35))
             drawRoundRect(ink, Offset(cx - 4f * density, 5f * density), Size(8f * density, 11f * density), CornerRadius(4f * density))
         }
+        Kit.AIRBRUSH -> {
+            // A spray pen: chrome body, a trigger lever, a fine nozzle with a puff of mist.
+            body(Color(0xFFD7DCE4), 24f * density, width = 14f * density, dark = Color(0xFF9AA2B0))
+            drawRoundRect(Color(0xFF2A2E35), Offset(cx + 2f * density, 30f * density), Size(6f * density, 4f * density), CornerRadius(2f * density))
+            cone(12f * density, 24f * density, 14f * density, Color(0xFFBFC5CF))
+            drawCircle(Brush.radialGradient(listOf(ink.copy(alpha = 0.7f), Color.Transparent), center = Offset(cx, 7f * density), radius = 8f * density), 8f * density, Offset(cx, 7f * density))
+        }
         Kit.HIGHLIGHTER -> {
             body(ink.copy(alpha = 0.85f).compositeWhite(), 28f * density)
             drawRoundRect(Color(0xFF2A2E35).copy(alpha = 0.8f), Offset(cx - 9f * density, 24f * density), Size(18f * density, 6f * density), CornerRadius(3f))
@@ -321,7 +341,7 @@ private fun ToolOptions(k: Kit, tools: ToolState, update: ((ToolState) -> ToolSt
                     Label("Size")
                     GlassSlider(
                         tools.width, { w -> update { it.copy(widths = it.widths + (it.tool to w)) } },
-                        if (tools.tool == ToolType.HIGHLIGHTER) 6f..40f else 0.8f..16f, "Tool size", Modifier.fillMaxWidth(), accent = Color(tools.color),
+                        ToolState.sizeRange(tools.tool), "Tool size", Modifier.fillMaxWidth(), accent = Color(tools.color),
                     )
                     Label("Stabilisation ${(tools.stabilization * 100).toInt()}%")
                     GlassSlider(tools.stabilization, { s -> update { it.copy(stabilization = s) } }, 0f..1f, "Stroke stabilisation", Modifier.fillMaxWidth())

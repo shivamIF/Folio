@@ -7,6 +7,7 @@ import app.folio.core.ink.PenProfile
 import app.folio.core.ink.StrokeGeometry
 import app.folio.core.model.Stroke
 import app.folio.notes.editor.PageRenderer
+import app.folio.notes.editor.StrokeArt
 import java.util.IdentityHashMap
 import androidx.ink.brush.Brush
 import androidx.ink.brush.InputToolType
@@ -53,25 +54,30 @@ private class GeometryCache<G> {
     }
 }
 
-/** Today's renderer: the same path as tiles, thumbnails and PDF export. */
+/** The previous engine: straight-segment outline, flat fill at the tool's opacity. */
 class V1Engine : LabEngine {
-    override val name = "v1 (current)"
+    override val name = "v1 (before)"
     private val renderer = PageRenderer()
     private val cache = GeometryCache<Path>()
     override val buildMs get() = cache.buildMs
 
     override fun draw(canvas: Canvas, strokes: List<Stroke>, preset: LabPreset, pageToView: Matrix) =
-        cache.forEach(strokes, preset, { PageRenderer.pathOf(StrokeGeometry.outline(it)) }) { s, path ->
+        cache.forEach(strokes, preset, { PageRenderer.pathOf(StrokeGeometry.outlineV1(it)) }) { s, path ->
             renderer.drawStroke(canvas, s.color, s.tool, path)
         }
 }
 
-/** Slot for engine v2 (BRUSH_ENGINE_PLAN, proposed change 1). Swap in its renderer when it lands. */
+/** Engine v2, exactly as the app draws it (tiles, live ink and export share [PageRenderer]). */
 class V2Engine : LabEngine {
-    override val name = "v2 (proposed)"
-    override val unavailableReason = "Engine v2 isn't built yet.\nThis column will draw it."
+    override val name = "v2 (new)"
+    private val renderer = PageRenderer()
+    private val cache = GeometryCache<StrokeArt>()
+    override val buildMs get() = cache.buildMs
 
-    override fun draw(canvas: Canvas, strokes: List<Stroke>, preset: LabPreset, pageToView: Matrix) = Unit
+    override fun draw(canvas: Canvas, strokes: List<Stroke>, preset: LabPreset, pageToView: Matrix) =
+        cache.forEach(strokes, preset, { StrokeArt.live(it.tool, it.color, it.width, it.x, it.y, it.pressure, it.tilt, it.orientation, it.size) }) { _, art ->
+            renderer.drawStroke(canvas, art)
+        }
 }
 
 /**

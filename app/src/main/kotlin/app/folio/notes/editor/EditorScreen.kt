@@ -160,7 +160,7 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                     val tools = state.tools
                     AndroidView(
                         factory = { ctx ->
-                            InkCanvasView(ctx).apply {
+                            InkCanvasHost(ctx, InkCanvasView(ctx).apply {
                                 listener = object : InkCanvasView.Listener {
                                     override fun onStrokeFinished(stroke: Stroke) = vm.onStrokeFinished(stroke)
                                     override fun onStrokesErased(ids: Set<String>) = vm.onStrokesErased(ids)
@@ -171,9 +171,10 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                                     override fun onTextTap(x: Float, y: Float, textId: String?) = vm.onTextTap(x, y, textId)
                                     override fun onViewportChanged() { viewportTick++ }
                                 }
-                            }.also { canvasRef = it }
+                            }.also { canvasRef = it })
                         },
-                        update = { v ->
+                        update = { host ->
+                            val v = host.ink
                             v.tool = tools.tool; v.color = tools.color; v.penWidth = tools.width
                             v.stabilization = tools.stabilization; v.eraserSelected = tools.eraser
                             v.pdfBackground = state.background
@@ -388,7 +389,7 @@ private fun ToolBar(tools: ToolState, update: ((ToolState) -> ToolState) -> Unit
             Text("Size", style = MaterialTheme.typography.labelMedium)
             Slider(
                 value = tools.width, onValueChange = { w -> update { it.copy(widths = it.widths + (it.tool to w)) } },
-                valueRange = if (tools.tool == ToolType.HIGHLIGHTER) 6f..40f else 0.8f..16f,
+                valueRange = ToolState.sizeRange(tools.tool),
                 modifier = Modifier.width(160.dp).semantics { contentDescription = "Pen size" },
             )
             Box {

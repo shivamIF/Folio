@@ -7,7 +7,7 @@ import kotlin.test.assertTrue
 
 class LabInputTest {
     @Test fun scriptedSamplesAreValidInput() {
-        for (s in LabSamples.all()) {
+        for (s in LabSamples.all() + LabSamples.tiltSet()) {
             var lastT = Long.MIN_VALUE
             for (p in s.samples) {
                 assertTrue(p.x.isFinite() && p.y.isFinite(), "finite position")

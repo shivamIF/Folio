@@ -1,11 +1,13 @@
 package app.folio.notes.editor
 
 import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import app.folio.core.ink.BrushSpec
 import app.folio.core.ink.PenProfile
 import app.folio.core.ink.StrokeGeometry
 import app.folio.core.model.Argb
@@ -16,9 +18,14 @@ import app.folio.core.model.ToolType
 /**
  * Draws a page in page units onto any Canvas: the screen, a bitmap, or a PDF
  * export, so they always match. Holds Paint objects: one instance per thread.
+ *
+ * [forPdf]: the PDF canvas can't draw vertex meshes or blurs, so the pencil is drawn as a flat
+ * fill at its mean darkness and the airbrush without its blur.
  */
-class PageRenderer {
+class PageRenderer(private val forPdf: Boolean = false) {
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val meshPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; blendMode = android.graphics.BlendMode.MULTIPLY }
     private val pagePaint = Paint().apply { color = Color.WHITE }
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFC9D6E3.toInt(); strokeWidth = 1.2f }
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFB0B8C4.toInt() }
@@ -59,11 +66,68 @@ class PageRenderer {
         canvas.drawBitmap(bitmap, null, dst, bitmapPaint)
     }
 
+    /** Engine v1 look: a flat fill at the tool's opacity (kept for the v1 switch and the Lab). */
     fun drawStroke(canvas: Canvas, color: Argb, tool: ToolType, path: Path) {
         val argb = color.toInt()
         strokePaint.color = argb
         strokePaint.alpha = (Color.alpha(argb) * PenProfile.of(tool).opacity).toInt()
+        strokePaint.shader = null
         canvas.drawPath(path, strokePaint)
+    }
+
+    private val sprayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private var sprayRadius = -1f
+
+    /**
+     * Each tool's own look (engine v2):
+     * - pencil: graphite mesh, darker where pressed, lighter on its side, with paper grain;
+     * - airbrush: a soft-edged mist whose density follows pressure;
+     * - highlighter: multiplied over the page, so the ink and print under it stay crisp and
+     *   overlapping passes deepen the colour like a real highlighter;
+     * - pens, brush and marker: solid ink (their character is in the geometry).
+     */
+    fun drawStroke(canvas: Canvas, art: StrokeArt) {
+        if (!StrokeGeometry.useV2) return drawStroke(canvas, art.color, art.tool, art.path)
+        val argb = art.color.toInt()
+        val grain = StrokeArt.grainOf(art.tool)
+        when {
+            grain != null && art.colors != null && !forPdf -> {
+                meshPaint.shader = grain
+                canvas.drawVertices(
+                    Canvas.VertexMode.TRIANGLES, art.verts!!.size, art.verts, 0, art.texs, 0, art.colors, 0, null, 0, 0, meshPaint,
+                )
+            }
+            grain != null -> {
+                // PDF (no meshes): a flat fill at the stroke's mean darkness.
+                strokePaint.color = argb
+                strokePaint.alpha = (Color.alpha(argb) * art.meanShade).toInt()
+                strokePaint.shader = null
+                canvas.drawPath(art.path, strokePaint)
+            }
+            art.tool == ToolType.AIRBRUSH -> {
+                sprayPaint.color = argb
+                sprayPaint.alpha = (Color.alpha(argb) * SPRAY_ALPHA * art.meanShade).toInt()
+                // The blur is in page units (it follows the canvas matrix), so the mist scales
+                // with zoom. PDF gets the plain soft-coloured fill.
+                val radius = BrushSpec.of(ToolType.AIRBRUSH).soften * SPRAY_BLUR_OF_SOFTEN * art.width
+                if (forPdf) sprayPaint.maskFilter = null
+                else if (radius != sprayRadius || sprayPaint.maskFilter == null) {
+                    sprayPaint.maskFilter = BlurMaskFilter(maxOf(0.5f, radius), BlurMaskFilter.Blur.NORMAL)
+                    sprayRadius = radius
+                }
+                canvas.drawPath(art.path, sprayPaint)
+            }
+            art.tool == ToolType.HIGHLIGHTER -> {
+                highlightPaint.color = argb
+                highlightPaint.alpha = (Color.alpha(argb) * HIGHLIGHTER_ALPHA).toInt()
+                canvas.drawPath(art.path, highlightPaint)
+            }
+            else -> {
+                strokePaint.color = argb
+                strokePaint.shader = null
+                canvas.drawPath(art.path, strokePaint)
+            }
+        }
     }
 
     private val imagePaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
@@ -111,9 +175,16 @@ class PageRenderer {
         for (t in page.texts) drawText(canvas, t)
     }
 
-    fun drawStroke(canvas: Canvas, s: Stroke) = drawStroke(canvas, s.color, s.tool, pathOf(StrokeGeometry.outline(s)))
+    fun drawStroke(canvas: Canvas, s: Stroke) = drawStroke(canvas, StrokeArt.of(s))
 
     companion object {
+        /** Highlighter strength under multiply: light enough to read through. */
+        const val HIGHLIGHTER_ALPHA = 0.6f
+        /** Airbrush mist strength at full pressure. */
+        const val SPRAY_ALPHA = 0.8f
+        /** Blur radius as a share of the spec's softening (Android blur reaches ~1.5 × radius). */
+        const val SPRAY_BLUR_OF_SOFTEN = 0.7f
+
         fun pathOf(outline: FloatArray): Path = Path().also { fillPath(it, outline) }
 
         fun fillPath(path: Path, outline: FloatArray) {

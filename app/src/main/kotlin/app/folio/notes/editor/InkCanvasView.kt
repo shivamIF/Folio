@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
@@ -80,6 +81,106 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         stepFling()
         val c = try { holder.lockHardwareCanvas() } catch (e: Exception) { Log.w(TAG, "lockHardwareCanvas failed", e); null } ?: return
         try { renderFrame(c) } finally { holder.unlockCanvasAndPost(c) }
+        // Debug: pair each posted ink frame with its newest pen sample (scripts/latency_bench.py
+        // matches the post time to SurfaceFlinger's present time).
+        if (debugInput && builder != null && !wetLive && perfLastInputNanos > 0) perfFrames += "%d:%d".format(System.nanoTime(), perfLastInputNanos)
+        // Finished strokes now in a posted page frame: let the wet layer drop them shortly.
+        val now = System.nanoTime()
+        var marked = false
+        for (h in wetHeld) if (h.postedAt == 0L && h.stroke in pendingCommitsOrTiles()) { h.postedAt = now; marked = true }
+        if (marked) Choreographer.getInstance().postFrameCallback(wetTick)
+    }
+
+    // ---- wet ink (front-buffered live stroke, see WetInkLayer) ----
+    internal var wet: WetInkLayer? = null
+    /** The stroke in progress is drawn on the wet layer instead of the page surface. */
+    private var wetLive = false
+    /** Finished strokes still shown wet until the page surface has displayed them. */
+    private class WetHeld(val stroke: Stroke, val art: StrokeArt) { var postedAt = 0L }
+    private val wetHeld = ArrayList<WetHeld>()
+    private var wetTail: RectF? = null
+    private val wetMatrix = FloatArray(9)
+    private val wetRect = RectF()
+
+    /** Strokes the page surface draws: pending commits and everything in the page list. */
+    private fun pendingCommitsOrTiles(): Collection<Stroke> = object : AbstractCollection<Stroke>() {
+        override val size get() = pendingCommits.size
+        override fun iterator() = pendingCommits.iterator()
+        override fun contains(element: Stroke) = element in pendingCommits || index.indexOf(element.id) >= 0
+    }
+
+    private fun canUseWet() = wet?.ready == true && tool != ToolType.HIGHLIGHTER && !lassoMode && !textMode
+
+    /** Page→view transform and an art's bounds, in view pixels. */
+    private fun viewBounds(art: StrokeArt, out: RectF): RectF {
+        art.path.computeBounds(out, false)
+        pageToView.mapRect(out)
+        out.inset(-3f, -3f)
+        return out
+    }
+
+    /**
+     * Shows the live stroke (and held ones) on the wet layer. Only the area around the pen tip is
+     * repainted ([full] repaints everything: a new stroke or a snapped shape).
+     */
+    private fun pushWet(full: Boolean, extraClip: RectF? = null) {
+        val w = wet ?: return
+        val b = builder
+        val arts = ArrayList<StrokeArt>(wetHeld.size + 1)
+        for (h in wetHeld) arts += h.art
+        var tail: RectF? = null
+        if (b != null && wetLive) {
+            val live = liveSamples(b)
+            arts += live.art
+            // Tail: the last samples (geometry there can still settle) plus prediction.
+            val from = maxOf(0, live.real - 12)
+            var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var bt = -Float.MAX_VALUE
+            for (i in from until live.n) { l = minOf(l, live.xs[i]); r = maxOf(r, live.xs[i]); t = minOf(t, live.ys[i]); bt = maxOf(bt, live.ys[i]) }
+            if (live.n > 0) {
+                val pad = penWidth * tool.inkReach + 1f
+                tail = RectF(l - pad, t - pad, r + pad, bt + pad).also { pageToView.mapRect(it); it.inset(-3f, -3f) }
+            }
+        }
+        val prev = wetTail
+        val clip = when {
+            full || snapped != null -> null
+            tail == null -> extraClip?.let { RectF(it) } // nothing live: repaint just that area
+            prev == null -> null
+            else -> RectF(tail).apply { union(prev); extraClip?.let { union(it) } }
+        }
+        wetTail = tail
+        pageToView.getValues(wetMatrix)
+        w.show(WetFrame(wetMatrix.copyOf(), arts, clip, if (debugInput) perfLastInputNanos else 0L))
+    }
+
+    /** Drops held strokes the page surface has shown for a few frames (by then on screen). */
+    private val wetTick = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            val now = System.nanoTime()
+            var removed: RectF? = null
+            val it = wetHeld.iterator()
+            while (it.hasNext()) {
+                val h = it.next()
+                if (h.postedAt != 0L && now - h.postedAt >= WET_HOLD_NANOS) {
+                    val r = viewBounds(h.art, RectF())
+                    removed = removed?.apply { union(r) } ?: r
+                    it.remove()
+                }
+            }
+            if (removed != null) {
+                if (wetLive) pushWet(full = false, extraClip = removed)
+                else if (wetHeld.isEmpty()) { wet?.clear(); wetTail = null }
+                else pushWet(full = false, extraClip = removed)
+            }
+            if (wetHeld.any { it.postedAt != 0L }) Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    /** Pan/zoom etc.: the page shows everything; drop the wet copies at once. */
+    private fun dropWet() {
+        if (wetHeld.isEmpty() && !wetLive) return
+        wetHeld.clear(); wetLive = false; wetTail = null
+        wet?.clear()
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) { surfaceReady = true; requestRender() }
@@ -173,7 +274,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private val pendingCommits = ArrayList<Stroke>()
     private val pendingSince = HashMap<String, Long>()
     /** Outline path of a committed stroke, built once and shared with the tile renderer. */
-    private fun pathFor(s: Stroke): Path = TileCache.outline(s)
+    private fun artFor(s: Stroke): StrokeArt = StrokeArt.of(s)
     private var pageKey: String? = null
     private var paper = PaperTemplate.RULED
     private var pageW = 1000f
@@ -198,7 +299,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             val t0 = System.nanoTime()
             val pre = prebuiltIndex
             prebuiltIndex = null
-            index = if (pre != null && sameStrokes(pre.strokes, strokes)) pre else StrokeIndex(strokes)
+            index = if (pre != null && sameStrokes(pre.strokes, strokes)) pre else index.appending(strokes)
             if (debugInput && strokes.size > 1000) Log.d("FolioPerf", "index build ms=%.1f strokes=%d".format((System.nanoTime() - t0) / 1e6, strokes.size))
         }
         this.strokes = strokes
@@ -373,6 +474,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     // ---- debug-only performance probes (logged under tag FolioPerf) ----
     private val perfLatencyMs = ArrayList<Float>()
     private val perfDrawMs = ArrayList<Float>()
+    private val perfFrames = ArrayList<String>()
     private var perfLastInputNanos = 0L
     private var perfEraseUpNanos = 0L
     private var perfEraseHitMs = 0f
@@ -387,6 +489,14 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 pct(perfDrawMs, .5f), pct(perfDrawMs, .95f), perfDrawMs.maxOrNull() ?: -1f,
             ),
         )
+        if (perfFrames.isNotEmpty()) Log.d("FolioLatency", "frames " + perfFrames.joinToString(","))
+        if (perfPredictMs.isNotEmpty()) Log.d("FolioLatency", "predict " + perfPredictMs.joinToString(",") { "%.0f".format(it) })
+        perfPredictMs.clear()
+        wet?.drawnMs?.let { d ->
+            val v = synchronized(d) { ArrayList(d).also { d.clear() } }
+            if (v.isNotEmpty()) Log.d("FolioLatency", "wet " + v.joinToString(",") { "%.1f".format(it) })
+        }
+        perfFrames.clear()
         perfLatencyMs.clear(); perfDrawMs.clear()
         perfEraseHitMs = 0f; tiles.perfSyncMs = 0f; tiles.perfDiffMs = 0f; tiles.perfPatches = 0
     }
@@ -438,7 +548,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                     e.findPointerIndex(activePointerId).takeIf { it >= 0 }?.let { i ->
                         if (snapped != null) adjustSnap(e.getX(i), e.getY(i)) else watchHold(e.getX(i), e.getY(i))
                     }
-                    requestRender()
+                    renderLive()
                 }
                 GestureAction.ERASE -> eraseAlong(e)
                 GestureAction.NAVIGATE -> navigate(e)
@@ -477,11 +587,16 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             GestureAction.DRAW -> {
                 // Deliver every sample as soon as it arrives instead of once per frame.
                 requestUnbufferedDispatch(e)
-                builder = StrokeBuilder(tool, color, penWidth, stabilization, startedAt = System.currentTimeMillis())
+                builder = StrokeBuilder(
+                    tool, color, penWidth, stabilization, minDistance = StrokeBuilder.minDistanceAt(scale),
+                    startedAt = System.currentTimeMillis(), pxPerUnit = scale,
+                )
                 strokeIsFromPen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
                 predictor.record(e)
                 appendSamples(e)
                 snapped = null; snapBase = null
+                wetLive = canUseWet()
+                if (wetLive) pushWet(full = wetHeld.isEmpty())
                 holdX = e.getX(index); holdY = e.getY(index)
                 removeCallbacks(holdRunnable); postDelayed(holdRunnable, HOLD_TO_SNAP_MS)
             }
@@ -526,7 +641,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private fun updatePrediction() {
         predicted?.recycle()
         predicted = predictor.predict()
+        if (debugInput) predicted?.let { perfPredictMs += (it.eventTime - perfLastInputNanos / 1_000_000L).toFloat() }
     }
+    /** Debug: how far ahead (ms) each prediction reaches. */
+    private val perfPredictMs = ArrayList<Float>()
 
     private fun finishGesture(e: MotionEvent, index: Int, canceled: Boolean) {
         when (action) {
@@ -554,7 +672,15 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                     if (b.size > 0) {
                         val shape = snapped
                         val stroke = if (shape != null && !canceled) shape.toStroke(tool, color, penWidth, snapPressure, b.build().startedAt) else b.build()
-                        pathFor(stroke)
+                        val art = artFor(stroke) // build its geometry now, before the next frame needs it
+                        if (wetLive) {
+                            // Keep it wet until the page surface shows it, so it never blinks out.
+                            wetHeld += WetHeld(stroke, art)
+                            val tail = wetTail
+                            wetLive = false
+                            pushWet(full = false, extraClip = viewBounds(art, RectF()).apply { tail?.let { union(it) } })
+                            wetTail = null
+                        }
                         pendingCommits += stroke
                         pendingSince[stroke.id] = SystemClock.uptimeMillis()
                         listener?.onStrokeFinished(stroke)
@@ -663,7 +789,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             c.scale(sc, sc); c.translate(-box.left, -box.top)
             val r = PageRenderer()
             for (img in chosenImages) a?.image(img.attachmentId, decode = true)?.let { r.drawImage(c, it, img) }
-            for (s in chosen) r.drawStroke(c, s.color, s.tool, TileCache.outline(s))
+            for (s in chosen) r.drawStroke(c, StrokeArt.of(s))
             for (t in chosenTexts) r.drawText(c, t)
             bmp.prepareToDraw()
             val snap = SelectionSnapshot(sel, list, bmp, android.graphics.RectF(box.left, box.top, box.right, box.bottom))
@@ -699,7 +825,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         val p = toPage(holdX, holdY); snapRefX = p[0]; snapRefY = p[1]
         snapPressure = if (s.size > 0) s.pressure.average().toFloat().coerceIn(0.15f, 1f) else 0.5f
         performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-        requestRender()
+        renderLive()
     }
 
     /** After snapping, moving the pen drags a line's end, or resizes other shapes about their centre. */
@@ -715,6 +841,13 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     }
 
     private fun abortInk() {
+        if (wetLive) {
+            // Stroke dropped (second finger, cancel): wipe it from the wet layer.
+            wetLive = false
+            val tailOnly = wetTail
+            if (wetHeld.isEmpty()) wet?.clear() else pushWet(full = tailOnly == null, extraClip = tailOnly)
+            wetTail = null
+        }
         builder = null
         removeCallbacks(holdRunnable)
         snapped = null; snapBase = null
@@ -876,6 +1009,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
     private fun startPan(e: MotionEvent, skipIndex: Int = -1) {
         navigating = true
+        dropWet()
         scroller.forceFinished(true)
         if (velocity == null) velocity = VelocityTracker.obtain()
         var sx = 0f; var sy = 0f; var n = 0
@@ -1080,7 +1214,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         canvas.concat(pageToView)
         canvas.clipRect(0f, 0f, pageW, pageH)
         // Wiped tiles already show what's left; otherwise draw the remaining pieces.
-        if (!frozen) for (pieces in partialPieces.values) for (p in pieces) drawStroke(canvas, p.color, p.tool, pathFor(p))
+        if (!frozen) for (pieces in partialPieces.values) for (p in pieces) renderer.drawStroke(canvas, artFor(p))
         if (moving) {
             canvas.save()
             canvas.concat(transformMatrix(selTransform))
@@ -1088,19 +1222,17 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             if (snap != null && snap.selection === selection && snap.strokes === strokes) {
                 canvas.drawBitmap(snap.bitmap, null, snap.dst, snapshotPaint)
             } else {
-                for (s in strokes) if (s.id in selection) drawStroke(canvas, s.color, s.tool, pathFor(s))
+                for (s in strokes) if (s.id in selection) renderer.drawStroke(canvas, artFor(s))
                 drawMovingElements(canvas)
             }
             canvas.restore()
         }
         drawSelectionOverlay(canvas)
-        for (s in pendingCommits) drawStroke(canvas, s.color, s.tool, pathFor(s))
-        builder?.let { drawLive(canvas, it) }
+        for (s in pendingCommits) renderer.drawStroke(canvas, artFor(s))
+        if (!wetLive) builder?.let { drawLive(canvas, it) }
         canvas.restore()
         drawCursor(canvas)
     }
-
-    private fun drawStroke(canvas: Canvas, c: Argb, t: ToolType, path: Path) = renderer.drawStroke(canvas, c, t, path)
 
     // ------------------------------------------------------------ page tiles
 
@@ -1189,6 +1321,13 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     /** Debug only: a layer to leave out while benchmarking ("ink", "paper", "desk"), to find what costs GPU time. */
     private var perfSkip: String? = null
 
+    /** Debug benches: zoom to [z] × fit width around the centre of the view, once laid out. */
+    internal fun benchZoom(z: Float) = post {
+        fitIfNeeded()
+        viewport.zoomBy(viewport.fitWidthScale * z / viewport.scale, width / 2f, height / 2f)
+        syncMatrices(); requestRender()
+    }
+
     /** Debug builds only: runs the scripted zoom/pan benchmark on the open page. */
     fun runPerfScript(skip: String? = null) {
         if (!debugInput || perfScript != null) return
@@ -1203,29 +1342,42 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     }
 
     private fun drawLive(canvas: Canvas, b: StrokeBuilder) {
+        renderer.drawStroke(canvas, liveArt(b))
+    }
+
+    private fun liveArt(b: StrokeBuilder): StrokeArt = liveSamples(b).art
+
+    /** The stroke being written: samples (real ones, then predicted) and its art. */
+    private class LiveSamples(val xs: FloatArray, val ys: FloatArray, val n: Int, val real: Int, val art: StrokeArt)
+
+    /** Live ink goes to the wet layer when it's in use, else the page surface draws it. */
+    private fun renderLive() { if (wetLive) pushWet(full = false) else requestRender() }
+
+    /** The stroke being written (with predicted points ahead of the pen) as drawable art. */
+    private fun liveSamples(b: StrokeBuilder): LiveSamples {
         snapped?.let { shape ->
             val st = shape.toStroke(tool, color, penWidth, snapPressure)
-            PageRenderer.fillPath(livePath, StrokeGeometry.outline(st))
-            drawStroke(canvas, color, tool, livePath)
-            return
+            return LiveSamples(st.x, st.y, st.size, st.size, StrokeArt.of(st))
         }
         val s = b.build()
         val pred = predicted
-        val extra = if (pred != null && action == GestureAction.DRAW) pred.historySize + 1 else 0
+        val extra = if (pred != null && action == GestureAction.DRAW && s.size > 0) pred.historySize + 1 else 0
         val n = s.size + extra
-        val xs = s.x.copyOf(n); val ys = s.y.copyOf(n); val ps = s.pressure.copyOf(n); val ts = s.tilt.copyOf(n)
+        val xs = s.x.copyOf(n); val ys = s.y.copyOf(n); val ps = s.pressure.copyOf(n)
+        val ts = s.tilt.copyOf(n); val os = s.orientation.copyOf(n)
         if (pred != null && extra > 0) {
-            val lastP = if (s.size > 0) s.pressure[s.size - 1] else 0.5f
+            // Predicted points carry the pen's latest pressure, tilt and azimuth, so the tip
+            // doesn't change shape (a tilted pencil's tip used to flick thin).
+            val last = s.size - 1
             for (k in 0 until extra) {
                 val vx = if (k < pred.historySize) pred.getHistoricalX(0, k) else pred.x
                 val vy = if (k < pred.historySize) pred.getHistoricalY(0, k) else pred.y
                 val p = toPage(vx, vy)
-                xs[s.size + k] = p[0]; ys[s.size + k] = p[1]; ps[s.size + k] = lastP; ts[s.size + k] = 0f
+                xs[s.size + k] = p[0]; ys[s.size + k] = p[1]
+                ps[s.size + k] = s.pressure[last]; ts[s.size + k] = s.tilt[last]; os[s.size + k] = s.orientation[last]
             }
         }
-        val outline = StrokeGeometry.outline(xs, ys, ps, ts, n, penWidth, PenProfile.of(tool))
-        PageRenderer.fillPath(livePath, outline)
-        drawStroke(canvas, color, tool, livePath)
+        return LiveSamples(xs, ys, n, s.size, StrokeArt.live(tool, color, penWidth, xs, ys, ps, ts, os, n))
     }
 
     private fun drawCursor(canvas: Canvas) {
@@ -1259,6 +1411,8 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         /** Pen held this still (dp) for this long (ms) at the end of a stroke snaps it to a shape. */
         private const val HOLD_SLOP_DP = 4f
         private const val HOLD_TO_SNAP_MS = 450L
+        /** A finished stroke stays on the wet layer this long after the page surface posts it (3 vsyncs at 60 Hz). */
+        private const val WET_HOLD_NANOS = 50_000_000L
         // Samsung-specific MotionEvent actions sent while the S Pen side button is held.
         private const val SPEN_ACTION_DOWN = 211
         private const val SPEN_ACTION_UP = 212
