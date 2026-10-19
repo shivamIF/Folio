@@ -12,6 +12,11 @@ import java.io.File
 class FolioApp : Application() {
     lateinit var repository: DocumentRepository
         private set
+    lateinit var thumbnails: app.folio.notes.library.Thumbnails
+        private set
+    /** Google Drive sync (opt-in from Settings). */
+    lateinit var sync: app.folio.notes.sync.SyncManager
+        private set
 
     /** Outlives screens so a save started on exit still finishes. */
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -20,8 +25,15 @@ class FolioApp : Application() {
     @OptIn(ExperimentalCoroutinesApi::class)
     val ioWriter = Dispatchers.IO.limitedParallelism(1)
 
+    /** Rendered PDF backgrounds, bounded by memory (bytes). */
+    val pdfBitmaps = object : android.util.LruCache<String, android.graphics.Bitmap>(64 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap) = value.byteCount
+    }
+
     override fun onCreate() {
         super.onCreate()
         repository = FileNotebookStore(File(filesDir, "library"))
+        thumbnails = app.folio.notes.library.Thumbnails(this, repository)
+        sync = app.folio.notes.sync.SyncManager(this, repository as FileNotebookStore, appScope, ioWriter)
     }
 }

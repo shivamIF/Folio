@@ -1,10 +1,12 @@
 package app.folio.core.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonNames
+import kotlinx.serialization.ExperimentalSerializationApi
 import java.util.UUID
 
 /** Current on-disk schema version of every persisted model object. Bump together with a migration. */
-const val SCHEMA_VERSION = 1
+const val SCHEMA_VERSION = 5
 
 fun newId(): String = UUID.randomUUID().toString()
 
@@ -81,6 +83,10 @@ data class NotebookMeta(
     val createdAt: Long,
     val modifiedAt: Long = createdAt,
     val favorite: Boolean = false,
+    /** Set when moved to Trash (epoch ms); null for live notebooks. Absent in older files. */
+    val deletedAt: Long? = null,
+    /** Created by importing a PDF (the library shows its first page instead of a cover). */
+    val fromPdf: Boolean = false,
 ) {
     companion object {
         /** Page units; roughly A4 at 120 units per inch. */
@@ -96,9 +102,30 @@ data class LibraryIndex(
     val notebooks: List<NotebookMeta> = emptyList(),
 )
 
+/**
+ * Persisted by name. FINELINER and MARKER arrived in schema 4, AIRBRUSH in schema 5.
+ *
+ * Calligraphy, crayon and watercolour existed only in test builds and were withdrawn; strokes
+ * saved with them load as the nearest remaining tool (the [JsonNames] aliases).
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 enum class ToolType {
-    FOUNTAIN, BALLPOINT, PENCIL, BRUSH, HIGHLIGHTER;
+    @JsonNames("CALLIGRAPHY") FOUNTAIN, BALLPOINT, @JsonNames("CRAYON") PENCIL, BRUSH,
+    @JsonNames("WATERCOLOR") HIGHLIGHTER, FINELINER, MARKER, AIRBRUSH;
+
+    /**
+     * Furthest the drawn ink can reach from the centreline, in nominal widths (a tilted pencil
+     * spreads wide; square caps reach their corners). Used for bounds and hit-testing; the brush
+     * engine's BrushSpec.reach is tested to match. Not persisted.
+     */
+    val inkReach: Float get() = when (this) {
+        PENCIL -> 1.6f
+        AIRBRUSH -> 1.0f
+        BRUSH -> 0.85f
+        MARKER, HIGHLIGHTER -> 0.71f
+        FOUNTAIN, BALLPOINT, FINELINER -> 0.5f
+    }
 
     val isHighlighter get() = this == HIGHLIGHTER
 }
@@ -111,8 +138,10 @@ enum class ToolType {
  * [tilt] is radians from perpendicular (0 = upright) and [orientation] is the
  * radians azimuth reported by Android; both are 0 when the device doesn't report them.
  * [t] is milliseconds since [startedAt], which allows stroke replay.
+ *
+ * Stored packed (schema 2); see [StrokeSerializer].
  */
-@Serializable
+@Serializable(with = StrokeSerializer::class)
 class Stroke(
     val id: String = newId(),
     val tool: ToolType,
@@ -136,16 +165,44 @@ class Stroke(
 
     val size: Int get() = x.size
 
-    fun bounds(): Rect {
+    /** Strokes are immutable once built, so the bounds are computed once (not serialised). */
+    private var boundsCache: Rect? = null
+
+    /**
+     * Owned by the platform renderer (e.g. the Android outline Path), computed once per
+     * stroke and shared by its render threads. Never serialised or read by core code.
+     */
+    @Volatile
+    @JvmField
+    var renderCache: Any? = null
+
+    fun bounds(): Rect = boundsCache ?: computeBounds().also { boundsCache = it }
+
+    private fun computeBounds(): Rect {
         if (size == 0) return Rect.EMPTY
         var l = Float.MAX_VALUE; var tp = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
         for (i in 0 until size) {
             if (x[i] < l) l = x[i]; if (x[i] > r) r = x[i]
             if (y[i] < tp) tp = y[i]; if (y[i] > b) b = y[i]
         }
-        val pad = width
+        val pad = width * maxOf(1f, tool.inkReach)
         return Rect(l - pad, tp - pad, r + pad, b + pad)
     }
+
+    /**
+     * Scales around (ax, ay) and then translates. Line width scales too, so a
+     * resized selection keeps its proportions. [newId] gives the copy a fresh
+     * identity (used for duplicates).
+     */
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false): Stroke = Stroke(
+        if (newId) newId() else id, tool, color, width * scale,
+        FloatArray(size) { ax + (x[it] - ax) * scale + dx }, FloatArray(size) { ay + (y[it] - ay) * scale + dy },
+        pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt,
+    )
+
+    fun recolored(newColor: Argb): Stroke = Stroke(
+        id, tool, newColor, width, x.copyOf(), y.copyOf(), pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt,
+    )
 
     fun translated(dx: Float, dy: Float): Stroke = Stroke(
         id, tool, color, width,
@@ -167,10 +224,64 @@ data class Rect(val left: Float, val top: Float, val right: Float, val bottom: F
     fun intersects(o: Rect) = left <= o.right && o.left <= right && top <= o.bottom && o.top <= bottom
     fun contains(px: Float, py: Float) = px in left..right && py in top..bottom
     fun inflate(d: Float) = Rect(left - d, top - d, right + d, bottom + d)
+    val width get() = right - left
+    val height get() = bottom - top
+    fun union(o: Rect) = Rect(minOf(left, o.left), minOf(top, o.top), maxOf(right, o.right), maxOf(bottom, o.bottom))
 
     companion object { val EMPTY = Rect(0f, 0f, 0f, 0f) }
 }
 
+/** A page of an imported PDF shown as this page's background; the file lives in the notebook's attachments. */
+@Serializable
+data class PdfBackground(val attachmentId: String, val pageIndex: Int)
+
+/**
+ * A typed text box. [x], [y] is the top-left corner in page units; text wraps at [width].
+ * [height] is the laid-out height, kept for hit-testing and selection (renderers may
+ * re-measure). [fontSize] is in page units (A4 width = 1000).
+ */
+@Serializable
+data class TextBox(
+    val id: String = newId(),
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val text: String,
+    val fontSize: Float = 24f,
+    val color: Argb = 0xFF1B1B1F,
+) {
+    val bounds: Rect get() = Rect(x, y, x + width, y + height)
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false) = copy(
+        id = if (newId) newId() else id,
+        x = ax + (x - ax) * scale + dx, y = ay + (y - ay) * scale + dy,
+        width = width * scale, height = height * scale, fontSize = fontSize * scale,
+    )
+}
+
+/** A picture placed on the page; the file is the notebook attachment [attachmentId]. */
+@Serializable
+data class PageImage(
+    val id: String = newId(),
+    val attachmentId: String,
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+) {
+    val bounds: Rect get() = Rect(x, y, x + width, y + height)
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false) = copy(
+        id = if (newId) newId() else id,
+        x = ax + (x - ax) * scale + dx, y = ay + (y - ay) * scale + dy, width = width * scale, height = height * scale,
+    )
+}
+
+/**
+ * Schema history: 1 = stroke channels as number arrays; 2 = packed points;
+ * 3 = text boxes and images (an older app refuses these pages instead of dropping them);
+ * 4 = fine-liner and marker tools (an older app would reject the unknown tool names).
+ * Pages are stamped with the current version whenever they are encoded.
+ */
 @Serializable
 data class Page(
     val schemaVersion: Int = SCHEMA_VERSION,
@@ -179,4 +290,10 @@ data class Page(
     val height: Float = NotebookMeta.PAGE_HEIGHT,
     val paper: PaperTemplate = PaperTemplate.RULED,
     val strokes: List<Stroke> = emptyList(),
+    /** Optional; absent in notebooks created before PDF import existed. */
+    val pdf: PdfBackground? = null,
+    /** Drawn over the ink. Absent before schema 3. */
+    val texts: List<TextBox> = emptyList(),
+    /** Drawn under the ink. Absent before schema 3. */
+    val images: List<PageImage> = emptyList(),
 )

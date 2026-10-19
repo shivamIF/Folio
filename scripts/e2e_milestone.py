@@ -9,7 +9,21 @@ verify the persisted page holds exactly the 2 expected strokes.
 Usage: scripts/e2e_milestone.py [-s SERIAL] [--out DIR]
 Needs a debug build installed (it uses `run-as` to read app-private files).
 """
-import argparse, json, os, re, subprocess, sys, time
+import argparse, base64, json, os, re, shlex, struct, subprocess, sys, time
+
+
+def channels(stroke):
+    """Per-point channels of a saved stroke: schema 2 packs them in "pts"
+    (little-endian x, y, pressure, tilt, orientation as float32, then t as int32)."""
+    if "pts" not in stroke:
+        return {k: stroke[k] for k in ("x", "y", "pressure", "tilt", "orientation", "t")}
+    raw = base64.b64decode(stroke["pts"])
+    n = len(raw) // 24
+    out = {}
+    for i, k in enumerate(("x", "y", "pressure", "tilt", "orientation")):
+        out[k] = list(struct.unpack_from("<%df" % n, raw, i * n * 4))
+    out["t"] = list(struct.unpack_from("<%di" % n, raw, 5 * n * 4))
+    return out
 
 PKG = "app.folio.notes"
 ADB = os.path.expanduser("~/Library/Android/sdk/platform-tools/adb")
@@ -50,6 +64,34 @@ class Device:
         self.sh("shell", "input", "tap", str(x), str(y))
         time.sleep(0.6)
 
+    def eraser_menu(self):
+        """Opens the eraser options. The first tap only selects the eraser (last-used type);
+        a tap while it's selected opens the menu."""
+        self.tap("Eraser")
+        try:
+            self.find("Stroke eraser", timeout=1.5)
+        except AssertionError:
+            self.tap("Eraser")
+
+    def lasso_menu(self):
+        """Opens the lasso shapes menu (first tap selects the lasso, a second tap opens the menu)."""
+        self.tap("Lasso select")
+        try:
+            self.find("Freeform lasso", timeout=1.5)
+        except AssertionError:
+            self.tap("Lasso select")
+
+    def stylus_path(self, pts, hold_s=0.0):
+        """Stylus down at pts[0], moves through the rest, optional hold, then up."""
+        self.sh("shell", "input", "stylus", "motionevent", "DOWN", str(pts[0][0]), str(pts[0][1]))
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            for k in range(1, 5):
+                self.sh("shell", "input", "stylus", "motionevent", "MOVE", str(x0 + (x1 - x0) * k // 4), str(y0 + (y1 - y0) * k // 4))
+        if hold_s:
+            time.sleep(hold_s)
+        self.sh("shell", "input", "stylus", "motionevent", "UP", str(pts[-1][0]), str(pts[-1][1]))
+        time.sleep(0.4)
+
     def stylus_swipe(self, x1, y1, x2, y2, ms=400):
         self.sh("shell", "input", "stylus", "swipe", *map(str, (x1, y1, x2, y2, ms)))
         time.sleep(0.4)
@@ -60,6 +102,20 @@ class Device:
         with open(path, "wb") as f:
             f.write(subprocess.run([ADB, "-s", self.serial, "exec-out", "screencap", "-p"], capture_output=True).stdout)
         return path
+
+    def ink_in_band(self, x0, x1, y0, y1):
+        """Dark (ink) pixels in a screen rectangle, from a raw framebuffer capture."""
+        raw = subprocess.run([ADB, "-s", self.serial, "exec-out", "screencap"], capture_output=True).stdout
+        w, h = int.from_bytes(raw[0:4], "little"), int.from_bytes(raw[4:8], "little")
+        off = len(raw) - w * h * 4  # header is 12 or 16 bytes depending on Android version
+        dark = 0
+        for y in range(max(0, y0), min(h, y1)):
+            row = off + (y * w) * 4
+            for x in range(max(0, x0), min(w, x1), 2):
+                p = row + x * 4
+                if raw[p] < 90 and raw[p + 1] < 90 and raw[p + 2] < 90:
+                    dark += 1
+        return dark
 
     def run_as(self, *args):
         return self.sh("shell", "run-as", PKG, *args)
@@ -140,10 +196,12 @@ def main():
     saved = d.page(nb_id, pid)["strokes"]
     first_id, second_id = saved[0]["id"], saved[1]["id"]
     s0 = saved[0]
-    assert len(s0["x"]) >= 5 and len(s0["x"]) == len(s0["pressure"]) == len(s0["t"]), "per-point channels stored"
+    c0 = channels(s0)
+    assert len(c0["x"]) >= 5 and len(c0["x"]) == len(c0["pressure"]) == len(c0["t"]), "per-point channels stored"
     assert s0["tool"] == "FOUNTAIN"
 
     def erase():
+        d.eraser_menu()
         d.tap("Stroke eraser")
         midx = (xl + xr) // 2
         d.stylus_swipe(midx, ya - 30, midx, ya + 60, ms=300)
@@ -172,6 +230,238 @@ def main():
         assert ids == [first_id, second_id], ids
     check("content survives back, force-stop and relaunch", reopen)
     d.shot("reopened")
+
+    # ---------------------------------------------------------------- lasso
+    def strokes():
+        return d.page(nb_id, pid)["strokes"]
+
+    def by_id(sid):
+        return next(s for s in strokes() if s["id"] == sid)
+
+    def wait_for(pred, what, timeout=8):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.5)
+        raise AssertionError(what)
+
+    def lasso_around_first(activate=True):
+        if activate:
+            d.lasso_menu()
+            d.tap("Freeform lasso")
+        # Rectangle loop around stroke 1 only (stroke 2 starts well below it).
+        pts = [(xl - 40, ya - 45), (xr + 40, ya - 45), (xr + 40, ya + 75), (xl - 40, ya + 75), (xl - 40, ya - 40)]
+        d.sh("shell", "input", "stylus", "motionevent", "DOWN", str(pts[0][0]), str(pts[0][1]))
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            for k in range(1, 5):
+                x = x0 + (x1 - x0) * k // 4; y = y0 + (y1 - y0) * k // 4
+                d.sh("shell", "input", "stylus", "motionevent", "MOVE", str(x), str(y))
+        d.sh("shell", "input", "stylus", "motionevent", "UP", str(pts[-1][0]), str(pts[-1][1]))
+        d.find("1 selected")
+    check("lasso selects only the encircled stroke", lasso_around_first)
+    d.shot("lasso-selected")
+
+    y_before = channels(by_id(first_id))["y"][0]
+    second_before = by_id(second_id)
+
+    def move():
+        midx = (xl + xr) // 2
+        old_band = d.ink_in_band(xl, xr, ya - 10, ya + 50)
+        d.stylus_swipe(midx, ya + 20, midx, ya + 140, ms=500)
+        wait_for(lambda: channels(by_id(first_id))["y"][0] > y_before + 20, "selected stroke did not move down")
+        assert by_id(second_id) == second_before, "unselected stroke must not move"
+        time.sleep(1)
+        # The screen must show the ink at its new place, not a stale drawing at the old one.
+        after_band = d.ink_in_band(xl, xr, ya - 10, ya + 50)
+        assert after_band < old_band * 0.2, f"ink still drawn at the old position ({after_band} vs {old_band} dark pixels)"
+    check("dragging the selection moves it (other strokes untouched)", move)
+    d.shot("lasso-moved")
+
+    def undo_move():
+        d.tap("Undo")
+        wait_for(lambda: abs(channels(by_id(first_id))["y"][0] - y_before) < 0.01, "undo did not restore position")
+    check("undo restores the moved selection", undo_move)
+
+    def duplicate_then_delete():
+        d.tap("Duplicate selection")
+        wait_for(lambda: len(strokes()) == 3, "duplicate did not add a copy")
+        d.tap("Delete selection")
+        wait_for(lambda: [s["id"] for s in strokes()] == [first_id, second_id], "delete did not remove only the copy")
+    check("duplicate adds a copy; delete removes the (selected) copy", duplicate_then_delete)
+
+    def recolour():
+        lasso_around_first(activate=False)
+        d.tap("Ink colour C62828")
+        wait_for(lambda: by_id(first_id)["color"] == 0xFFC62828, "selection not recoloured")
+        assert by_id(second_id)["color"] != 0xFFC62828
+        d.tap("Clear selection")
+    check("colour tap recolours the selection only", recolour)
+    d.shot("lasso-done")
+
+    # ------------------------------------------------------------------ PDF
+    fixture = os.path.join(a.out, "folio-test.pdf")
+    subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_test_pdf.py"), fixture, "3"],
+                   check=True, capture_output=True)
+    pdf_nb = {}
+
+    def import_pdf():
+        # Clean previous runs, then hand the PDF to Folio the way "Open with" in Files does.
+        # adb shell re-parses arguments on the device, so SQL clauses must be shell-quoted.
+        d.sh("shell", "content", "delete", "--uri", "content://media/external/file", "--where", shlex.quote("_display_name='folio-test.pdf'"), check=False)
+        d.sh("push", fixture, "/sdcard/Download/folio-test.pdf")
+        d.sh("shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", "file:///sdcard/Download/folio-test.pdf")
+        media_id = None
+        for _ in range(20):
+            out = d.sh("shell", "content", "query", "--uri", "content://media/external/file", "--projection", "_id",
+                       "--where", shlex.quote("_display_name='folio-test.pdf' AND relative_path='Download/'"), check=False)
+            m = re.search(r"_id=(\d+)", out)
+            if m:
+                media_id = m.group(1); break
+            time.sleep(0.5)
+        assert media_id, "media scanner did not index the test PDF"
+        d.sh("shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", f"content://media/external/file/{media_id}",
+             "-t", "application/pdf", "--grant-read-uri-permission", "-n", f"{PKG}/.MainActivity")
+        wait_for(lambda: any(n["title"] == "folio-test" for n in d.library()["notebooks"]), "imported notebook not in library")
+        nb = next(n for n in d.library()["notebooks"] if n["title"] == "folio-test")
+        assert len(nb["pageIds"]) == 3, nb["pageIds"]
+        pdf_nb.update(nb)
+        page = d.page(nb["id"], nb["pageIds"][0])
+        assert page["pdf"]["pageIndex"] == 0, page
+        d.find("Handwriting canvas")
+        time.sleep(2)
+        _, _, (x1, y1, x2, y2) = d.find("Handwriting canvas")
+        dark = d.ink_in_band(x1, x2, y1, y2)
+        assert dark > 2000, f"PDF background not visible ({dark} dark pixels)"
+    check("PDF opened with Folio becomes a 3-page notebook showing the PDF", import_pdf)
+    d.shot("pdf-imported")
+
+    def annotate_pdf():
+        _, _, (x1, y1, x2, y2) = d.find("Handwriting canvas")
+        w, h = x2 - x1, y2 - y1
+        d.stylus_swipe(x1 + w // 5, y1 + int(h * 0.75), x1 + 4 * w // 5, y1 + int(h * 0.72))
+        wait_for(lambda: len(d.page(pdf_nb["id"], pdf_nb["pageIds"][0])["strokes"]) == 1, "annotation not saved on the PDF page")
+        d.tap("Next page")
+        d.find("Handwriting canvas")
+    check("writing on a PDF page is saved; page navigation works", annotate_pdf)
+
+    def export_pdf():
+        d.sh("shell", "content", "delete", "--uri", "content://media/external/file", "--where", shlex.quote("_display_name='folio-test.pdf' AND relative_path='Download/Folio/'"), check=False)
+        d.tap("Export as PDF")
+        d.find("PDF exported", timeout=30)
+        d.tap("OK")
+        local = os.path.join(a.out, "exported.pdf")
+        d.sh("pull", "/sdcard/Download/Folio/folio-test.pdf", local)
+        data = open(local, "rb").read()
+        assert data.startswith(b"%PDF"), "export is not a PDF"
+        pages = len(re.findall(rb"/Type\s*/Page[^s]", data))
+        assert pages == 3, f"exported PDF has {pages} pages"
+        boxes = set(re.findall(rb"/MediaBox\s*\[([^\]]*)\]", data))
+        assert boxes == {b"0 0 612 792"}, f"page size not preserved: {boxes}"
+    check("export writes a 3-page PDF to Downloads/Folio", export_pdf)
+
+    # -------------------------------------------------------------- library
+    def pdf_card_shows_first_page():
+        d.sh("shell", "input", "keyevent", "KEYCODE_BACK")
+        _, _, (x1, y1, x2, y2) = d.find("First page of folio-test", timeout=15)
+        time.sleep(1.5)
+        dark = d.ink_in_band(x1, x2, y1, y2)
+        assert dark > 200, f"preview of the PDF notebook looks blank ({dark} dark pixels)"
+    check("library shows the first page of an imported PDF", pdf_card_shows_first_page)
+    d.shot("library-previews")
+
+    def long_press(label):
+        x, y, _ = d.find(label)
+        d.sh("shell", "input", "swipe", str(x), str(y), str(x), str(y), "900")
+        time.sleep(0.6)
+
+    def trash_and_restore():
+        long_press("Notebook Milestone")
+        d.tap("Move to Trash")
+        wait_for(lambda: next(n for n in d.library()["notebooks"] if n["id"] == nb_id).get("deletedAt") is not None,
+                 "notebook not marked as trashed")
+        assert "Notebook Milestone" not in d.ui(), "trashed notebook still shown in the library"
+        d.tap("Trash")
+        d.tap("Trashed notebook Milestone")
+        d.tap("Restore")
+        wait_for(lambda: next(n for n in d.library()["notebooks"] if n["id"] == nb_id).get("deletedAt") is None,
+                 "restore did not clear deletedAt")
+        d.tap("Back to notebooks")
+        d.find("Notebook Milestone")
+        ids = [s["id"] for s in d.page(nb_id, pid)["strokes"]]
+        assert ids == [first_id, second_id], f"content changed by trash/restore: {ids}"
+    check("move to Trash hides a notebook; Restore brings it back intact", trash_and_restore)
+
+    # --------------------------------------------------------------- eraser
+    def partial_eraser():
+        d.tap("Notebook Milestone")
+        d.find("Handwriting canvas")
+        d.eraser_menu()
+        d.tap("Partial eraser")
+        midx = (xl + xr) // 2
+        d.stylus_swipe(midx, ya - 40, midx, ya + 70, ms=400)
+        wait_for(lambda: len(strokes()) == 3, f"partial erase did not split stroke 1 into 2 pieces ({len(strokes())} strokes)")
+        ids = [s["id"] for s in strokes()]
+        assert first_id not in ids and ids[-1] == second_id, f"wrong stroke split or z-order changed: {ids}"
+        assert by_id(second_id) == second_before or by_id(second_id)["color"] != 0, "stroke 2 must be untouched"
+        raw = d.run_as("cat", f"files/library/notebooks/{nb_id}/{pid}.page.json")
+        assert "boundsCache" not in raw, "cached bounds leaked into the saved file"
+        d.tap("Undo")
+        wait_for(lambda: [s["id"] for s in strokes()] == [first_id, second_id], "undo did not restore the whole stroke")
+    check("partial eraser cuts a stroke into pieces; undo restores it", partial_eraser)
+
+    def highlighter_only():
+        d.eraser_menu()
+        d.tap("Erase highlighter only")
+        d.sh("shell", "input", "keyevent", "KEYCODE_ESCAPE")  # close the menu
+        time.sleep(0.5)
+        midx = (xl + xr) // 2
+        before = [s["id"] for s in strokes()]
+        d.stylus_swipe(midx, ya - 40, midx, ya + 70, ms=400)
+        time.sleep(2)
+        assert [s["id"] for s in strokes()] == before, "highlighter-only eraser erased ink"
+        d.eraser_menu()
+        d.tap("Erase highlighter only")  # restore default
+        d.sh("shell", "input", "keyevent", "KEYCODE_ESCAPE")
+    check("with 'Erase highlighter only' on, ink is protected", highlighter_only)
+
+    # ------------------------------------------------------- shapes and text
+    def shape_snap():
+        d.tap("Fountain pen")
+        n_before = len(strokes())
+        x0, x1 = cx1 + int(w * 0.25), cx1 + int(w * 0.6)
+        y0, y1 = cy1 + int(h * 0.58), cy1 + int(h * 0.72)
+        # A wobbly hand-drawn rectangle, then hold the pen still.
+        d.stylus_path([(x0, y0), (x1 + 6, y0 + 4), (x1 - 3, y1 + 5), (x0 + 4, y1 - 3), (x0 - 2, y0 + 8)], hold_s=1.0)
+        wait_for(lambda: len(strokes()) == n_before + 1, "shape stroke not saved")
+        c = channels(strokes()[-1])
+        xs, ys = c["x"], c["y"]
+        l, r, t, b = min(xs), max(xs), min(ys), max(ys)
+        off = max(min(abs(x - l), abs(x - r), abs(y - t), abs(y - b)) for x, y in zip(xs, ys))
+        assert off < 0.5, f"stroke was not snapped to a clean rectangle (a point is {off:.1f} units off the edges)"
+    check("holding the pen at the end snaps a rough rectangle to a clean one", shape_snap)
+
+    def texts():
+        return d.page(nb_id, pid).get("texts", [])
+
+    def text_box():
+        d.tap("Text")
+        tx, ty = cx1 + int(w * 0.3), cy1 + int(h * 0.85)
+        d.sh("shell", "input", "tap", str(tx), str(ty))
+        d.find("Text box")
+        d.sh("shell", "input", "text", "Hello%sFolio")
+        d.tap("Done typing")
+        wait_for(lambda: [t["text"] for t in texts()] == ["Hello Folio"], f"text box not saved: {texts()}")
+        # Lasso tap selects it; delete removes it; undo brings it back.
+        d.tap("Lasso select")
+        d.stylus_path([(tx + 20, ty), (tx + 21, ty)])  # a pen tap
+        d.find("1 selected")
+        d.tap("Delete selection")
+        wait_for(lambda: texts() == [], "text box not deleted")
+        d.tap("Undo")
+        wait_for(lambda: [t["text"] for t in texts()] == ["Hello Folio"], "undo did not restore the text box")
+        d.tap("Fountain pen")
+    check("text tool: type a box, select it with the lasso, delete and undo", text_box)
 
     print(f"\n{len(results)} checks passed. Screenshots in {a.out}")
 
