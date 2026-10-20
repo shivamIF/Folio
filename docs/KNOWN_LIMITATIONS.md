@@ -28,7 +28,7 @@
 14. **Pictures:** removing a picture keeps its file in the notebook, so undo can bring it back. Files aren't cleaned up yet.
 15. **No Mac app yet.** The core modules are plain Kotlin, ready for one.
 16. **Page navigator (2026-10-20):**
-   - The editor still shows one page at a time. The sidebar follows the open page; there's no continuous vertical scroll between pages.
+   - (Superseded 2026-10-20: the editor now scrolls continuously between pages; see item 17.)
    - No copy/paste of pages between notebooks (it would have to copy PDF attachments), and no multi-select. Duplicate covers copying within a notebook.
    - No bookmarks, page rotation, hidden pages, outline or per-page template change. Each needs a persisted field and a schema migration.
    - Undo for delete and move lasts while the snackbar is shown (about 10 s). Erase is also in the page's own undo history.
@@ -36,4 +36,10 @@
    - Thumbnail PNGs in `cache/page-thumbs` aren't pruned when a notebook is deleted. They're cache, so Android may clear them.
    - Single-page export offers PDF, PNG and JPEG only. Word, PowerPoint and text need a text layer Folio doesn't have.
    - Sync: a page deleted here can come back if another device edits the same notebook's details before syncing (notebook details merge pages as a union, ADR-7).
-
+17. **Continuous scrolling (ADR-10, 2026-10-20):**
+   - A gesture works on the page where it started. A stroke, eraser sweep, lasso or selection drag that crosses a page edge stays on that page (ink past the edge is kept but clipped). Moving a selection to another page isn't possible yet.
+   - Only ink can be written on a page whose content is still loading (a dense page takes ~4 s on the Tab). It's queued and applied when the page arrives. Erasing, lasso and text wait for the load. Undo waits too if the latest edit is queued ink.
+   - Pages that scroll away stay in memory (up to 8 saved pages or 20,000 strokes). Beyond that the least recently viewed are dropped, and their undo history goes with them.
+   - Zoom limits come from the first page. In a notebook mixing very different page sizes, zooming out stops at half of the first page's height.
+   - Jumps (sidebar, Previous/Next, a new page) are instant, not animated. After rotation the view restarts at the top of the page that was in view.
+   - Page sizes are read from each page file's first kilobyte when the notebook opens. A page whose header can't be read uses the notebook's default size until it loads, then the column adjusts. The page in view stays put.

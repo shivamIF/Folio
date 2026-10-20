@@ -5,12 +5,17 @@ import app.folio.core.model.PdfBackground
 import app.folio.notes.pdf.PdfFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.folio.core.ink.StrokeIndex
+import app.folio.core.model.NotebookHistory
 import app.folio.core.model.NotebookMeta
 import app.folio.core.model.Page
 import app.folio.core.model.PageEdit
 import app.folio.core.model.PageEditor
+import app.folio.core.model.PageHeader
 import app.folio.core.model.PageOps
+import app.folio.core.model.PaperTemplate
 import app.folio.core.model.Stroke
+import app.folio.notes.input.PageStack
 import app.folio.notes.FolioApp
 import app.folio.notes.export.PageExportSpec
 import app.folio.notes.export.PageExporter
@@ -30,8 +35,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** A text box being edited: [original] is null for a new one; [index] is its place in the page's list. */
-data class TextEdit(val box: app.folio.core.model.TextBox, val original: app.folio.core.model.TextBox?, val index: Int)
+/** A text box being edited on [pageId]: [original] is null for a new one; [index] is its place in the page's list. */
+data class TextEdit(val pageId: String, val box: app.folio.core.model.TextBox, val original: app.folio.core.model.TextBox?, val index: Int)
+
+/** Scroll [pageId] to the top of the canvas; [seq] is new for every request. */
+data class PageJump(val pageId: String, val seq: Long)
 
 data class ExportResult(val uri: android.net.Uri, val fileName: String)
 
@@ -47,17 +55,20 @@ sealed interface PageEvent {
 
 data class EditorUiState(
     val meta: NotebookMeta? = null,
+    /** The page in view (under the canvas's reading line): "Page X of N", the sidebar highlight, Previous/Next. */
     val pageIndex: Int = 0,
-    val page: Page? = null,
-    val strokes: List<Stroke> = emptyList(),
-    val texts: List<app.folio.core.model.TextBox> = emptyList(),
-    val images: List<app.folio.core.model.PageImage> = emptyList(),
+    /** Every page of the notebook in one scrolling column; null until the notebook is open. */
+    val stack: PageStack? = null,
+    /** Content of the pages loaded around the screen, by id (the others show as placeholders). */
+    val pages: Map<String, LoadedPage> = emptyMap(),
+    /** The canvas scrolls this page to the top (Previous/Next, the sidebar, a new page). */
+    val jump: PageJump? = null,
+    /** Undo/Redo of the notebook's latest edit, on whichever page it was made. */
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
-    /** Lasso selection on the current page. */
+    /** Lasso selection, on [selectionPage]. */
     val selection: Set<String> = emptySet(),
-    /** Rendered PDF page under the ink, when this page comes from an imported PDF. */
-    val background: android.graphics.Bitmap? = null,
+    val selectionPage: String? = null,
     val exporting: Boolean = false,
     /** Set after a successful export: where the PDF was saved. */
     val exported: ExportResult? = null,
@@ -73,15 +84,42 @@ data class EditorUiState(
 )
 
 /**
- * Owns the notebook being edited. Edits run on the main thread against a
+ * Owns the notebook being edited. Edits run on the main thread against each page's
  * [PageEditor]; saves take an immutable snapshot and write it on the app's
  * single writer thread, debounced while the user writes, and flushed at once on stop.
+ *
+ * Continuous scrolling (ADR-10): the canvas reports which pages are on screen; the pages from
+ * one above to one below them are loaded (one at a time, nearest first, off the writer thread)
+ * and published in [EditorUiState.pages]. Pages that scroll away stay in memory within a
+ * budget ([MAX_IDLE_PAGES], [MAX_IDLE_STROKES]) once saved. A [NotebookHistory] orders edits
+ * across pages for the top-bar Undo/Redo.
  */
 class EditorViewModel(app: Application, private val notebookId: String) : AndroidViewModel(app) {
     private val folio = app as FolioApp
     private val repo = folio.repository
     private val prefs = ToolPrefs(app)
     private val editors = HashMap<String, PageEditor>()
+    /** Order of content edits across pages, for one Undo/Redo. */
+    private val history = NotebookHistory()
+    /** Size and paper of pages not loaded yet, read from the start of their files. */
+    private val headers = HashMap<String, PageHeader>()
+    /** Low-resolution PDF page under each loaded PDF page's ink. */
+    private val backgrounds = HashMap<String, android.graphics.Bitmap>()
+    /** Each loaded page as last published to the canvas. */
+    private val shown = HashMap<String, LoadedPage>()
+    /** Ink written on a page before its content loaded, applied in order when it arrives. */
+    private val queued = HashMap<String, MutableList<PageEdit>>()
+    /** Pages whose load failed (not retried until reopened). */
+    private val failed = HashSet<String>()
+    /** The page in view, the pages on screen, and those kept loaded around them. */
+    private var currentPageId: String? = null
+    private var visibleIds: List<String> = emptyList()
+    private var window: List<String> = emptyList()
+    /** When each page was last on screen (for evicting the least recently viewed). */
+    private val lastSeen = HashMap<String, Long>()
+    private var seenClock = 0L
+    private var jumpSeq = 0L
+    private var loader: Job? = null
     private val savedRevision = HashMap<String, Long>()
     /** Each loaded page as last read from or written to disk: the base for merging edits from other devices. */
     private val savedPages = HashMap<String, Page>()
@@ -119,37 +157,186 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
             try {
                 val meta = withContext(folio.ioWriter) { repo.library().notebooks.first { it.id == notebookId } }
                 _state.update { it.copy(meta = meta) }
+                rebuildStack()
                 openPage(0)
+                readHeaders(meta.pageIds)
             } catch (e: Exception) {
                 _state.update { it.copy(error = "Couldn't open this notebook: ${e.message}") }
             }
         }
     }
 
-    private fun currentEditor(): PageEditor? = _state.value.page?.let { editors[it.id] }
+    // ---- the column of pages and the window loaded around the screen ----
 
+    /** Scrolls to page [index] (Previous/Next, the sidebar, a new page). */
     fun openPage(index: Int) {
         commitText()
         val meta = _state.value.meta ?: return
         if (index !in meta.pageIds.indices) return
-        flush()
-        val pageId = meta.pageIds[index]
+        val id = meta.pageIds[index]
+        currentPageId = id
+        _state.update { it.copy(pageIndex = index, jump = PageJump(id, ++jumpSeq)) }
+        updateWindow()
+    }
+
+    /** The canvas scrolled: [visible] pages are on screen (top to bottom), [current] is in view. */
+    fun onPagesInView(visible: List<String>, current: String) {
+        val meta = _state.value.meta ?: return
+        visibleIds = visible
+        currentPageId = current
+        for (id in visible) lastSeen[id] = ++seenClock
+        val at = meta.pageIds.indexOf(current)
+        if (at >= 0 && at != _state.value.pageIndex) _state.update { it.copy(pageIndex = at) }
+        updateWindow()
+    }
+
+    /** Paper of a page (for its placeholder while it loads). */
+    fun paperOf(pageId: String): PaperTemplate =
+        savedPages[pageId]?.paper ?: headers[pageId]?.paper ?: _state.value.meta?.paper ?: PaperTemplate.RULED
+
+    private fun pageSize(pageId: String): Pair<Float, Float> {
+        savedPages[pageId]?.let { return it.width to it.height }
+        headers[pageId]?.let { return it.width to it.height }
+        val meta = _state.value.meta
+        return (meta?.pageWidth ?: NotebookMeta.PAGE_WIDTH) to (meta?.pageHeight ?: NotebookMeta.PAGE_HEIGHT)
+    }
+
+    /** Lays the pages out again (a new stack only when something moved or changed size). */
+    private fun rebuildStack() {
+        val meta = _state.value.meta ?: return
+        if (meta.pageIds.isEmpty()) return
+        val s = PageStack.of(meta.pageIds, ::pageSize)
+        _state.update { if (s.sameLayout(it.stack)) it else it.copy(stack = s) }
+    }
+
+    /** Reads the sizes of pages not loaded yet (a small read each), then lays the column out with them. */
+    private fun readHeaders(ids: List<String>) {
+        val todo = ids.filter { it !in headers && it !in savedPages }
+        if (todo.isEmpty()) return
         viewModelScope.launch {
-            try {
-                val editor = editors[pageId] ?: withContext(folio.ioWriter) {
-                    val t0 = System.nanoTime()
-                    repo.loadPage(notebookId, pageId).also {
-                        android.util.Log.d("FolioPerf", "page load ms=%.1f strokes=%d".format((System.nanoTime() - t0) / 1e6, it.strokes.size))
+            val found = withContext(Dispatchers.IO) {
+                todo.mapNotNull { id -> runCatching { repo.pageHeader(notebookId, id) }.getOrNull()?.let { id to it } }
+            }
+            headers.putAll(found)
+            rebuildStack()
+        }
+    }
+
+    /** Pages kept loaded: the visible ones and one either side (or around the page in view). */
+    private fun windowIds(meta: NotebookMeta): List<String> {
+        val ids = meta.pageIds
+        val at = visibleIds.map { ids.indexOf(it) }.filter { it >= 0 }
+            .ifEmpty { listOf(currentPageId?.let { ids.indexOf(it) }?.takeIf { it >= 0 } ?: _state.value.pageIndex.coerceIn(0, ids.lastIndex)) }
+        val first = (at.min() - 1).coerceAtLeast(0)
+        val last = (at.max() + 1).coerceAtMost(ids.lastIndex)
+        return ids.subList(first, last + 1).toList()
+    }
+
+    /** Loads what the window lacks (nearest the page in view first), publishes it, evicts idle pages. */
+    private fun updateWindow() {
+        val meta = _state.value.meta ?: return
+        if (meta.pageIds.isEmpty()) return
+        window = windowIds(meta)
+        publishWindow()
+        startLoading()
+        evictIdle()
+    }
+
+    private fun publishWindow() {
+        val pages = LinkedHashMap<String, LoadedPage>()
+        for (id in window) {
+            val ed = editors[id] ?: continue
+            pages[id] = shown[id] ?: loadedPage(id, ed).also { shown[id] = it }
+        }
+        val old = _state.value.pages
+        if (old.size == pages.size && pages.all { (k, v) -> old[k] === v }) return
+        _state.update { it.copy(pages = pages) }
+    }
+
+    /** The next page to load: the one in view, then the rest of the window nearest it first. */
+    private fun nextToLoad(): String? {
+        val meta = _state.value.meta ?: return null
+        val cur = meta.pageIds.indexOf(currentPageId).takeIf { it >= 0 } ?: _state.value.pageIndex
+        return window.filter { it !in editors && it !in failed && it in meta.pageIds }
+            .minByOrNull { kotlin.math.abs(meta.pageIds.indexOf(it) - cur) }
+    }
+
+    /** One page at a time, off the main and writer threads; the stroke index is built there too. */
+    private fun startLoading() {
+        if (loader?.isActive == true || nextToLoad() == null) return
+        loader = viewModelScope.launch {
+            while (true) {
+                val pageId = nextToLoad() ?: break
+                try {
+                    val loaded = withContext(Dispatchers.IO) {
+                        // A page stored by sync while it was being read is read again.
+                        var attempt = 0
+                        while (true) {
+                            val stamp = repo.pageStamp(notebookId, pageId)
+                            val t0 = System.nanoTime()
+                            val page = repo.loadPage(notebookId, pageId)
+                            val index = StrokeIndex(page.strokes)
+                            android.util.Log.d("FolioPerf", "page load ms=%.1f strokes=%d".format((System.nanoTime() - t0) / 1e6, page.strokes.size))
+                            if (repo.pageStamp(notebookId, pageId) == stamp || ++attempt >= 3) return@withContext page to index
+                        }
+                        @Suppress("UNREACHABLE_CODE") error("unreachable")
                     }
-                }.let { page -> savedPages[pageId] = page; PageEditor(page) }.also { editors[pageId] = it; savedRevision[pageId] = it.revision }
-                val snap = editor.snapshot()
-                _state.update { it.copy(pageIndex = index, page = snap, selection = emptySet(), background = null) }
-                publish(editor)
-                snap.pdf?.let { loadBackground(snap.id, it) }
-            } catch (e: Exception) {
-                _state.update { it.copy(error = "Page couldn't be loaded: ${e.message}") }
+                    // Created here meanwhile (a new page) or gone (deleted): nothing to adopt.
+                    if (editors[pageId] != null || _state.value.meta?.pageIds?.contains(pageId) != true) continue
+                    val (page, index) = loaded
+                    val ed = adopt(page)
+                    val waiting = queued.remove(pageId)
+                    if (waiting != null) {
+                        for (e in waiting) ed.perform(e)
+                        scheduleSave()
+                        thumbChanged(pageId)
+                    }
+                    rebuildStack() // its real size, if the header couldn't be read
+                    publish(pageId, ed, index)
+                    page.pdf?.let { loadBackground(pageId, it) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failed += pageId
+                    val n = (_state.value.meta?.pageIds?.indexOf(pageId) ?: 0) + 1
+                    _state.update { it.copy(error = "Page $n couldn't be loaded: ${e.message}") }
+                }
             }
         }
+    }
+
+    /**
+     * Keeps memory bounded however far the user scrolls: beyond the window, unsaved pages, pages
+     * with queued ink and the selection's page, at most [MAX_IDLE_PAGES] pages or
+     * [MAX_IDLE_STROKES] strokes stay loaded, most recently viewed first. A dropped page loses
+     * its undo history (it's reloaded from its saved file when it comes back).
+     */
+    private fun evictIdle() {
+        val keep = HashSet(window)
+        _state.value.selectionPage?.let { keep += it }
+        _state.value.editingText?.let { keep += it.pageId }
+        val idle = editors.keys.filter { id -> id !in keep && id !in queued && savedRevision[id] == editors[id]?.revision }
+            .sortedByDescending { lastSeen[it] ?: 0L }
+        var strokes = 0; var pages = 0
+        var dropped = false
+        for (id in idle) {
+            strokes += editors[id]?.currentStrokes?.size ?: 0
+            pages++
+            if (pages > MAX_IDLE_PAGES || strokes > MAX_IDLE_STROKES) {
+                editors.remove(id); savedPages.remove(id); savedRevision.remove(id); shown.remove(id); backgrounds.remove(id)
+                dropped = true
+            }
+        }
+        if (dropped) refreshUndo()
+    }
+
+    /** A page's content for the canvas (a fresh copy of its lists). */
+    private fun loadedPage(pageId: String, ed: PageEditor, index: StrokeIndex? = null): LoadedPage {
+        val info = savedPages[pageId] ?: Page(id = pageId)
+        return LoadedPage(
+            pageId, info.width, info.height, info.paper, info.pdf,
+            ed.currentStrokes.toList(), ed.currentTexts.toList(), ed.currentImages.toList(), backgrounds[pageId], index,
+        )
     }
 
     /** Renders the PDF page off the main thread; cached so flipping pages back is instant. */
@@ -159,52 +346,75 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         // Sharp at fit-width on this screen and moderately zoomed in.
         val widthPx = (maxOf(metrics.widthPixels, metrics.heightPixels) * 1.5f).toInt().coerceAtMost(PdfFile.MAX_RENDER_PX)
         val key = "$notebookId/${pdf.attachmentId}/${pdf.pageIndex}/$widthPx"
-        folio.pdfBitmaps.get(key)?.let { bmp -> _state.update { if (it.page?.id == pageId) it.copy(background = bmp) else it }; return }
+        folio.pdfBitmaps.get(key)?.let { bmp -> setBackground(pageId, bmp); return }
         viewModelScope.launch {
             try {
                 val bmp = withContext(kotlinx.coroutines.Dispatchers.IO) {
                     PdfFile(repo.attachmentFile(notebookId, pdf.attachmentId)).use { it.render(pdf.pageIndex, widthPx) }
                 }
                 folio.pdfBitmaps.put(key, bmp)
-                _state.update { if (it.page?.id == pageId) it.copy(background = bmp) else it }
+                setBackground(pageId, bmp)
             } catch (e: Exception) {
                 _state.update { it.copy(error = "The PDF page couldn't be displayed: ${e.message}. Your notes on it are safe.") }
             }
         }
     }
 
-    /** Toolbar: a new page after the current one. */
-    fun addPage() { _state.value.page?.id?.let { addPage(it, before = false) } }
-
-    fun onStrokeFinished(stroke: Stroke) = edit(PageEdit.AddStroke(stroke))
-
-    fun onStrokesErased(ids: Set<String>) {
-        val ed = currentEditor() ?: return
-        edit(PageEdit.RemoveStrokes.of(ed.currentStrokes, ids))
+    private fun setBackground(pageId: String, bmp: android.graphics.Bitmap) {
+        if (backgrounds[pageId] === bmp) return
+        backgrounds[pageId] = bmp
+        editors[pageId]?.let { publish(pageId, it) }
     }
 
-    fun onStrokesSplit(pieces: Map<String, List<Stroke>>) {
-        val ed = currentEditor() ?: return
+    /** Toolbar: a new page after the one in view. */
+    fun addPage() {
+        val meta = _state.value.meta ?: return
+        (currentPageId ?: meta.pageIds.getOrNull(_state.value.pageIndex))?.let { addPage(it, before = false) }
+    }
+
+    fun onStrokeFinished(pageId: String, stroke: Stroke) = edit(pageId, PageEdit.AddStroke(stroke))
+
+    fun onStrokesErased(pageId: String, ids: Set<String>) {
+        val ed = editors[pageId] ?: return
+        edit(pageId, PageEdit.RemoveStrokes.of(ed.currentStrokes, ids))
+    }
+
+    fun onStrokesSplit(pageId: String, pieces: Map<String, List<Stroke>>) {
+        val ed = editors[pageId] ?: return
         val t0 = System.nanoTime()
         val e = PageEdit.SplitStrokes.of(ed.currentStrokes, pieces)
         if (ed.currentStrokes.size > 1000) android.util.Log.d("FolioPerf", "vm split-of ms=%.1f".format((System.nanoTime() - t0) / 1e6))
-        edit(e)
+        edit(pageId, e)
     }
 
-    fun undo() { commitText(); currentEditor()?.let { if (it.undo()) changed(it) } }
-    fun redo() { commitText(); currentEditor()?.let { if (it.redo()) changed(it) } }
+    /** Reverts the notebook's latest edit, on whichever page; scrolls there if it's off screen. */
+    fun undo() { commitText(); history.undo(editors::get, ::loading)?.let(::historyMoved); refreshUndo() }
+    fun redo() { commitText(); history.redo(editors::get)?.let(::historyMoved); refreshUndo() }
+
+    private fun historyMoved(pageId: String) {
+        val ed = editors[pageId] ?: return
+        changed(pageId, ed)
+        if (pageId !in visibleIds) _state.value.meta?.pageIds?.indexOf(pageId)?.takeIf { it >= 0 }?.let(::openPage)
+    }
+
+    /** Ink was written on [pageId] but its content hasn't arrived: its edits wait. */
+    private fun loading(pageId: String) = editors[pageId] == null && pageId in queued
+
+    private fun refreshUndo() = _state.update {
+        it.copy(canUndo = history.canUndo(editors::get, ::loading), canRedo = history.canRedo(editors::get))
+    }
 
     // ---- text boxes ----
 
     /** Text tool tap: finish the box being typed, then edit the tapped box or start a new one there. */
-    fun onTextTap(x: Float, y: Float, textId: String?) {
+    fun onTextTap(pageId: String, x: Float, y: Float, textId: String?) {
         commitText()
-        val ed = currentEditor() ?: return
+        val ed = editors[pageId] ?: return
         if (textId != null) {
             val i = ed.currentTexts.indexOfFirst { it.id == textId }
-            if (i >= 0) { _state.update { it.copy(editingText = TextEdit(ed.currentTexts[i], ed.currentTexts[i], i)) }; return }
+            if (i >= 0) { _state.update { it.copy(editingText = TextEdit(pageId, ed.currentTexts[i], ed.currentTexts[i], i)) }; return }
         }
-        val page = _state.value.page ?: return
+        val page = savedPages[pageId] ?: return
         val tools = _state.value.tools
         val size = tools.textSize
         val w = minOf(520f, page.width - 16f).coerceAtLeast(120f)
@@ -213,7 +423,7 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
             x = left, y = (y - size * 0.6f).coerceAtLeast(4f), width = w, height = size * 1.4f,
             text = "", fontSize = size, color = tools.color,
         )
-        _state.update { it.copy(editingText = TextEdit(box, null, ed.currentTexts.size)) }
+        _state.update { it.copy(editingText = TextEdit(pageId, box, null, ed.currentTexts.size)) }
     }
 
     fun updateEditingText(text: String) = _state.update { s -> s.copy(editingText = s.editingText?.let { it.copy(box = it.box.copy(text = text)) }) }
@@ -224,21 +434,21 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         _state.update { it.copy(editingText = null) }
         val text = e.box.text.trimEnd()
         if (text.isBlank()) {
-            if (e.original != null) edit(PageEdit.PutText(e.original, null, e.index))
+            if (e.original != null) edit(e.pageId, PageEdit.PutText(e.original, null, e.index))
             return
         }
         val height = PageRenderer().layout(text, e.box.width, e.box.fontSize, e.box.color).height.toFloat()
         val box = e.box.copy(text = text, height = maxOf(height, e.box.fontSize))
         when {
-            e.original == null -> edit(PageEdit.PutText(null, box, e.index))
-            box != e.original -> edit(PageEdit.PutText(e.original, box, e.index))
+            e.original == null -> edit(e.pageId, PageEdit.PutText(null, box, e.index))
+            box != e.original -> edit(e.pageId, PageEdit.PutText(e.original, box, e.index))
         }
     }
 
     // ---- pictures ----
 
-    /** Copies a picture into the notebook, places it in the middle of [area] (page units) and selects it. */
-    fun insertImage(uri: android.net.Uri, area: app.folio.core.model.Rect) {
+    /** Copies a picture into the notebook, places it in the middle of [area] (units of [pageId]) and selects it. */
+    fun insertImage(uri: android.net.Uri, pageId: String, area: app.folio.core.model.Rect) {
         commitText()
         val ctx = getApplication<android.app.Application>()
         viewModelScope.launch {
@@ -256,8 +466,8 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
                 val iw = w * f; val ih = h * f
                 val cx = (area.left + area.right) / 2f; val cy = (area.top + area.bottom) / 2f
                 val img = app.folio.core.model.PageImage(attachmentId = id, x = cx - iw / 2f, y = cy - ih / 2f, width = iw, height = ih)
-                edit(PageEdit.PutImage(null, img))
-                _state.update { it.copy(selection = setOf(img.id), tools = it.tools.copy(lasso = true, eraser = false, text = false)) }
+                edit(pageId, PageEdit.PutImage(null, img))
+                _state.update { it.copy(selection = setOf(img.id), selectionPage = pageId, tools = it.tools.copy(lasso = true, eraser = false, text = false)) }
             } catch (e: Exception) {
                 _state.update { it.copy(error = "Couldn't add the picture: ${e.message ?: e.javaClass.simpleName}") }
             }
@@ -287,30 +497,37 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
 
     // ---- lasso selection ----
 
-    fun onLassoSelected(ids: Set<String>) = _state.update { it.copy(selection = ids) }
-    fun clearSelection() = _state.update { it.copy(selection = emptySet()) }
+    fun onLassoSelected(pageId: String, ids: Set<String>) =
+        _state.update { it.copy(selection = ids, selectionPage = if (ids.isEmpty()) null else pageId) }
+    fun clearSelection() = _state.update { it.copy(selection = emptySet(), selectionPage = null) }
+
+    /** The selection's page and its editor, or null. */
+    private fun selectionEditor(): Pair<String, PageEditor>? {
+        val id = _state.value.selectionPage ?: return null
+        return editors[id]?.let { id to it }
+    }
 
     private fun selectedStrokes(): List<Stroke> {
         val ids = _state.value.selection
-        return currentEditor()?.currentStrokes?.filter { it.id in ids }.orEmpty()
+        return selectionEditor()?.second?.currentStrokes?.filter { it.id in ids }.orEmpty()
     }
 
-    fun transformSelection(ids: Set<String>, t: app.folio.core.ink.SelectionTransform) {
-        val ed = currentEditor() ?: return
+    fun transformSelection(pageId: String, ids: Set<String>, t: app.folio.core.ink.SelectionTransform) {
+        val ed = editors[pageId] ?: return
         if (t.isIdentity) return
         val edits = ArrayList<PageEdit>()
         val before = ed.currentStrokes.filter { it.id in ids }
         if (before.isNotEmpty()) edits += PageEdit.ReplaceStrokes(before, before.map(t::apply))
         for (x in ed.currentTexts) if (x.id in ids) edits += PageEdit.PutText(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx, t.dy))
         for (x in ed.currentImages) if (x.id in ids) edits += PageEdit.PutImage(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx, t.dy))
-        commit(edits)
+        commit(pageId, edits)
     }
 
     fun deleteSelection() {
-        val ed = currentEditor() ?: return
+        val (pageId, ed) = selectionEditor() ?: return
         val ids = _state.value.selection
         if (ids.isEmpty()) return
-        _state.update { it.copy(selection = emptySet()) }
+        _state.update { it.copy(selection = emptySet(), selectionPage = null) }
         val edits = ArrayList<PageEdit>()
         if (ed.currentStrokes.any { it.id in ids }) edits += PageEdit.RemoveStrokes.of(ed.currentStrokes, ids)
         // Highest index first, so undo (which runs in reverse) puts each back in its place.
@@ -318,12 +535,12 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
             .forEach { edits += PageEdit.PutText(it.value, null, it.index) }
         ed.currentImages.withIndex().filter { it.value.id in ids }.sortedByDescending { it.index }
             .forEach { edits += PageEdit.PutImage(it.value, null, it.index) }
-        commit(edits)
+        commit(pageId, edits)
     }
 
     /** Copies the selection slightly offset and selects the copies, as most note apps do. */
     fun duplicateSelection() {
-        val ed = currentEditor() ?: return
+        val (pageId, ed) = selectionEditor() ?: return
         val ids = _state.value.selection
         val d = DUPLICATE_OFFSET
         val strokeCopies = selectedStrokes().map { it.transformed(1f, 0f, 0f, d, d, newId = true) }
@@ -334,57 +551,68 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         textCopies.forEach { edits += PageEdit.PutText(null, it) }
         imageCopies.forEach { edits += PageEdit.PutImage(null, it) }
         if (edits.isEmpty()) return
-        commit(edits)
+        commit(pageId, edits)
         _state.update { it.copy(selection = (strokeCopies.map { c -> c.id } + textCopies.map { c -> c.id } + imageCopies.map { c -> c.id }).toCollection(LinkedHashSet())) }
     }
 
     fun recolorSelection(color: Long) {
-        val ed = currentEditor() ?: return
+        val (pageId, ed) = selectionEditor() ?: return
         val ids = _state.value.selection
         val edits = ArrayList<PageEdit>()
         val src = selectedStrokes()
         if (src.isNotEmpty()) edits += PageEdit.ReplaceStrokes(src, src.map { it.recolored(color) })
         for (x in ed.currentTexts) if (x.id in ids && x.color != color) edits += PageEdit.PutText(x, x.copy(color = color))
-        commit(edits)
+        commit(pageId, edits)
     }
 
     /** One undo step for one or several edits. */
-    private fun commit(edits: List<PageEdit>) {
+    private fun commit(pageId: String, edits: List<PageEdit>) {
         when (edits.size) {
             0 -> Unit
-            1 -> edit(edits[0])
-            else -> edit(PageEdit.Composite(edits))
+            1 -> edit(pageId, edits[0])
+            else -> edit(pageId, PageEdit.Composite(edits))
         }
     }
 
-    private fun edit(e: PageEdit) {
-        val ed = currentEditor() ?: return
+    /** Applies [e] to [pageId] (queued if the page is still loading) and records it for Undo. */
+    private fun edit(pageId: String, e: PageEdit) {
+        if (_state.value.meta?.pageIds?.contains(pageId) != true) return // the page was deleted meanwhile
+        val ed = editors[pageId]
+        history.record(pageId, e)
+        if (ed == null) {
+            queued.getOrPut(pageId) { ArrayList() } += e
+            _state.update { it.copy(save = SaveStatus.PENDING) }
+            refreshUndo()
+            return
+        }
         val t0 = System.nanoTime()
         ed.perform(e)
         val t1 = System.nanoTime()
-        changed(ed)
+        changed(pageId, ed)
         if (ed.currentStrokes.size > 1000) android.util.Log.d("FolioPerf", "vm edit perform_ms=%.1f publish_ms=%.1f".format((t1 - t0) / 1e6, (System.nanoTime() - t1) / 1e6))
     }
 
-    private fun changed(ed: PageEditor) {
-        publish(ed)
+    private fun changed(pageId: String, ed: PageEditor) {
+        publish(pageId, ed)
         scheduleSave()
-        _state.value.page?.id?.let { thumbChanged(it) }
+        thumbChanged(pageId)
     }
 
-    private fun publish(ed: PageEditor) {
-        val strokes = ed.currentStrokes.toList()
+    /** Hands the page's current content to the canvas (if it's in the window) and refreshes Undo. */
+    private fun publish(pageId: String, ed: PageEditor, index: StrokeIndex? = null) {
+        val page = loadedPage(pageId, ed, index)
+        shown[pageId] = page
         // Undo/redo can remove selected strokes; never keep a selection of ghosts.
         // (Only build the id set when something is selected: pages can hold thousands of strokes.)
         _state.update {
-            val selection = if (it.selection.isEmpty()) it.selection else {
-                val live = strokes.mapTo(HashSet()) { s -> s.id }
+            val selection = if (it.selection.isEmpty() || it.selectionPage != pageId) it.selection else {
+                val live = page.strokes.mapTo(HashSet()) { s -> s.id }
                 ed.currentTexts.mapTo(live) { t -> t.id }; ed.currentImages.mapTo(live) { i -> i.id }
                 it.selection.filterTo(LinkedHashSet()) { id -> id in live }
             }
             it.copy(
-                strokes = strokes, texts = ed.currentTexts.toList(), images = ed.currentImages.toList(),
-                canUndo = ed.canUndo, canRedo = ed.canRedo, selection = selection,
+                pages = if (pageId in window) it.pages + (pageId to page) else it.pages,
+                canUndo = history.canUndo(editors::get, ::loading), canRedo = history.canRedo(editors::get), selection = selection,
             )
         }
     }
@@ -450,8 +678,9 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
                 if (editors[id] === ed) { savedRevision[id] = rev; savedPages[id] = snapshot }
             }
             retryAttempt = 0
-            val stillDirty = editors.any { (id, ed) -> savedRevision[id] != ed.revision }
+            val stillDirty = queued.isNotEmpty() || editors.any { (id, ed) -> savedRevision[id] != ed.revision }
             _state.update { it.copy(save = if (stillDirty) SaveStatus.PENDING else SaveStatus.SAVED) }
+            evictIdle() // saved pages that scrolled away can go now
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -487,10 +716,8 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         thumbChanged(remote.id, now = true)
         savedPages[remote.id] = merged
         savedRevision[remote.id] = fresh.revision
-        if (_state.value.page?.id == remote.id) {
-            _state.update { it.copy(page = fresh.snapshot()) }
-            publish(fresh)
-        }
+        rebuildStack()
+        publish(remote.id, fresh) // its undo history starts over (NotebookHistory skips the old entries)
         if (editors.none { (id, e) -> savedRevision[id] != e.revision }) _state.update { if (it.save == SaveStatus.ERROR) it else it.copy(save = SaveStatus.SAVED) }
         return merged
     }
@@ -556,7 +783,7 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         _thumbVersions.update { m -> m + ids.associateWith { (m[it] ?: 0L) + 1 } }
     }
 
-    /** Adds a blank page before or after [refPageId], with its size and paper, and opens it. */
+    /** Adds a blank page before or after [refPageId], with its size and paper, and scrolls to it. */
     fun addPage(refPageId: String, before: Boolean): Unit = pageOp {
         commitText()
         val at = _state.value.meta?.pageIds?.indexOf(refPageId) ?: -1
@@ -603,18 +830,17 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         // Kept in memory for Undo, with its undo history.
         val editor = editors[pageId] ?: withContext(folio.ioWriter) { PageEditor(repo.loadPage(notebookId, pageId)) }
         val snapshot = editor.snapshot()
-        val wasOpen = _state.value.page?.id == pageId
         editors.remove(pageId); savedRevision.remove(pageId); savedPages.remove(pageId); thumbsDue.remove(pageId)
+        shown.remove(pageId); queued.remove(pageId)
+        if (_state.value.selectionPage == pageId) clearSelection()
         val updated = try {
             withContext(folio.ioWriter) { repo.deletePage(notebookId, pageId) }
         } catch (e: Exception) {
             adopt(snapshot, editor)
             throw e
         }
-        if (wasOpen) {
-            _state.update { it.copy(meta = updated) }
-            openPage(at.coerceAtMost(updated.pageIds.lastIndex))
-        } else applyMeta(updated)
+        // The canvas keeps its place: the next page slides up where the deleted one was.
+        applyMeta(updated)
         _events.trySend(PageEvent.Notice("Page ${at + 1} deleted") { restorePage(at, snapshot, editor) })
     }
 
@@ -631,19 +857,20 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         commitText()
         val at = _state.value.meta?.pageIds?.indexOf(pageId) ?: -1
         if (at < 0) return@pageOp
-        val ed = editors[pageId] ?: adopt(withContext(folio.ioWriter) { repo.loadPage(notebookId, pageId) })
+        val ed = editors[pageId] ?: adopt(withContext(Dispatchers.IO) { repo.loadPage(notebookId, pageId) })
         val edit = PageOps.erase(ed.currentStrokes, ed.currentTexts, ed.currentImages) ?: return@pageOp
         ed.perform(edit)
+        history.record(pageId, edit)
         pageEdited(pageId, ed)
         _events.trySend(PageEvent.Notice("Page ${at + 1} erased") {
             // Only while the erase is still the page's latest edit (Undo in the top bar covers the rest).
-            if (editors[pageId] === ed && ed.lastEdit === edit && ed.undo()) pageEdited(pageId, ed)
+            if (editors[pageId] === ed && history.undoEdit(pageId, edit, editors::get)) pageEdited(pageId, ed)
         })
     }
 
     /** An edit made from the page menu, possibly on a page that isn't open. */
     private fun pageEdited(pageId: String, ed: PageEditor) {
-        if (_state.value.page?.id == pageId) publish(ed)
+        publish(pageId, ed)
         scheduleSave()
         thumbChanged(pageId, now = true)
     }
@@ -729,10 +956,15 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         return editor
     }
 
-    /** New notebook details; the open page keeps its place in the list. */
-    private fun applyMeta(meta: NotebookMeta) = _state.update { s ->
-        val at = s.page?.let { meta.pageIds.indexOf(it.id) } ?: -1
-        s.copy(meta = meta, pageIndex = if (at >= 0) at else s.pageIndex.coerceAtMost(meta.pageIds.lastIndex))
+    /** New notebook details: the column is laid out again; the page in view keeps its place on screen. */
+    private fun applyMeta(meta: NotebookMeta) {
+        _state.update { s ->
+            val at = currentPageId?.let { meta.pageIds.indexOf(it) } ?: -1
+            s.copy(meta = meta, pageIndex = if (at >= 0) at else s.pageIndex.coerceIn(0, maxOf(0, meta.pageIds.lastIndex)))
+        }
+        rebuildStack()
+        readHeaders(meta.pageIds)
+        updateWindow()
     }
 
     companion object {
@@ -740,5 +972,9 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         const val DUPLICATE_OFFSET = 24f
         /** A page's thumbnail refreshes once writing pauses this long. */
         const val THUMB_DEBOUNCE_MS = 1_000L
+        /** Saved pages kept in memory after scrolling away (besides the window around the screen). */
+        const val MAX_IDLE_PAGES = 8
+        /** …and at most this many strokes among them (a dense imported page holds ~7,000, ~20 MB). */
+        const val MAX_IDLE_STROKES = 20_000
     }
 }

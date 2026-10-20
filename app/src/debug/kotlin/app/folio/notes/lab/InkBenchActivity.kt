@@ -26,11 +26,11 @@ class InkBenchActivity : ComponentActivity() {
         view.penOnlyPreference = false
         fun publish() = view.setPage("bench", ArrayList(strokes), PaperTemplate.RULED, 1000f, 1414f)
         view.listener = object : InkCanvasView.Listener {
-            override fun onStrokeFinished(stroke: Stroke) { strokes += stroke; publish() }
-            override fun onStrokesErased(ids: Set<String>) { strokes.removeAll { it.id in ids }; publish() }
-            override fun onLassoSelected(ids: Set<String>) = Unit
-            override fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform) = Unit
-            override fun onStrokesSplit(pieces: Map<String, List<Stroke>>) = Unit
+            override fun onStrokeFinished(pageId: String, stroke: Stroke) { strokes += stroke; publish() }
+            override fun onStrokesErased(pageId: String, ids: Set<String>) { strokes.removeAll { it.id in ids }; publish() }
+            override fun onLassoSelected(pageId: String, ids: Set<String>) = Unit
+            override fun onSelectionTransformed(pageId: String, ids: Set<String>, transform: SelectionTransform) = Unit
+            override fun onStrokesSplit(pageId: String, pieces: Map<String, List<Stroke>>) = Unit
         }
         // `--ei dense 6000`: start from a synthetic handwritten page with that many strokes.
         strokes += benchPage(intent.getIntExtra("dense", 0))

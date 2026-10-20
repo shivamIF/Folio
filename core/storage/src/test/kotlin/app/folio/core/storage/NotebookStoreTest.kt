@@ -354,4 +354,28 @@ class NotebookStoreTest {
         val bad = Page(images = listOf(PageImage(attachmentId = "not-staged", x = 0f, y = 0f, width = 10f, height = 10f)))
         assertFailsWith<IllegalArgumentException> { store.createNotebookFromImport("Bad", null, Cover(), emptyList(), listOf(bad)) }
     }
+
+    @Test fun pageHeaderGivesSizeAndPaperWithoutLoadingStrokes() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("Mixed", null, Cover(), PaperTemplate.DOTTED)
+        val first = nb.pageIds.first()
+        assertEquals(app.folio.core.model.PageHeader(1000f, 1414f, PaperTemplate.DOTTED), store.pageHeader(nb.id, first))
+        val wide = Page(width = 1414f, height = 1000f, paper = PaperTemplate.BLANK, strokes = List(400) { stroke("w$it") })
+        store.insertPage(nb.id, 1, wide)
+        assertEquals(app.folio.core.model.PageHeader(1414f, 1000f, PaperTemplate.BLANK), store.pageHeader(nb.id, wide.id))
+        assertNull(store.pageHeader(nb.id, "never-written"))
+    }
+
+    @Test fun loadPageStillFallsBackToTheBackup() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("Backup", null, Cover(), PaperTemplate.RULED)
+        val pid = nb.pageIds.first()
+        val page = store.loadPage(nb.id, pid)
+        store.savePage(nb.id, page.copy(strokes = listOf(stroke("s1"))))
+        store.savePage(nb.id, page.copy(strokes = listOf(stroke("s1"), stroke("s2"))))
+        File(File(File(root, "notebooks"), nb.id), "$pid.page.json").writeText("{ not json")
+        assertEquals(listOf("s1"), store.loadPage(nb.id, pid).strokes.map { it.id })
+        assertNotNull(store.lastRecovery)
+        assertEquals(Page(id = "missing"), store.loadPage(nb.id, "missing"))
+    }
 }

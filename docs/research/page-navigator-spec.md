@@ -98,7 +98,7 @@ Not available: there are no screenshots or screen recordings of either app's pag
 | Hover preview (S1) | Hover highlight only (the item lifts under the pen) | A preview popup is a follow-up |
 
 ## 4. Folio facts the design respects
-- **One page at a time.** The editor shows one page and switches with Previous/Next. There's no continuous vertical scrolling in any branch. The user chose (2026-10-20) to keep this model; continuous scrolling is a separate task. The "visible page" is `EditorUiState.pageIndex`.
+- **One page at a time** (at the time of this spec). The editor showed one page and switched with Previous/Next. The user chose (2026-10-20) to keep that model for the navigator and to do continuous scrolling separately. *Update: continuous vertical scrolling landed later the same day (ADR-10). `EditorUiState.pageIndex` is now the page in view, reported by the canvas as it scrolls; the sidebar follows it unchanged.*
 - **Sources of truth:**
   - Page order: `NotebookMeta.pageIds` in `library.json`.
   - Page content and size: `Page` files, edited through `PageEditor`.

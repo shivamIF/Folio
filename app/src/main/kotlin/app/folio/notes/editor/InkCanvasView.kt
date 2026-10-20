@@ -17,6 +17,7 @@ import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.OverScroller
+import app.folio.notes.input.PageStack
 import app.folio.notes.input.PageViewport
 import androidx.input.motionprediction.MotionEventPredictor
 import app.folio.core.ink.PenProfile
@@ -42,11 +43,13 @@ import kotlin.math.max
 
 
 /**
- * The writing surface. It owns only transient input/render state. The page's
- * stroke list comes from [setStrokes], and finished edits go out through [listener].
+ * The writing surface: the notebook's pages in one scrolling column (ADR-10). It owns only
+ * transient input/render state. The pages and their content come from [setDocument], and
+ * finished edits go out through [listener], each with the id of the page it belongs to.
  *
- * Input path: MotionEvent → [InputPolicy] decides draw/erase/navigate/ignore →
- * every historical sample is mapped to page coordinates → [StrokeBuilder]
+ * Input path: MotionEvent → [InputPolicy] decides draw/erase/navigate/ignore → at pen-down
+ * the page under the pen becomes the *active* page for the whole gesture → every historical
+ * sample is mapped to that page's coordinates (even past its edge) → [StrokeBuilder]
  * stabilises it → outline from [StrokeGeometry] → Path → canvas.
  * Predicted samples (androidx motion prediction) are drawn ahead of the pen
  * tip but are never stored.
@@ -87,7 +90,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         // Finished strokes now in a posted page frame: let the wet layer drop them shortly.
         val now = System.nanoTime()
         var marked = false
-        for (h in wetHeld) if (h.postedAt == 0L && h.stroke in pendingCommitsOrTiles()) { h.postedAt = now; marked = true }
+        for (h in wetHeld) if (h.postedAt == 0L && shownOnPage(h)) { h.postedAt = now; marked = true }
         if (marked) Choreographer.getInstance().postFrameCallback(wetTick)
     }
 
@@ -96,18 +99,14 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     /** The stroke in progress is drawn on the wet layer instead of the page surface. */
     private var wetLive = false
     /** Finished strokes still shown wet until the page surface has displayed them. */
-    private class WetHeld(val stroke: Stroke, val art: StrokeArt) { var postedAt = 0L }
+    private class WetHeld(val slot: PageSlot, val stroke: Stroke, val art: StrokeArt) { var postedAt = 0L }
     private val wetHeld = ArrayList<WetHeld>()
     private var wetTail: RectF? = null
     private val wetMatrix = FloatArray(9)
     private val wetRect = RectF()
 
-    /** Strokes the page surface draws: pending commits and everything in the page list. */
-    private fun pendingCommitsOrTiles(): Collection<Stroke> = object : AbstractCollection<Stroke>() {
-        override val size get() = pendingCommits.size
-        override fun iterator() = pendingCommits.iterator()
-        override fun contains(element: Stroke) = element in pendingCommits || index.indexOf(element.id) >= 0
-    }
+    /** The page surface draws this held stroke (as a pending commit or from its page's list). */
+    private fun shownOnPage(h: WetHeld) = h.stroke in h.slot.pendingCommits || h.slot.strokeIndex.indexOf(h.stroke.id) >= 0
 
     private fun canUseWet() = wet?.ready == true && tool != ToolType.HIGHLIGHTER && !lassoMode && !textMode
 
@@ -150,7 +149,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         }
         wetTail = tail
         pageToView.getValues(wetMatrix)
-        w.show(WetFrame(wetMatrix.copyOf(), arts, clip, if (debugInput) perfLastInputNanos else 0L))
+        w.show(WetFrame(wetMatrix.copyOf(), arts, clip, if (debugInput) perfLastInputNanos else 0L, active.width, active.height))
     }
 
     /** Drops held strokes the page surface has shown for a few frames (by then on screen). */
@@ -201,19 +200,25 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         if (frameScheduled) { Choreographer.getInstance().removeFrameCallback(this); frameScheduled = false }
     }
 
+    /** Every edit names its page ([pageId]); coordinates are in that page's units. */
     interface Listener {
-        fun onStrokeFinished(stroke: Stroke)
-        fun onStrokesErased(ids: Set<String>)
-        /** A lasso loop finished; [ids] is the new selection (empty clears it). */
-        fun onLassoSelected(ids: Set<String>)
+        fun onStrokeFinished(pageId: String, stroke: Stroke)
+        fun onStrokesErased(pageId: String, ids: Set<String>)
+        /** A lasso loop finished; [ids] is the new selection on [pageId] (empty clears it). */
+        fun onLassoSelected(pageId: String, ids: Set<String>)
         /** The selection was moved or resized; commit as one undoable edit. */
-        fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform)
+        fun onSelectionTransformed(pageId: String, ids: Set<String>, transform: SelectionTransform)
         /** Partial eraser finished: each original stroke id maps to the pieces that remain. */
-        fun onStrokesSplit(pieces: Map<String, List<Stroke>>)
+        fun onStrokesSplit(pageId: String, pieces: Map<String, List<Stroke>>)
         /** Text tool: the page was tapped at ([x], [y]); [textId] is the text box there, if any. */
-        fun onTextTap(x: Float, y: Float, textId: String?) {}
+        fun onTextTap(pageId: String, x: Float, y: Float, textId: String?) {}
         /** Zoom or scroll changed (only reported while [InkCanvasView.reportViewport] is on). */
         fun onViewportChanged() {}
+        /**
+         * Scrolling changed which pages are on screen ([visible], top to bottom, never empty) or
+         * which one is in view ([current], under the reading line). Reported only on change.
+         */
+        fun onPagesInView(visible: List<String>, current: String) {}
     }
 
     var listener: Listener? = null
@@ -243,25 +248,46 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     /** Report zoom/scroll changes to the listener (e.g. to keep a text field over its box). */
     var reportViewport: Boolean = false
 
-    /** Current view transform: view = page × scale + (tx, ty). */
+    /** Current zoom: view pixels per page unit (the same on every page). */
     val pageScale: Float get() = viewport.scale
-    val pageTx: Float get() = viewport.tx
-    val pageTy: Float get() = viewport.ty
 
-    /** The visible part of the page, in page units. */
-    fun visiblePageArea(): app.folio.core.model.Rect {
+    /** Where page [pageId]'s top-left corner is in view pixels, or null if it isn't laid out. */
+    fun pageOrigin(pageId: String): Pair<Float, Float>? {
+        val s = stack ?: return null
+        val i = s.indexOf(pageId).takeIf { it >= 0 } ?: return null
+        return viewport.tx + s.left(i) * scale to viewport.ty + s.top(i) * scale
+    }
+
+    /** The page in view and its visible part, in its page units; null before layout. */
+    fun visiblePageArea(): Pair<String, app.folio.core.model.Rect>? {
+        val s = stack ?: return null
+        if (s.count == 0 || !viewport.ready) return null
+        val i = currentIndex(s)
+        val ox = s.left(i); val oy = s.top(i)
         val (l, t) = viewport.toPage(0f, 0f)
         val (r, b) = viewport.toPage(width.toFloat(), height.toFloat())
-        return app.folio.core.model.Rect(maxOf(0f, l), maxOf(0f, t), minOf(pageW, r), minOf(pageH, b))
+        return s.ids[i] to app.folio.core.model.Rect(
+            maxOf(0f, l - ox), maxOf(0f, t - oy), minOf(s.pageWidth(i), r - ox), minOf(s.pageHeight(i), b - oy),
+        )
     }
-    /** Rendered PDF page shown under the ink, or null for plain paper. */
-    var pdfBackground: android.graphics.Bitmap? = null
-        set(value) { if (field !== value) { field = value; requestRender() } }
     /** Rectangle selection instead of a freeform loop. */
     var lassoRectangle: Boolean = false
-    /** Currently selected stroke ids (owned by the view model). */
-    var selection: Set<String> = emptySet()
+    /** Currently selected stroke ids, on [selectionPage] (owned by the view model; see [setSelection]). */
+    private var selection: Set<String> = emptySet()
         set(value) { if (field != value) { field = value; maybeSnapshotSelection(); requestRender() } }
+    private var selectionPage: String? = null
+
+    /**
+     * The lasso selection, on [pageId]. A selection always lives on the active page: one
+     * made elsewhere (e.g. a picture just inserted on the page in view) makes that page active.
+     */
+    fun setSelection(pageId: String?, ids: Set<String>) {
+        selectionPage = pageId
+        if (ids.isNotEmpty() && pageId != null && pageId != active.pageId && action == GestureAction.IGNORE) {
+            slots[pageId]?.takeIf { it.loaded }?.let { activate(it) }
+        }
+        selection = ids
+    }
 
     val policy = InputPolicy(palmTouchMajorPx = 48f * resources.displayMetrics.density)
 
@@ -269,71 +295,258 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     var penOnlyPreference: Boolean = true
         set(value) { field = value; if (policy.stylusSeen) policy.penOnly = value }
 
-    // ---- page content ----
-    private var strokes: List<Stroke> = emptyList()
-    /** Text boxes and pictures on the page (owned by the view model). */
-    private var texts: List<TextBox> = emptyList()
-    private var images: List<PageImage> = emptyList()
-    /** The PDF page under the ink, rendered sharp per tile through [assets]. */
-    private var pdfPage: PdfBackground? = null
+    // ---- the notebook's pages (ADR-10) ----
     /** Pictures and PDF files of the open notebook. */
     internal var assets: PageAssets? = null
         set(value) { if (field !== value) { field = value; requestRender() } }
-    /** Spatial index of [strokes], rebuilt whenever the list changes. */
-    private var index = StrokeIndex(emptyList())
-    /** Finished strokes not yet echoed back through [setPage]; drawn so pen-up never blinks. */
-    private val pendingCommits = ArrayList<Stroke>()
-    private val pendingSince = HashMap<String, Long>()
     /** Outline path of a committed stroke, built once and shared with the tile renderer. */
     private fun artFor(s: Stroke): StrokeArt = StrokeArt.of(s)
-    private var pageKey: String? = null
-    private var paper = PaperTemplate.RULED
-    private var pageW = 1000f
-    private var pageH = 1414f
 
-    fun setPage(
-        pageId: String, strokes: List<Stroke>, paper: PaperTemplate, width: Float, height: Float,
-        texts: List<TextBox> = emptyList(), images: List<PageImage> = emptyList(), pdf: PdfBackground? = null,
-    ) {
-        if (texts !== this.texts || images !== this.images) { this.texts = texts; this.images = images; requestRender() }
-        this.pdfPage = pdf
-        // Any new stroke list is the echo of the last edit, wipe included.
-        if (strokes !== this.strokes) wipeAwaitingEcho = false
-        val setPageStart = System.nanoTime()
-        if (perfEraseUpNanos != 0L && strokes !== this.strokes) {
-            Log.d("FolioPerf", "erase commit ms=%.1f (pen-up → edited page back)".format((System.nanoTime() - perfEraseUpNanos) / 1e6))
-            perfEraseUpNanos = 0L
+    /** Paper of a page that isn't loaded yet (drawn as its placeholder). */
+    var paperOf: (String) -> PaperTemplate = { PaperTemplate.RULED }
+    /** A picture of a page (its sidebar thumbnail), shown while it loads or its tiles render. */
+    var previewOf: (String) -> android.graphics.Bitmap? = { null }
+
+    private val budget = TileBudget()
+    private var stack: PageStack? = null
+    /** A new layout that arrived mid-gesture; applied when the gesture ends. */
+    private var pendingStack: PageStack? = null
+    private var shown: Map<String, LoadedPage> = emptyMap()
+    private val slots = HashMap<String, PageSlot>()
+    /** Pages kept around the screen (from one above to one below the visible ones), by position. */
+    private var window = IntRange.EMPTY
+    /** Stands in as the active page until the pen first touches one. */
+    private val noPage = PageSlot("", budget) { requestRender() }
+    /** The page the current (or last) gesture works on; every per-page field below is its. */
+    private var active: PageSlot = noPage
+
+    private val strokes: List<Stroke> get() = active.strokes
+    private val texts: List<TextBox> get() = active.texts
+    private val images: List<PageImage> get() = active.images
+    private val index: StrokeIndex get() = active.strokeIndex
+    private val pendingCommits get() = active.pendingCommits
+    private val pendingSince get() = active.pendingSince
+    private val erasedPending get() = active.erasedPending
+    private val partialPieces get() = active.partialPieces
+    private var partialCommitted: Boolean
+        get() = active.partialCommitted
+        set(v) { active.partialCommitted = v }
+    private var wipeAwaitingEcho: Boolean
+        get() = active.wipeAwaitingEcho
+        set(v) { active.wipeAwaitingEcho = v }
+    private var prebuiltIndex: StrokeIndex?
+        get() = active.prebuiltIndex
+        set(v) { active.prebuiltIndex = v }
+    private val tiles: TileCache get() = active.tiles
+
+    /**
+     * The notebook's pages ([stack], every page) and the content of those loaded near the
+     * screen ([pages], by id). Cheap when nothing changed: everything is compared by identity.
+     * A new layout keeps the page under the reading line where it is on screen.
+     */
+    fun setDocument(stack: PageStack, pages: Map<String, LoadedPage>) {
+        if (!stack.sameLayout(pendingStack ?: this.stack)) {
+            if (action != GestureAction.IGNORE && this.stack != null) pendingStack = stack else relayout(stack)
         }
-        pageKey = pageId
-        // A prebuilt index may hold its own copy of the same strokes; only a new list needs a new index.
-        if (strokes !== this.strokes) {
-            val t0 = System.nanoTime()
-            val pre = prebuiltIndex
-            prebuiltIndex = null
-            index = if (pre != null && sameStrokes(pre.strokes, strokes)) pre else index.appending(strokes)
+        if (pages !== shown) {
+            shown = pages
+            for ((id, p) in pages) {
+                val slot = slotFor(id) ?: continue
+                if (slot.source !== p) applyContent(slot, p)
+            }
+            pruneSlots()
+        }
+        // Pending strokes whose edit never came back (the page was deleted meanwhile) stop showing.
+        val now = SystemClock.uptimeMillis()
+        for (slot in slots.values) if (slot.loaded && slot.pendingCommits.isNotEmpty()) {
+            slot.pendingCommits.removeAll { slot.strokeIndex.indexOf(it.id) >= 0 || now - (slot.pendingSince[it.id] ?: 0) > 1000 }
+            slot.pendingSince.keys.retainAll(slot.pendingCommits.mapTo(HashSet()) { it.id })
+        }
+        // A committed move or resize is drawn from the edited strokes now.
+        if (selGesture == SelGesture.NONE) selTransform = SelectionTransform()
+        requestRender()
+    }
+
+    /** One page on its own, for the debug ink bench (InkBenchActivity). */
+    fun setPage(pageId: String, strokes: List<Stroke>, paper: PaperTemplate, width: Float, height: Float) {
+        val s = this.stack?.takeIf { it.ids == listOf(pageId) && it.pageWidth(0) == width && it.pageHeight(0) == height }
+            ?: PageStack(listOf(pageId), floatArrayOf(width), floatArrayOf(height))
+        setDocument(s, mapOf(pageId to LoadedPage(pageId, width, height, paper, null, strokes, emptyList(), emptyList())))
+    }
+
+    /** The slot of a page in the column (created, not yet loaded, if there's none). */
+    private fun slotFor(pageId: String): PageSlot? {
+        slots[pageId]?.let { return it }
+        val s = stack ?: return null
+        val i = s.indexOf(pageId).takeIf { it >= 0 } ?: return null
+        return PageSlot(pageId, budget) { requestRender() }.also { place(it, s, i); slots[pageId] = it }
+    }
+
+    private fun place(slot: PageSlot, s: PageStack, i: Int) {
+        slot.pos = i
+        slot.left = s.left(i); slot.top = s.top(i)
+        if (!slot.loaded) { slot.width = s.pageWidth(i); slot.height = s.pageHeight(i); slot.paper = paperOf(slot.pageId) }
+    }
+
+    /** Content from the view model for one page (its first load, or an edit echoed back). */
+    private fun applyContent(slot: PageSlot, p: LoadedPage) {
+        val strokes = p.strokes
+        val t0 = System.nanoTime()
+        slot.source = p
+        slot.texts = p.texts; slot.images = p.images
+        slot.pdf = p.pdf; slot.pdfBitmap = p.background
+        slot.paper = p.paper
+        slot.width = p.width; slot.height = p.height
+        // Any new stroke list is the echo of the last edit, wipe included.
+        if (strokes !== slot.strokes) {
+            slot.wipeAwaitingEcho = false
+            if (perfEraseUpNanos != 0L && slot === active) {
+                Log.d("FolioPerf", "erase commit ms=%.1f (pen-up → edited page back)".format((System.nanoTime() - perfEraseUpNanos) / 1e6))
+                perfEraseUpNanos = 0L
+            }
+            // A prebuilt index may hold its own copy of the same strokes; only a new list needs a new index.
+            val pre = slot.prebuiltIndex ?: p.index
+            slot.prebuiltIndex = null
+            // A page index built while loading may lack ink queued meanwhile: it still serves as the base.
+            slot.strokeIndex = if (pre != null && sameStrokes(pre.strokes, strokes)) pre else (pre ?: slot.strokeIndex).appending(strokes)
             if (debugInput && strokes.size > 1000) Log.d("FolioPerf", "index build ms=%.1f strokes=%d".format((System.nanoTime() - t0) / 1e6, strokes.size))
         }
-        this.strokes = strokes
-        this.paper = paper
-        pageW = width; pageH = height
-        if (pendingCommits.isNotEmpty() || erasedPending.isNotEmpty()) {
+        slot.strokes = strokes
+        if (slot.pendingCommits.isNotEmpty() || slot.erasedPending.isNotEmpty()) {
             // Look ids up in the index rather than building a set of the whole page.
             val now = SystemClock.uptimeMillis()
             // Normally the echo arrives on the next frame; the timeout covers edits the page never accepts.
-            pendingCommits.removeAll { index.indexOf(it.id) >= 0 || now - (pendingSince[it.id] ?: 0) > 1000 }
-            pendingSince.keys.retainAll(pendingCommits.mapTo(HashSet()) { it.id })
-            erasedPending.retainAll { index.indexOf(it) >= 0 }
+            slot.pendingCommits.removeAll { slot.strokeIndex.indexOf(it.id) >= 0 || now - (slot.pendingSince[it.id] ?: 0) > 1000 }
+            slot.pendingSince.keys.retainAll(slot.pendingCommits.mapTo(HashSet()) { it.id })
+            slot.erasedPending.retainAll { slot.strokeIndex.indexOf(it) >= 0 }
         }
-        if (partialCommitted) {
-            partialPieces.clear(); partialCommitted = false
-            tiles.keepWiped() // the wiped tiles now match; the edit patches them exactly
+        if (slot.partialCommitted) {
+            slot.partialPieces.clear(); slot.partialCommitted = false
+            slot.tiles.keepWiped() // the wiped tiles now match; the edit patches them exactly
         }
-        if (selGesture == SelGesture.NONE) selTransform = SelectionTransform()
-        if (selection.isNotEmpty()) maybeSnapshotSelection()
-        if (debugInput && strokes.size > 1000) Log.d("FolioPerf", "setPage ms=%.1f".format((System.nanoTime() - setPageStart) / 1e6))
-        viewport.setPage(width, height)
+        if (slot === active && selection.isNotEmpty()) maybeSnapshotSelection()
+        if (debugInput && strokes.size > 1000) Log.d("FolioPerf", "setPage ms=%.1f".format((System.nanoTime() - t0) / 1e6))
+    }
+
+    /** Lays the column out again, keeping the page under the reading line in place on screen. */
+    private fun relayout(s: PageStack) {
+        val old = stack
+        var anchorId: String? = null; var anchorPos = 0; var anchorOffset = 0f
+        if (old != null && old.count > 0 && viewport.ready) {
+            val y = readingY()
+            anchorPos = old.nearest(y); anchorId = old.ids[anchorPos]; anchorOffset = y - old.top(anchorPos)
+        }
+        stack = s
+        pendingStack = null
+        for (slot in slots.values) {
+            val i = s.indexOf(slot.pageId)
+            if (i >= 0) place(slot, s, i) else slot.pos = -1
+        }
+        if (s.count > 0) {
+            viewport.setContent(s.width, s.height, s.pageHeight(0), s.lastTop)
+            if (old == null) viewport.fitWidth()
+            else if (anchorId != null) {
+                val j = s.indexOf(anchorId).takeIf { it >= 0 } ?: anchorPos.coerceIn(0, s.count - 1)
+                viewport.anchor(s.top(j) + anchorOffset.coerceIn(-s.gap, s.pageHeight(j)), height * PageStack.READING_LINE)
+            }
+        }
+        reported = null // positions changed: report the pages in view again
+        syncMatrices()
+        applyPendingJump()
+        pruneSlots()
+        requestRender()
+    }
+
+    /** Releases pages that left the screen's neighbourhood (or the notebook) and wait for nothing. */
+    private fun pruneSlots() {
+        var lostActive = false
+        val it = slots.values.iterator()
+        while (it.hasNext()) {
+            val slot = it.next()
+            val keep = (slot === active && (action != GestureAction.IGNORE || slot.pos >= 0)) || slot.busy ||
+                (slot.pos >= 0 && (slot.pageId in shown || slot.pos in window))
+            if (!keep) {
+                slot.release(); it.remove()
+                if (slot === active) { active = noPage; lostActive = true }
+            }
+        }
+        if (lostActive) syncMatrices()
+    }
+
+    // ---- going to a page, and which pages are in view ----
+    private var jumpSeq = Long.MIN_VALUE
+    private var pendingJump: String? = null
+
+    /** Scrolls page [pageId] to the top of the view (once per [seq]; waits for layout). */
+    fun jumpTo(seq: Long, pageId: String) {
+        if (seq == jumpSeq) return
+        jumpSeq = seq
+        pendingJump = pageId
+        applyPendingJump()
+    }
+
+    /**
+     * A new canvas for an open notebook (rotation, returning to the editor): start at the page
+     * that was in view, and treat the last jump ([seq]) as done.
+     */
+    fun restoreTo(pageId: String, seq: Long?) {
+        if (seq != null) jumpSeq = seq
+        pendingJump = pageId
+        applyPendingJump()
+    }
+
+    private fun applyPendingJump() {
+        val id = pendingJump ?: return
+        val s = stack ?: return
+        if (!viewport.ready) return
+        val i = s.indexOf(id)
+        if (i < 0) return // not in the layout yet: the next layout brings it
+        pendingJump = null
+        scroller.forceFinished(true)
+        dropWet()
+        viewport.anchor(s.top(i), 0f)
         syncMatrices()
         requestRender()
+    }
+
+    /** Document height of the reading line (the page in view is read there). */
+    private fun readingY() = (height * PageStack.READING_LINE - viewport.ty) / scale
+
+    private fun currentIndex(s: PageStack) = s.nearest(readingY())
+
+    private var reported: Pair<IntRange, Int>? = null
+
+    /** Tells the listener which pages are on screen when that changes; keeps their neighbours' slots. */
+    private fun reportPages() {
+        val s = stack ?: return
+        if (s.count == 0 || !viewport.ready) return
+        val y0 = -viewport.ty / scale; val y1 = (height - viewport.ty) / scale
+        val cur = currentIndex(s)
+        val vis = s.overlapping(y0, y1).takeIf { !it.isEmpty() } ?: cur..cur
+        val now = vis to cur
+        if (now == reported) return
+        reported = now
+        window = (vis.first - 1).coerceAtLeast(0)..(vis.last + 1).coerceAtMost(s.count - 1)
+        pruneSlots()
+        listener?.onPagesInView(s.ids.subList(vis.first, vis.last + 1), s.ids[cur])
+    }
+
+    /** The page under view point ([x], [y]), or the nearer one across a gap; null without pages. */
+    private fun slotAt(x: Float, y: Float): PageSlot? {
+        val s = stack ?: return null
+        val i = s.nearest((y - viewport.ty) / scale).takeIf { it >= 0 } ?: return null
+        return slotFor(s.ids[i])
+    }
+
+    /** Makes [slot] the page gestures work on (only between gestures). */
+    private fun activate(slot: PageSlot) {
+        if (slot === active) return
+        dropWet() // held wet strokes are drawn with the old page's transform
+        selSnapshot = null
+        selTransform = SelectionTransform()
+        active = slot
+        syncMatrices()
+        if (slot.loaded && selection.isNotEmpty()) maybeSnapshotSelection()
     }
 
     /** Same stroke objects in the same order (the view model publishes its own copy of the list). */
@@ -360,7 +573,6 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private val predictor = MotionEventPredictor.newInstance(this)
     private var predicted: MotionEvent? = null
     private var lastErase: FloatArray? = null
-    private val erasedPending = LinkedHashSet<String>()
     private var navigating = false
     private var lastPanX = 0f
     private var lastPanY = 0f
@@ -439,17 +651,21 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         viewport.resize(w.toFloat(), h.toFloat())
         syncMatrices()
+        applyPendingJump()
         requestRender()
     }
 
     private fun fitIfNeeded() {
-        if (!viewport.ready && width > 0) { viewport.resize(width.toFloat(), height.toFloat()); syncMatrices() }
+        if (!viewport.ready && width > 0) { viewport.resize(width.toFloat(), height.toFloat()); syncMatrices(); applyPendingJump() }
     }
 
+    /** The active page's transform: view = (page + its place in the column) × scale + (tx, ty). */
     private fun syncMatrices() {
-        pageToView.setScale(viewport.scale, viewport.scale)
-        pageToView.postTranslate(viewport.tx, viewport.ty)
+        val sc = viewport.scale
+        pageToView.setScale(sc, sc)
+        pageToView.postTranslate(viewport.tx + active.left * sc, viewport.ty + active.top * sc)
         pageToView.invert(viewToPage)
+        reportPages()
         if (reportViewport) listener?.onViewportChanged()
     }
 
@@ -587,6 +803,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         action = policy.classifyDown(kind, e.getTouchMajor(index), barrel, eraserSelected, e.pointerCount, e.eventTime)
         if (policy.stylusSeen) policy.penOnly = penOnlyPreference
         activePointerId = e.getPointerId(index)
+        if (action == GestureAction.DRAW || action == GestureAction.ERASE) routeToPage(e.getX(index), e.getY(index))
         when (action) {
             GestureAction.DRAW if textMode -> {
                 val p = toPage(e.getX(index), e.getY(index))
@@ -628,6 +845,25 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         requestRender()
     }
 
+    /**
+     * Pen-down: the page under the pen (or the nearer one across a gap) is the page this whole
+     * gesture works on, wherever the pen goes after. Ink may start on a page that's still
+     * loading (the view model queues it); erasing, lasso and text wait for its content.
+     */
+    private fun routeToPage(x: Float, y: Float) {
+        val slot = slotAt(x, y)
+        val inkOnly = action == GestureAction.DRAW && !lassoMode && !textMode
+        if (slot == null || (!slot.loaded && !inkOnly)) { action = GestureAction.IGNORE; return }
+        if (slot === active) return
+        // A selection belongs to one page: working on another page drops it.
+        if (selection.isNotEmpty()) {
+            val page = selectionPage ?: active.pageId
+            selection = emptySet()
+            listener?.onLassoSelected(page, emptySet())
+        }
+        activate(slot)
+    }
+
     private fun appendSamples(e: MotionEvent) {
         val b = builder ?: return
         val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: return
@@ -664,7 +900,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
                 val slop = 12f * resources.displayMetrics.density
                 if (!canceled && kotlin.math.abs(e.getX(idx) - textDownVX) < slop && kotlin.math.abs(e.getY(idx) - textDownVY) < slop) {
-                    listener?.onTextTap(textDownX, textDownY, textAt(textDownX, textDownY))
+                    listener?.onTextTap(active.pageId, textDownX, textDownY, textAt(textDownX, textDownY))
                 }
             }
             GestureAction.DRAW if selGesture != SelGesture.NONE -> finishSelectionGesture(canceled)
@@ -687,7 +923,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                         val art = artFor(stroke) // build its geometry now, before the next frame needs it
                         if (wetLive) {
                             // Keep it wet until the page surface shows it, so it never blinks out.
-                            wetHeld += WetHeld(stroke, art)
+                            wetHeld += WetHeld(active, stroke, art)
                             val tail = wetTail
                             wetLive = false
                             pushWet(full = false, extraClip = viewBounds(art, RectF()).apply { tail?.let { union(it) } })
@@ -695,20 +931,20 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                         }
                         pendingCommits += stroke
                         pendingSince[stroke.id] = SystemClock.uptimeMillis()
-                        listener?.onStrokeFinished(stroke)
+                        listener?.onStrokeFinished(active.pageId, stroke)
                     }
                 }
                 abortInk()
             }
             GestureAction.ERASE -> {
                 if (debugInput) perfEraseUpNanos = System.nanoTime()
-                if (!canceled && erasedPending.isNotEmpty()) listener?.onStrokesErased(erasedPending.toSet())
+                if (!canceled && erasedPending.isNotEmpty()) listener?.onStrokesErased(active.pageId, erasedPending.toSet())
                 else erasedPending.clear()
                 if (wiping) finishWipe(canceled)
                 else if (!canceled && partialPieces.isNotEmpty()) {
                     // Keep drawing the pieces until the edited page comes back through setPage.
                     partialCommitted = true
-                    listener?.onStrokesSplit(LinkedHashMap(partialPieces))
+                    listener?.onStrokesSplit(active.pageId, LinkedHashMap(partialPieces))
                 } else partialPieces.clear()
                 lastErase = null
                 hoverX = -1f // pen lifted: hide the eraser ring until the next hover event
@@ -718,14 +954,20 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         perfReport(when { navigating -> "pan"; action == GestureAction.DRAW -> "ink"; action == GestureAction.ERASE -> "erase"; else -> "other" })
         // Text tool: a quick finger tap places or edits text too (fingers otherwise only scroll).
         if (textMode && action == GestureAction.NAVIGATE && !canceled && !tapMultiTouch && isQuickTap(e)) {
-            val p = toPage(tapDownX, tapDownY)
-            listener?.onTextTap(p[0], p[1], textAt(p[0], p[1]))
+            slotAt(tapDownX, tapDownY)?.takeIf { it.loaded }?.let { slot ->
+                if (selection.isNotEmpty() && slot !== active) { selection = emptySet(); listener?.onLassoSelected(selectionPage ?: active.pageId, emptySet()) }
+                activate(slot)
+                val p = toPage(tapDownX, tapDownY)
+                listener?.onTextTap(slot.pageId, p[0], p[1], textAt(p[0], p[1]))
+            }
         } else if (navigating && !canceled) fling()
         velocity?.recycle(); velocity = null
         navigating = false
         sideButtonGesture = false
         action = GestureAction.IGNORE
         activePointerId = -1
+        pendingStack?.let { relayout(it) }
+        pruneSlots()
         requestRender()
     }
 
@@ -870,10 +1112,6 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
     private fun erasable(s: Stroke) = !eraseHighlighterOnly || s.tool == ToolType.HIGHLIGHTER
 
-    // Partial eraser: original stroke id → what remains of it so far in this gesture.
-    private val partialPieces = LinkedHashMap<String, List<Stroke>>()
-    private var partialCommitted = false
-
     /**
      * Fast path for the partial eraser: wipe pixels off the cached ink layer as the pen
      * moves (no per-sample geometry), then compute the exact stroke pieces once at pen-up.
@@ -881,8 +1119,6 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
      * up-to-date layer exists.
      */
     private var wiping = false
-    /** A wipe was committed; tiles already show it, so edits wait for the page's echo. */
-    private var wipeAwaitingEcho = false
     private val wipePath = ArrayList<Float>()
 
     private fun startWipeIfPossible() {
@@ -907,7 +1143,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         // (it took 100–300 ms on a 7,000-stroke page) from an immutable snapshot, then commit.
         wipeAwaitingEcho = true
         val base = strokes; val idx = index; val r = eraserRadiusPage()
-        val job = WipeJob(base)
+        val job = WipeJob(active, base)
         pendingWipe = job
         job.future = wipeExecutor.submit {
             val t0 = System.nanoTime()
@@ -923,14 +1159,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         }
     }
 
-    private class WipeJob(val base: List<Stroke>) {
+    private class WipeJob(val slot: PageSlot, val base: List<Stroke>) {
         @Volatile var pieces: Map<String, List<Stroke>> = emptyMap()
         @Volatile var prebuilt: StrokeIndex? = null
         var future: java.util.concurrent.Future<*>? = null
     }
     private var pendingWipe: WipeJob? = null
-    /** Index built in the background for the page an edit is about to produce. */
-    private var prebuiltIndex: StrokeIndex? = null
 
     /** Background: the pieces left of every stroke the eraser path crossed (one pass per stroke). */
     private fun wipePieces(base: List<Stroke>, idx: StrokeIndex, path: FloatArray, r: Float): Map<String, List<Stroke>> {
@@ -944,23 +1178,24 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         return out
     }
 
-    /** UI thread: commits a finished wipe (one undo step). Safe to call twice; the second does nothing. */
+    /** UI thread: commits a finished wipe (one undo step) on its page. Safe to call twice; the second does nothing. */
     private fun completeWipe(job: WipeJob) {
         if (pendingWipe !== job) return
         pendingWipe = null
         try { job.future?.get() } catch (e: Exception) { Log.w(TAG, "wipe failed", e) }
+        val slot = job.slot
         val pieces = job.pieces
         if (pieces.isEmpty()) {
             // Wiped only empty paper: the tiles still match the strokes.
-            wipeAwaitingEcho = false
-            tiles.keepWiped()
+            slot.wipeAwaitingEcho = false
+            slot.tiles.keepWiped()
             requestRender()
             return
         }
-        partialPieces.clear(); partialPieces.putAll(pieces)
-        partialCommitted = true
-        prebuiltIndex = job.prebuilt
-        listener?.onStrokesSplit(LinkedHashMap(pieces))
+        slot.partialPieces.clear(); slot.partialPieces.putAll(pieces)
+        slot.partialCommitted = true
+        slot.prebuiltIndex = job.prebuilt
+        listener?.onStrokesSplit(slot.pageId, LinkedHashMap(pieces))
     }
 
     /** A new gesture waits for the previous wipe's commit, so edits stay in order. */
@@ -1151,12 +1386,13 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                     elementAt(lassoPoints.getOrElse(0) { 0f }, lassoPoints.getOrElse(1) { 0f })?.let { ids += it }
                 }
                 lassoPoints.clear()
-                listener?.onLassoSelected(ids)
+                selectionPage = active.pageId
+                listener?.onLassoSelected(active.pageId, ids)
             }
             SelGesture.MOVE, SelGesture.RESIZE -> {
                 val t = selTransform
                 // Keep drawing the transform until the edited strokes come back through setPage.
-                if (!t.isIdentity && selection.isNotEmpty()) listener?.onSelectionTransformed(selection, t)
+                if (!t.isIdentity && selection.isNotEmpty()) listener?.onSelectionTransformed(active.pageId, selection, t)
                 else selTransform = SelectionTransform()
             }
             SelGesture.NONE -> Unit
@@ -1209,24 +1445,61 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         fitIfNeeded()
         // Never paint outside this view (e.g. over the toolbar when zoomed or scrolled).
         canvas.clipRect(0, 0, width, height)
-        val pl = viewport.tx; val pt = viewport.ty
-        val pr = pl + pageW * scale; val pb = pt + pageH * scale
-        // Desk only around the page: tiles are opaque, so each pixel is painted once.
+        val s = stack
+        if (s == null || s.count == 0 || !viewport.ready) { canvas.drawPaint(deskPaint); return }
+        budget.nextFrame()
+        val sc = scale; val tx = viewport.tx; val ty = viewport.ty
+        val vis = s.overlapping(-ty / sc, (height - ty) / sc)
+        // Desk only around the pages: tiles are opaque, so each pixel is painted once.
         canvas.save()
-        canvas.clipOutRect(pl, pt, pr, pb)
+        for (i in vis) canvas.clipOutRect(tx + s.left(i) * sc, ty + s.top(i) * sc, tx + (s.left(i) + s.pageWidth(i)) * sc, ty + s.bottom(i) * sc)
         canvas.drawPaint(deskPaint)
         canvas.restore()
-        val moving = !selTransform.isIdentity && selection.isNotEmpty()
-        val frozen = wiping || wipeAwaitingEcho
-        tiles.setContent(pageKey, index, excludedFromLayer(moving), paper, pageW, pageH, pdfPage, pdfBackground, texts, images, assets)
-        if (perfSkip?.contains("ink") != true) {
-            tiles.draw(canvas, scale, viewport.tx, viewport.ty, width.toFloat(), height.toFloat(), viewport.fitPageScale, frozen)
+        // Tiles render for the page in view first, then the other visible pages, then neighbours.
+        val cur = currentIndex(s)
+        val order = ArrayList<TileCache>(vis.count() + 2)
+        for (i in vis) {
+            val slot = slots[s.ids[i]]
+            val pl = tx + s.left(i) * sc; val pt = ty + s.top(i) * sc
+            if (slot == null || !slot.loaded) drawPlaceholder(canvas, s, i, pl, pt)
+            else {
+                val moving = slot === active && !selTransform.isIdentity && selection.isNotEmpty()
+                val frozen = (slot === active && wiping) || slot.wipeAwaitingEcho
+                slot.tiles.preview = previewOf(slot.pageId)
+                slot.tiles.setContent(slot.pageId, slot.strokeIndex, excludedFromLayer(slot, moving), slot.paper, slot.width, slot.height, slot.pdf, slot.pdfBitmap, slot.texts, slot.images, assets)
+                if (perfSkip?.contains("ink") != true) {
+                    slot.tiles.draw(canvas, sc, pl, pt, width.toFloat(), height.toFloat(), baseScale(slot), frozen)
+                }
+                if (i == cur) order.add(0, slot.tiles) else order += slot.tiles
+            }
+            if (slot != null) drawOverlays(canvas, slot, pl, pt)
         }
+        for (i in window) if (i !in vis) slots[s.ids[i]]?.takeIf { it.loaded }?.let { slot ->
+            slot.tiles.setContent(slot.pageId, slot.strokeIndex, excludedFromLayer(slot, false), slot.paper, slot.width, slot.height, slot.pdf, slot.pdfBitmap, slot.texts, slot.images, assets)
+            slot.tiles.preview = previewOf(slot.pageId)
+            slot.tiles.prefetch(sc, baseScale(slot))
+            order += slot.tiles
+        }
+        budget.order = order
+        budget.trim()
+        drawCursor(canvas)
+    }
+
+    /** Scale at which a whole page is visible: its tiles' base level. */
+    private fun baseScale(slot: PageSlot) = if (height > 0) minOf(width / slot.width, height / slot.height) else viewport.fitPageScale
+
+    /** Ink not yet in a page's tiles, in its page units and clipped to it; the live stroke on the active page. */
+    private fun drawOverlays(canvas: Canvas, slot: PageSlot, pl: Float, pt: Float) {
+        val isActive = slot === active
+        val moving = isActive && !selTransform.isIdentity && selection.isNotEmpty()
+        val live = isActive && !wetLive && builder != null
+        if (slot.partialPieces.isEmpty() && slot.pendingCommits.isEmpty() && !live && !(isActive && (moving || selection.isNotEmpty() || selGesture != SelGesture.NONE))) return
         canvas.save()
-        canvas.concat(pageToView)
-        canvas.clipRect(0f, 0f, pageW, pageH)
+        canvas.translate(pl, pt); canvas.scale(scale, scale)
+        canvas.clipRect(0f, 0f, slot.width, slot.height)
         // Wiped tiles already show what's left; otherwise draw the remaining pieces.
-        if (!frozen) for (pieces in partialPieces.values) for (p in pieces) renderer.drawStroke(canvas, artFor(p))
+        val frozen = (isActive && wiping) || slot.wipeAwaitingEcho
+        if (!frozen) for (pieces in slot.partialPieces.values) for (p in pieces) renderer.drawStroke(canvas, artFor(p))
         if (moving) {
             canvas.save()
             canvas.concat(transformMatrix(selTransform))
@@ -1234,37 +1507,45 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             if (snap != null && snap.selection === selection && snap.strokes === strokes) {
                 canvas.drawBitmap(snap.bitmap, null, snap.dst, snapshotPaint)
             } else {
-                for (s in strokes) if (s.id in selection) renderer.drawStroke(canvas, artFor(s))
+                for (st in strokes) if (st.id in selection) renderer.drawStroke(canvas, artFor(st))
                 drawMovingElements(canvas)
             }
             canvas.restore()
         }
-        drawSelectionOverlay(canvas)
-        for (s in pendingCommits) renderer.drawStroke(canvas, artFor(s))
-        if (!wetLive) builder?.let { drawLive(canvas, it) }
+        if (isActive) drawSelectionOverlay(canvas)
+        for (st in slot.pendingCommits) renderer.drawStroke(canvas, artFor(st))
+        if (live) builder?.let { drawLive(canvas, it) }
         canvas.restore()
-        drawCursor(canvas)
+    }
+
+    /** A page whose content hasn't arrived: its paper, and its thumbnail when one is cached. */
+    private fun drawPlaceholder(canvas: Canvas, s: PageStack, i: Int, pl: Float, pt: Float) {
+        val w = s.pageWidth(i); val h = s.pageHeight(i)
+        canvas.save()
+        canvas.translate(pl, pt); canvas.scale(scale, scale)
+        canvas.clipRect(0f, 0f, w, h)
+        renderer.drawPaper(canvas, paperOf(s.ids[i]), w, h)
+        previewOf(s.ids[i])?.let { renderer.drawPdfBackground(canvas, it, w, h) }
+        canvas.restore()
     }
 
     // ------------------------------------------------------------ page tiles
 
-    private val tiles = TileCache(onTilesChanged = { requestRender() })
-    private var lastExcluded: Set<String> = emptySet()
-
     /**
-     * Strokes deliberately hidden from the tiles (being erased or moved). The same set
-     * instance is returned while its contents don't change, so tiles can compare cheaply.
+     * Strokes deliberately hidden from a page's tiles (being erased or moved, or the text box
+     * being typed). The same set instance is returned while its contents don't change, so
+     * tiles can compare cheaply.
      */
-    private fun excludedFromLayer(moving: Boolean): Set<String> {
+    private fun excludedFromLayer(slot: PageSlot, moving: Boolean): Set<String> {
         val e = when {
-            erasedPending.isEmpty() && partialPieces.isEmpty() && !moving && hiddenIds.isEmpty() -> emptySet()
+            slot.erasedPending.isEmpty() && slot.partialPieces.isEmpty() && !moving && hiddenIds.isEmpty() -> emptySet()
             else -> buildSet {
-                addAll(erasedPending); addAll(partialPieces.keys); addAll(hiddenIds)
+                addAll(slot.erasedPending); addAll(slot.partialPieces.keys); addAll(hiddenIds)
                 if (moving) addAll(selection)
             }
         }
-        if (e == lastExcluded) return lastExcluded
-        lastExcluded = e
+        if (e == slot.lastExcluded) return slot.lastExcluded
+        slot.lastExcluded = e
         return e
     }
 
@@ -1348,7 +1629,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     }
 
     override fun onDetachedFromWindow() {
-        tiles.release()
+        for (slot in slots.values) slot.release()
+        slots.clear()
+        shown = emptyMap() // re-attached: the next setDocument fills the slots again
+        active = noPage
         if (attached?.get() === this) attached = null
         super.onDetachedFromWindow()
     }

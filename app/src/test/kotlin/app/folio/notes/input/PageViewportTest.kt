@@ -99,4 +99,53 @@ class PageViewportTest {
         assertTrue(l >= -0.01f && t >= -0.01f && r <= 1200.01f && b <= 1800.01f, "entire page visible")
         assertEquals(1200f - r, l, 0.01f); assertEquals(1800f - b, t, 0.01f)
     }
+
+    // ---- a stack of pages (continuous scrolling) ----
+
+    private fun stacked(pages: Int, w: Float, h: Float) = PageViewport().apply {
+        resize(w, h)
+        val s = PageStack(List(pages) { "p$it" }, FloatArray(pages) { 1000f }, FloatArray(pages) { 1414f })
+        setContent(s.width, s.height, s.pageHeight(0), s.lastTop)
+    }
+
+    @Test fun stackScrollsUntilTheLastPageReachesTheTop() {
+        // A phone in portrait: one page at fit width is shorter than the view.
+        val v = stacked(3, 1080f, 1900f)
+        assertEquals(1.08f, v.scale, 1e-4f)
+        v.panBy(0f, -1e7f)
+        val lastTop = 2 * (1414f + PageStack.GAP)
+        assertEquals(0f, v.toView(0f, lastTop).second, 0.01f, "the last page can be read from the top")
+        v.panBy(0f, 1e7f)
+        assertEquals(0f, v.ty)
+    }
+
+    @Test fun tallPagesStillStopAtTheDocumentEndWhenThatIsFurther() {
+        val v = stacked(2, 2000f, 1100f) // landscape: a page is taller than the view
+        v.panBy(0f, -1e7f)
+        val end = 2 * 1414f + PageStack.GAP
+        assertEquals(1100f, v.toView(0f, end).second, 0.01f, "last page's bottom meets the view's bottom")
+    }
+
+    @Test fun settingContentKeepsZoomAndPosition() {
+        val v = stacked(2, 2000f, 1100f)
+        v.zoomBy(1.5f, 1000f, 500f)
+        v.panBy(0f, -1200f)
+        val scale = v.scale; val ty = v.ty
+        v.setContent(1000f, 3 * 1414f + 2 * PageStack.GAP, 1414f, 2 * (1414f + PageStack.GAP))
+        assertEquals(scale, v.scale); assertEquals(ty, v.ty)
+    }
+
+    @Test fun anchorPutsAContentLineAtAViewLine() {
+        val v = stacked(4, 2000f, 1100f)
+        v.anchor(1414f + PageStack.GAP, 0f)
+        assertEquals(0f, v.toView(0f, 1414f + PageStack.GAP).second, 0.01f)
+        v.anchor(0f, 500f)
+        assertEquals(0f, v.ty, "clamped at the top")
+    }
+
+    @Test fun zoomOutLimitComesFromOnePageNotTheWholeStack() {
+        val v = stacked(10, 2000f, 1100f)
+        repeat(20) { v.zoomBy(0.5f, 1000f, 550f) }
+        assertEquals((1100f / 1414f) * PageViewport.MIN_OF_FIT_PAGE, v.scale, 1e-4f)
+    }
 }

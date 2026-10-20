@@ -17,7 +17,11 @@ import androidx.graphics.lowlatency.CanvasFrontBufferedRenderer
  * What the wet-ink layer shows: strokes in page units, the page→view transform, and the
  * view-pixel area to repaint ([clip] null = clear and repaint everything).
  */
-internal class WetFrame(val pageToView: FloatArray, val arts: List<StrokeArt>, val clip: RectF?, val inputNanos: Long)
+internal class WetFrame(
+    val pageToView: FloatArray, val arts: List<StrokeArt>, val clip: RectF?, val inputNanos: Long,
+    /** The page's size: ink is clipped to it, as on the page surface (a stroke stays on its page). */
+    val pageW: Float, val pageH: Float,
+)
 
 /**
  * Low-latency "wet ink": the stroke being written is drawn straight into a front buffer
@@ -90,6 +94,7 @@ internal class WetInkLayer(context: Context) : SurfaceView(context) {
             canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
             m.setValues(param.pageToView)
             canvas.concat(m)
+            canvas.clipRect(0f, 0f, param.pageW, param.pageH)
             for (art in param.arts) pageRenderer.drawStroke(canvas, art)
             canvas.restore()
             lastInputNanos = param.inputNanos
