@@ -88,3 +88,12 @@ MotionEvent → InputPolicy (draw/erase/navigate/ignore)
 - **When:** ~0.25 s after any local change; Drive's change feed every 1 s while a notebook is open; a full check every 30 s on screen; WorkManager when the app leaves the screen and every 15 min in the background (network required).
 - **Speed (measured 2026-10-19):** Drive answers a listing in ~0.6 s, saves a small file in ~2 s and serves one in 1–1.5 s, so device-to-device takes ~5–10 s. Small uploads are one multipart request, connections are kept alive, tokens are reused for 40 min. A same-network direct link was discussed for ~1 s and deferred by the user.
 - **Rejected:** a per-edit op-log. It would need a server or a much more complex Drive layout; per-page files fit Drive and our storage, and conflicts are per page.
+
+### ADR-9: Page navigator on the existing model (2026-10-20)
+- **No parallel document model.** Page order stays `NotebookMeta.pageIds`; content stays one `Page` file per page, edited through `PageEditor`; the open page stays `EditorUiState.pageIndex`. The sidebar only reads these.
+- **Page operations are repository calls**: `insertPage` (new, duplicated and restored pages), `deletePage` (unlist, then delete the file; a notebook keeps at least one page) and `movePage`. Each changes `library.json` once under the store lock, so sync sees ordinary `meta.json`/page-file changes. The pure parts (`PageOps`: blank-like, duplicate with fresh ids, erase as one `PageEdit`, move) live in `core:model`.
+- **Undo** for structure changes is a snackbar action. Delete keeps the deleted page and its `PageEditor` in memory and re-inserts them. Erase is a `PageEdit`, so the top-bar Undo also covers it. A notebook-wide undo stack was rejected: it would mix two histories (page and notebook) behind one button.
+- **Thumbnails** are drawn by `PageRenderer` + `PageAssets` (the same code as the canvas and exports) on one low-priority thread. They're cached in memory by content version and on disk by the page file's stamp (`pageStamp`). The editor bumps a page's version only when that page changes, debounced 1 s while writing.
+- **The editor stays one page at a time** (the user's choice). Continuous vertical scrolling is a separate piece of work.
+- **Single-page export** reuses `NotebookPdfExporter` (now taking a page list) for PDF, and `PageRenderer` for PNG/JPEG at 72, 150 or 300 dpi. Output goes only to a file the user picks (`ACTION_CREATE_DOCUMENT`) or to a private share file (`FileProvider`, `cache/exports` only).
+

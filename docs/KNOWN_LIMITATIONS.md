@@ -27,3 +27,13 @@
 13. **Text boxes:** there's no rich text (bold, mixed sizes), no text rotation, and the box doesn't scroll into view above the keyboard yet.
 14. **Pictures:** removing a picture keeps its file in the notebook, so undo can bring it back. Files aren't cleaned up yet.
 15. **No Mac app yet.** The core modules are plain Kotlin, ready for one.
+16. **Page navigator (2026-10-20):**
+   - The editor still shows one page at a time. The sidebar follows the open page; there's no continuous vertical scroll between pages.
+   - No copy/paste of pages between notebooks (it would have to copy PDF attachments), and no multi-select. Duplicate covers copying within a notebook.
+   - No bookmarks, page rotation, hidden pages, outline or per-page template change. Each needs a persisted field and a schema migration.
+   - Undo for delete and move lasts while the snackbar is shown (about 10 s). Erase is also in the page's own undo history.
+   - Deleting a page keeps its PDF or picture attachments in the notebook (as with pictures, item 14).
+   - Thumbnail PNGs in `cache/page-thumbs` aren't pruned when a notebook is deleted. They're cache, so Android may clear them.
+   - Single-page export offers PDF, PNG and JPEG only. Word, PowerPoint and text need a text layer Folio doesn't have.
+   - Sync: a page deleted here can come back if another device edits the same notebook's details before syncing (notebook details merge pages as a union, ADR-7).
+

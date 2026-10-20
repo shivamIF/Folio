@@ -91,6 +91,11 @@ data class ToolState(
 class ToolPrefs(context: Context) {
     private val sp = context.getSharedPreferences("tools", Context.MODE_PRIVATE)
 
+    /** Whether the page sidebar is shown in the editor (closed until the user opens it). */
+    var sidebarOpen: Boolean
+        get() = sp.getBoolean("sidebarOpen", false)
+        set(value) { sp.edit().putBoolean("sidebarOpen", value).apply() }
+
     fun load(): ToolState {
         val d = ToolState()
         val tool = runCatching { ToolType.valueOf(sp.getString("tool", d.tool.name)!!) }.getOrDefault(d.tool)

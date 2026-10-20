@@ -347,7 +347,7 @@ def main():
 
     def export_pdf():
         d.sh("shell", "content", "delete", "--uri", "content://media/external/file", "--where", shlex.quote("_display_name='folio-test.pdf' AND relative_path='Download/Folio/'"), check=False)
-        d.tap("Export as PDF")
+        d.tap("Export notebook as PDF")
         d.find("PDF exported", timeout=30)
         d.tap("OK")
         local = os.path.join(a.out, "exported.pdf")

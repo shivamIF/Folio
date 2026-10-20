@@ -1,5 +1,18 @@
 # Test Results (2026-10-19)
 
+## Page navigator (2026-10-20)
+- **Unit:** `./gradlew test`, 212 tests, 0 failures. New: `PageOpsTest` ×6, `NotebookStoreTest` +6 (insert/delete/move/stamp), `PageExportSpecTest` ×5. `BrushEngineTest.buildingIsFastEnoughToRedoEveryFrame` is a wall-clock check: it failed once in a fully parallel build and passed 3/3 on its own.
+- **Galaxy Tab S6 Lite** (`scripts/e2e_page_navigator.py`, landscape, the user's data untouched): 13 checks passed:
+  - notebook with 3 pages; sidebar opens and the canvas makes room; thumbnails show each page's ink; tap opens a page;
+  - writing refreshes only that page's thumbnail;
+  - duplicate; move + Undo; add before; Erase hidden on a blank page; erase + Undo; delete (Cancel, then Delete, page file removed) + Undo;
+  - long-press drag reorders.
+
+  The share sheet then opened with the exported page. The user stopped testing there, so the remaining checks were not re-run on the final build: export pixel sizes, PDF save, cancel, hide/show, and restart.
+- **Defects found on the Tab and fixed:**
+  1. After the sidebar opened or closed, the page surface kept its last frame at the old size, stretched, leaving a black strip. Fix: `InkCanvasView` requests a frame on resize and draws one in `surfaceRedrawNeeded`. Verified: 5 open/close cycles, buffer = view size each time.
+  2. Long-press drag did nothing: the thumbnail's long-click consumed the gesture. Fix: plain click on the thumbnail; the list owns long-press.
+
 ## Unit tests: `./gradlew test`. 170 tests, 0 failures (brush work: schema 3 → 4 upgrade and new tool round-trip ×2, Brush Lab input ×5; shape refinement: closing and level lines ×2, regularisation ×6; sync work since: open-notebook sends/live receive ×3, store live hand-off ×1, page merge ×6, Drive multipart/resumable ×1 and change feed ×1; sync before that added 17: engine ×9, store-to-store ×6, fake-Drive HTTP ×2; step 5 added 12; earlier: 115).
 | Module | Suites | Tests | Covers |
 |---|---|---|---|

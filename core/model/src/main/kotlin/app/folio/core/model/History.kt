@@ -166,6 +166,8 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
     val currentImages: List<PageImage> get() = content.images
     val canUndo get() = undoStack.isNotEmpty()
     val canRedo get() = redoStack.isNotEmpty()
+    /** The edit [undo] would revert next, or null. */
+    val lastEdit: PageEdit? get() = undoStack.lastOrNull()
 
     fun perform(edit: PageEdit) {
         edit.apply(content)

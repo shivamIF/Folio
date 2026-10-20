@@ -98,6 +98,87 @@ class NotebookStoreTest {
         assertEquals(PaperTemplate.DOTTED, store.loadPage(nb.id, m1.pageIds[1]).paper)
     }
 
+    @Test fun insertPagePutsAGivenPageAtAnIndexAndSurvivesRestart() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("A", null, Cover(), PaperTemplate.RULED)
+        val first = nb.pageIds.single()
+        val before = Page(width = 700f, height = 500f, paper = PaperTemplate.GRID, strokes = listOf(stroke("s1")))
+        val m1 = store.insertPage(nb.id, 0, before)
+        assertEquals(listOf(before.id, first), m1.pageIds)
+        val after = Page(paper = PaperTemplate.DOTTED)
+        val m2 = store.insertPage(nb.id, 99, after) // clamped to the end
+        assertEquals(listOf(before.id, first, after.id), m2.pageIds)
+
+        val reopened = FileNotebookStore(root)
+        assertEquals(m2.pageIds, reopened.library().notebooks.single().pageIds)
+        val back = reopened.loadPage(nb.id, before.id)
+        assertEquals(700f, back.width)
+        assertEquals(PaperTemplate.GRID, back.paper)
+        assertEquals(listOf("s1"), back.strokes.map { it.id })
+    }
+
+    @Test fun insertPageRefusesAnIdAlreadyListed() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("A", null, Cover(), PaperTemplate.RULED)
+        assertFailsWith<IllegalArgumentException> { store.insertPage(nb.id, 0, Page(id = nb.pageIds.single())) }
+        assertEquals(1, store.library().notebooks.single().pageIds.size)
+    }
+
+    @Test fun deletePageUnlistsAndRemovesTheFileButKeepsTheLastPage() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("A", null, Cover(), PaperTemplate.RULED)
+        val m = store.addPage(nb.id, 0)
+        val doomed = m.pageIds[1]
+        store.savePage(nb.id, Page(id = doomed, strokes = listOf(stroke("x"))))
+        val after = store.deletePage(nb.id, doomed)
+        assertEquals(listOf(nb.pageIds.single()), after.pageIds)
+        assertTrue(File(root, "notebooks/${nb.id}").listFiles()!!.none { it.name.startsWith(doomed) }, "page file and backup are gone")
+        assertEquals(after.pageIds, FileNotebookStore(root).library().notebooks.single().pageIds)
+        // A notebook needs at least one page.
+        assertFailsWith<IllegalArgumentException> { store.deletePage(nb.id, after.pageIds.single()) }
+        assertFailsWith<IllegalArgumentException> { store.deletePage(nb.id, "no-such-page") }
+    }
+
+    @Test fun deletedPageComesBackWithItsContentWhenReinserted() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("A", null, Cover(), PaperTemplate.RULED)
+        val ids = store.addPage(store.addPage(nb.id, 0).id, 1).pageIds
+        val page = store.loadPage(nb.id, ids[1]).copy(strokes = listOf(stroke("keep")))
+        store.savePage(nb.id, page)
+        store.deletePage(nb.id, page.id)
+        val restored = store.insertPage(nb.id, 1, page) // undo
+        assertEquals(ids, restored.pageIds)
+        assertEquals(listOf("keep"), store.loadPage(nb.id, page.id).strokes.map { it.id })
+    }
+
+    @Test fun movePageReordersOnlyTheIndex() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("A", null, Cover(), PaperTemplate.RULED)
+        val ids = store.addPage(store.addPage(nb.id, 0).id, 1).pageIds // three pages
+        store.savePage(nb.id, Page(id = ids[0], strokes = listOf(stroke("first"))))
+        val moved = store.movePage(nb.id, ids[0], 2)
+        assertEquals(listOf(ids[1], ids[2], ids[0]), moved.pageIds)
+        assertEquals(listOf("first"), store.loadPage(nb.id, ids[0]).strokes.map { it.id })
+        assertEquals(listOf(ids[0], ids[1], ids[2]), store.movePage(nb.id, ids[0], -5).pageIds) // clamped
+        val same = store.movePage(nb.id, ids[1], 1)
+        assertEquals(listOf(ids[0], ids[1], ids[2]), same.pageIds)
+        assertFailsWith<IllegalArgumentException> { store.movePage(nb.id, "no-such-page", 0) }
+    }
+
+    @Test fun pageStampChangesWhenThePageIsSaved() {
+        var now = 1_000L
+        val store = FileNotebookStore(root) { now }
+        val nb = store.createNotebook("A", null, Cover(), PaperTemplate.RULED)
+        val pid = nb.pageIds.single()
+        val s1 = assertNotNull(store.pageStamp(nb.id, pid))
+        val f = File(root, "notebooks/${nb.id}/$pid.page.json")
+        store.savePage(nb.id, Page(id = pid, strokes = listOf(stroke("a"), stroke("b"))))
+        f.setLastModified(f.lastModified() + 5_000) // filesystems with coarse timestamps
+        now += 1
+        assertTrue(store.pageStamp(nb.id, pid) != s1)
+        assertNull(store.pageStamp(nb.id, "missing-page"))
+    }
+
     @Test fun deleteNotebookRemovesFiles() {
         val store = FileNotebookStore(root)
         val nb = store.createNotebook("A", null, Cover(), PaperTemplate.BLANK)
