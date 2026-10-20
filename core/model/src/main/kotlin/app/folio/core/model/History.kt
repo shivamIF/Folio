@@ -168,6 +168,8 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
     val canRedo get() = redoStack.isNotEmpty()
     /** The edit [undo] would revert next, or null. */
     val lastEdit: PageEdit? get() = undoStack.lastOrNull()
+    /** The edit [redo] would apply next, or null. */
+    val nextRedo: PageEdit? get() = redoStack.lastOrNull()
 
     fun perform(edit: PageEdit) {
         edit.apply(content)
@@ -194,4 +196,90 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
     }
 
     fun snapshot(): Page = base.copy(strokes = strokes.toList(), texts = content.texts.toList(), images = content.images.toList())
+}
+
+/**
+ * The order of content edits across a notebook's pages, so one Undo/Redo button reverts the
+ * notebook's latest edit on whichever page it was made (continuous scrolling, ADR-10).
+ *
+ * Each page's [PageEditor] still owns its edits and its bounded undo/redo stacks; this only
+ * remembers (page, edit) pairs in the order they happened. An entry is used only while it is
+ * still that page's next edit to undo ([PageEditor.lastEdit]) or redo ([PageEditor.nextRedo]).
+ * Otherwise (the page was reloaded from another device, dropped from memory, or its own
+ * history trimmed) it is skipped. Page structure changes (add, delete, move) aren't recorded.
+ */
+class NotebookHistory(private val maxEntries: Int = 2_000) {
+    private class Entry(val pageId: String, val edit: PageEdit)
+    private val undos = ArrayDeque<Entry>()
+    private val redos = ArrayDeque<Entry>()
+
+    /**
+     * [edit] was made on [pageId] (performed now, or queued until the page loads). A new edit
+     * clears Redo everywhere, as in a single history.
+     */
+    fun record(pageId: String, edit: PageEdit) {
+        undos.addLast(Entry(pageId, edit))
+        if (undos.size > maxEntries) undos.removeFirst()
+        redos.clear()
+    }
+
+    /**
+     * Reverts the latest edit still valid; returns its page id, or null if there was none.
+     * Stops without dropping anything while the latest edit's page is [waiting] (still loading).
+     */
+    fun undo(editorOf: (String) -> PageEditor?, waiting: (String) -> Boolean = { false }): String? {
+        val e = topUndo(editorOf, waiting) ?: return null
+        if (waiting(e.pageId)) return null
+        undos.removeLast()
+        editorOf(e.pageId)!!.undo()
+        redos.addLast(e)
+        return e.pageId
+    }
+
+    /** Re-applies the latest undone edit still valid; returns its page id, or null. */
+    fun redo(editorOf: (String) -> PageEditor?): String? {
+        while (true) {
+            val e = redos.removeLastOrNull() ?: return null
+            val ed = editorOf(e.pageId)
+            if (ed != null && ed.nextRedo === e.edit && ed.redo()) {
+                undos.addLast(e)
+                return e.pageId
+            }
+        }
+    }
+
+    fun canUndo(editorOf: (String) -> PageEditor?, waiting: (String) -> Boolean = { false }) = topUndo(editorOf, waiting) != null
+
+    fun canRedo(editorOf: (String) -> PageEditor?): Boolean {
+        while (true) {
+            val e = redos.lastOrNull() ?: return false
+            if (editorOf(e.pageId)?.nextRedo === e.edit) return true
+            redos.removeLast()
+        }
+    }
+
+    /**
+     * Undoes [edit] on [pageId] if it is still that page's latest edit (a snackbar's Undo).
+     * When it's also the notebook's latest edit this is a normal [undo]; otherwise it's
+     * reverted on its page and forgotten, without a Redo.
+     */
+    fun undoEdit(pageId: String, edit: PageEdit, editorOf: (String) -> PageEditor?): Boolean {
+        val ed = editorOf(pageId) ?: return false
+        if (ed.lastEdit !== edit) return false
+        val top = topUndo(editorOf) { false }
+        if (top != null && top.edit === edit) return undo(editorOf) == pageId
+        if (!ed.undo()) return false
+        val i = undos.indexOfLast { it.edit === edit }
+        if (i >= 0) undos.removeAt(i)
+        return true
+    }
+
+    /** Drops stale entries from the top; the latest usable (or waiting) entry, or null. */
+    private fun topUndo(editorOf: (String) -> PageEditor?, waiting: (String) -> Boolean): Entry? {
+        while (true) {
+            val e = undos.lastOrNull() ?: return null
+            if (waiting(e.pageId) || editorOf(e.pageId)?.lastEdit === e.edit) return e
+            undos.removeLast()
+        }
+    }
 }

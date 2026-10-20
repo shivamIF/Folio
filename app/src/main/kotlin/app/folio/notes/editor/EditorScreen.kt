@@ -195,7 +195,7 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
             var viewportTick by remember { mutableStateOf(0) }
             val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
                 androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
-            ) { uri -> val c = canvasRef; if (uri != null && c != null) vm.insertImage(uri, c.visiblePageArea()) }
+            ) { uri -> val area = canvasRef?.visiblePageArea(); if (uri != null && area != null) vm.insertImage(uri, area.first, area.second) }
             ToolBar(
                 state.tools, vm::updateTools, onColorWithSelection = if (state.selection.isNotEmpty()) vm::recolorSelection else null,
                 onInsertImage = {
@@ -217,39 +217,44 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                 )
             }
             Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
-                val page = state.page
-                if (page != null) {
+                val stack = state.stack
+                if (stack != null) {
                     val tools = state.tools
                     AndroidView(
                         factory = { ctx ->
                             InkCanvasHost(ctx, InkCanvasView(ctx).apply {
                                 listener = object : InkCanvasView.Listener {
-                                    override fun onStrokeFinished(stroke: Stroke) = vm.onStrokeFinished(stroke)
-                                    override fun onStrokesErased(ids: Set<String>) = vm.onStrokesErased(ids)
-                                    override fun onLassoSelected(ids: Set<String>) = vm.onLassoSelected(ids)
-                                    override fun onSelectionTransformed(ids: Set<String>, transform: SelectionTransform) =
-                                        vm.transformSelection(ids, transform)
-                                    override fun onStrokesSplit(pieces: Map<String, List<Stroke>>) = vm.onStrokesSplit(pieces)
-                                    override fun onTextTap(x: Float, y: Float, textId: String?) = vm.onTextTap(x, y, textId)
+                                    override fun onStrokeFinished(pageId: String, stroke: Stroke) = vm.onStrokeFinished(pageId, stroke)
+                                    override fun onStrokesErased(pageId: String, ids: Set<String>) = vm.onStrokesErased(pageId, ids)
+                                    override fun onLassoSelected(pageId: String, ids: Set<String>) = vm.onLassoSelected(pageId, ids)
+                                    override fun onSelectionTransformed(pageId: String, ids: Set<String>, transform: SelectionTransform) =
+                                        vm.transformSelection(pageId, ids, transform)
+                                    override fun onStrokesSplit(pageId: String, pieces: Map<String, List<Stroke>>) = vm.onStrokesSplit(pageId, pieces)
+                                    override fun onTextTap(pageId: String, x: Float, y: Float, textId: String?) = vm.onTextTap(pageId, x, y, textId)
                                     override fun onViewportChanged() { viewportTick++ }
+                                    override fun onPagesInView(visible: List<String>, current: String) = vm.onPagesInView(visible, current)
                                 }
+                                paperOf = vm::paperOf
+                                previewOf = { id -> vm.thumbnails.peekAny(id)?.bitmap }
+                                state.meta?.pageIds?.getOrNull(state.pageIndex)?.let { restoreTo(it, state.jump?.seq) }
                             }.also { canvasRef = it })
                         },
                         update = { host ->
                             val v = host.ink
                             v.tool = tools.tool; v.color = tools.color; v.penWidth = tools.width
                             v.stabilization = tools.stabilization; v.eraserSelected = tools.eraser
-                            v.pdfBackground = state.background
                             v.eraserPartial = tools.eraserPartial; v.eraserSizeDp = tools.eraserSizeDp
                             v.eraseHighlighterOnly = tools.eraseHighlighterOnly
                             v.textMode = tools.text
                             v.hiddenIds = state.editingText?.let { setOf(it.box.id) } ?: emptySet()
                             v.reportViewport = state.editingText != null
-                            v.lassoMode = tools.lasso; v.lassoRectangle = tools.lassoShape == LassoShape.RECTANGLE; v.selection = state.selection
+                            v.lassoMode = tools.lasso; v.lassoRectangle = tools.lassoShape == LassoShape.RECTANGLE
                             v.pressureCurve = PressureCurve.fromSensitivity(tools.pressureSensitivity)
                             v.penOnlyPreference = tools.penOnly
                             v.assets = vm.assets
-                            v.setPage(page.id, state.strokes, page.paper, page.width, page.height, state.texts, state.images, page.pdf)
+                            v.setDocument(stack, state.pages)
+                            v.setSelection(state.selectionPage, state.selection)
+                            state.jump?.let { v.jumpTo(it.seq, it.pageId) }
                         },
                         modifier = Modifier.fillMaxSize().clipToBounds().testTag("canvas"),
                     )
@@ -482,6 +487,7 @@ private fun TextBoxField(edit: TextEdit, canvas: InkCanvasView, onChange: (Strin
     val density = androidx.compose.ui.platform.LocalDensity.current
     val b = edit.box
     val scale = canvas.pageScale
+    val (ox, oy) = canvas.pageOrigin(edit.pageId) ?: return
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     androidx.compose.foundation.text.BasicTextField(
         value = b.text,
@@ -492,7 +498,7 @@ private fun TextBoxField(edit: TextEdit, canvas: InkCanvasView, onChange: (Strin
         ),
         cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
         modifier = Modifier
-            .offset { androidx.compose.ui.unit.IntOffset((canvas.pageTx + b.x * scale).toInt(), (canvas.pageTy + b.y * scale).toInt()) }
+            .offset { androidx.compose.ui.unit.IntOffset((ox + b.x * scale).toInt(), (oy + b.y * scale).toInt()) }
             .width(with(density) { (b.width * scale).toDp() })
             .background(Color(0x143D5A80))
             .focusRequester(focus)

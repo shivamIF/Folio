@@ -9,6 +9,7 @@ import app.folio.core.model.FolderIcon
 import app.folio.core.model.LibraryIndex
 import app.folio.core.model.NotebookMeta
 import app.folio.core.model.Page
+import app.folio.core.model.PageHeader
 import app.folio.core.model.PaperTemplate
 import java.io.File
 
@@ -68,6 +69,13 @@ interface DocumentRepository {
      * for caches of rendered pages.
      */
     fun pageStamp(notebookId: String, pageId: String): String?
+
+    /**
+     * The page's size and paper, read from the start of its file without decoding the strokes
+     * (continuous scrolling lays the pages out with these). Null if there's no file or the
+     * header can't be read; the notebook's default size then stands in until the page loads.
+     */
+    fun pageHeader(notebookId: String, pageId: String): PageHeader?
 
     /**
      * Copies an incoming file into a private staging area, enforcing [maxBytes]
@@ -483,9 +491,28 @@ class FileNotebookStore(
      * Loads a page, falling back to the backup copy if the main file is corrupt.
      * A page that is listed but missing on disk comes back blank rather than crashing the editor.
      */
-    override fun loadPage(notebookId: String, pageId: String): Page = synchronized(lock) {
+    override fun loadPage(notebookId: String, pageId: String): Page {
+        // The file is read under the lock (a consistent copy) but decoded outside it: a dense
+        // page takes seconds to decode, and saves (or sync) mustn't wait for a page being loaded
+        // ahead of the scroll position.
         val f = pageFile(notebookId, pageId)
-        readWithFallback(f, DocumentCodec::decodePage) ?: Page(id = pageId)
+        val main = synchronized(lock) { if (!f.exists()) return Page(id = pageId); f.readMain() }
+        if (main != null) {
+            try { return DocumentCodec.decodePage(main.decodeToString()) } catch (e: CorruptDocumentException) {
+                lastRecovery = "${f.file.name} was damaged; restored the previous version"
+            }
+        }
+        val bak = synchronized(lock) { f.readBackup() } ?: run {
+            if (main != null) throw CorruptDocumentException("${f.file.name} is damaged and has no backup")
+            return Page(id = pageId)
+        }
+        return DocumentCodec.decodePage(bak.decodeToString())
+    }
+
+    override fun pageHeader(notebookId: String, pageId: String): PageHeader? {
+        val f = pageFile(notebookId, pageId)
+        val head = synchronized(lock) { f.readPrefix(PAGE_HEADER_BYTES) } ?: return null
+        return DocumentCodec.pageHeaderOf(head.decodeToString())
     }
 
     override fun savePage(notebookId: String, page: Page) = synchronized(lock) {
@@ -540,5 +567,7 @@ class FileNotebookStore(
     internal companion object {
         /** Ids become file names; restrict them so a crafted index can't escape [root]. */
         val SAFE_ID = Regex("[A-Za-z0-9-]{1,64}")
+        /** Enough of a page file for its size and paper (they come before the strokes). */
+        const val PAGE_HEADER_BYTES = 1024
     }
 }

@@ -42,8 +42,11 @@ import kotlin.math.roundToInt
  * All bookkeeping is on the main thread. Workers only render new bitmaps; they never
  * touch a tile that's already cached. Stroke art (outline Paths, pencil meshes) is built
  * once per stroke ([art]) and shared read-only by all threads.
+ *
+ * With continuous scrolling each page on screen has its own cache; they share a [TileBudget]
+ * (one LRU clock and tile limit, one cap on renders in flight).
  */
-internal class TileCache(private val onTilesChanged: () -> Unit) {
+internal class TileCache(private val budget: TileBudget, private val onTilesChanged: () -> Unit) {
 
     data class Key(val level: Int, val col: Int, val row: Int)
 
@@ -79,8 +82,15 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
     private val tiles = HashMap<Key, Tile>()
     private var content: Content? = null
     private var gen = 0
-    private var frame = 0L
+    private val frame get() = budget.frame
     private var released = false
+    /** The whole-page level last drawn or prefetched: never evicted while this page is loaded. */
+    private var baseLevel = Int.MIN_VALUE
+
+    /** A picture of the page (its sidebar thumbnail) shown where no tile is ready yet. */
+    var preview: Bitmap? = null
+
+    init { budget.register(this) }
 
     // Scheduling (main thread only).
     private val wanted = ArrayList<Key>()
@@ -125,6 +135,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
     fun release() {
         released = true
         tiles.clear(); wanted.clear(); wantedSet = emptySet()
+        budget.unregister(this)
     }
 
     // ------------------------------------------------------------------ drawing
@@ -141,9 +152,9 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
      */
     fun draw(canvas: Canvas, scale: Float, tx: Float, ty: Float, viewW: Float, viewH: Float, baseScale: Float, frozen: Boolean) {
         val c = content ?: return
-        frame++
         val k = levelFor(scale)
         val kBase = min(levelFor(baseScale), k)
+        baseLevel = kBase
         val s = levelScale(k)
         // Visible page rectangle, in page units.
         val l = max(0f, -tx / scale); val t = max(0f, -ty / scale)
@@ -187,7 +198,19 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         val ring = TILE_PX / s
         addLevel(order, k, l - ring, t - ring, r + ring, b + ring)
         setWanted(order)
-        evict(k, kBase)
+    }
+
+    /**
+     * The page isn't on screen but is next to it: render its whole-page level ahead, so it
+     * scrolls in showing its ink. Runs after the visible pages in [TileBudget.order].
+     */
+    fun prefetch(scale: Float, baseScale: Float) {
+        val c = content ?: return
+        val kBase = min(levelFor(baseScale), levelFor(scale))
+        baseLevel = kBase
+        val order = ArrayList<Key>()
+        addLevel(order, kBase, 0f, 0f, c.pageW, c.pageH)
+        setWanted(order)
     }
 
     private fun addLevel(out: MutableList<Key>, level: Int, l: Float, t: Float, r: Float, b: Float) {
@@ -225,7 +248,7 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         canvas.save()
         canvas.translate(tx, ty); canvas.scale(scale, scale)
         renderer.drawPaper(canvas, c.paper, c.pageW, c.pageH, hasPdf = c.pdf != null)
-        c.pdfBitmap?.let { renderer.drawPdfBackground(canvas, it, c.pageW, c.pageH) }
+        (preview ?: c.pdfBitmap)?.let { renderer.drawPdfBackground(canvas, it, c.pageW, c.pageH) }
         canvas.restore()
         // Coarse to fine, so the best available tile ends up on top.
         val pageL = (d.left - tx) / scale; val pageT = (d.top - ty) / scale
@@ -430,13 +453,15 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         schedule()
     }
 
-    private fun schedule() {
+    /** Starts renders while the shared budget has a free worker. */
+    fun schedule() {
         if (released) return
         val c = content ?: return
-        while (inFlight.size < WORKERS) {
+        while (budget.inFlight < budget.workers) {
             val key = wanted.firstOrNull { it !in inFlight } ?: return
             wanted.remove(key)
             inFlight += key
+            budget.inFlight++
             executor.execute { work(key, c) }
         }
     }
@@ -449,13 +474,14 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         } else null
         main.post {
             inFlight -= key
+            budget.inFlight--
             if (!released && tile != null && tile.gen == gen) {
                 // The page may have changed while rendering; sync() catches the tile up.
                 tiles[key] = tile
                 tile.lastUsed = frame
                 onTilesChanged()
             }
-            schedule()
+            budget.scheduleAll()
         }
     }
 
@@ -511,21 +537,22 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         min(TILE_PX, ceil((area.right - tile.left) * tile.scale).toInt()), min(TILE_PX, ceil((area.bottom - tile.top) * tile.scale).toInt()),
     )
 
-    private fun evict(level: Int, baseLevel: Int) {
-        if (tiles.size <= MAX_TILES) return
-        val victims = tiles.values
-            .filter { it.lastUsed != frame && it.key.level != baseLevel }
-            .sortedBy { it.lastUsed }
-        for (t in victims.take(tiles.size - MAX_TILES)) tiles.remove(t.key)
+    /** Tiles the budget may evict (everything but the whole-page level). */
+    internal fun evictableCount(): Int { var n = 0; for (k in tiles.keys) if (k.level != baseLevel) n++; return n }
+
+    internal fun collectEvictable(out: MutableList<Pair<TileCache, Tile>>) {
+        for (t in tiles.values) if (t.lastUsed != frame && t.key.level != baseLevel) out += this to t
     }
+
+    internal fun drop(key: Key) { tiles.remove(key) }
 
     companion object {
         const val TILE_PX = 512
-        /** Most tiles kept (~1 MB each). The base level is never evicted. */
+        /** Most tiles kept across all pages (~1 MB each), besides each loaded page's base level. */
         const val MAX_TILES = 64
         /** Above this many strokes in an edited area, re-render the tile in the background instead of patching on the UI thread. */
         const val PATCH_LIMIT = 300
-        private const val WORKERS = 3
+        const val WORKERS = 3
         private const val DESK = 0xFFE8E6E1.toInt()
 
         /** Level k renders at 2^(k/2) pixels per page unit. */
@@ -540,5 +567,41 @@ internal class TileCache(private val onTilesChanged: () -> Unit) {
         private val threadRenderer = ThreadLocal.withInitial { PageRenderer() }
         /** The stroke's drawable art (outline Path or pencil mesh), built once and cached on the stroke. */
         fun art(s: Stroke): StrokeArt = StrokeArt.of(s)
+    }
+}
+
+/**
+ * Shared by the [TileCache]s of the pages on screen (continuous scrolling, ADR-10): one frame
+ * clock for least-recently-used eviction, one tile limit across all pages, and one cap on tiles
+ * rendering at once. Free workers go to the caches in [order]: the visible pages first (most
+ * visible first), then neighbours being prefetched. Main thread only.
+ */
+internal class TileBudget(private val maxTiles: Int = TileCache.MAX_TILES, val workers: Int = TileCache.WORKERS) {
+    /** Advanced once per drawn frame by the canvas. */
+    var frame = 0L
+        private set
+    private val caches = ArrayList<TileCache>()
+    var order: List<TileCache> = emptyList()
+    internal var inFlight = 0
+
+    fun nextFrame() { frame++ }
+
+    internal fun register(c: TileCache) { caches += c }
+    internal fun unregister(c: TileCache) { caches.remove(c) }
+
+    /** A render finished: hand the free worker to the most important page that wants one. */
+    fun scheduleAll() {
+        for (c in order) { if (inFlight >= workers) return; c.schedule() }
+    }
+
+    /** End of a frame: evict the least recently used tiles above the limit (none drawn this frame). */
+    fun trim() {
+        var n = 0
+        for (c in caches) n += c.evictableCount()
+        if (n <= maxTiles) return
+        val victims = ArrayList<Pair<TileCache, TileCache.Tile>>()
+        for (c in caches) c.collectEvictable(victims)
+        victims.sortBy { it.second.lastUsed }
+        for ((c, t) in victims.take(n - maxTiles)) c.drop(t.key)
     }
 }

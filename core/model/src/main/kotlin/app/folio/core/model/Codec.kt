@@ -8,6 +8,9 @@ class UnsupportedSchemaException(found: Int) :
 
 class CorruptDocumentException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+/** A page's size and paper, known without decoding its strokes (see [DocumentCodec.pageHeaderOf]). */
+data class PageHeader(val width: Float, val height: Float, val paper: PaperTemplate)
+
 /**
  * JSON codec for the native format. Unknown keys are ignored, so an older
  * reader can open files written by a newer minor revision; a newer major
@@ -40,6 +43,51 @@ object DocumentCodec {
         } catch (e: IllegalArgumentException) {
             throw CorruptDocumentException("document is inconsistent", e)
         }
+    }
+
+    /**
+     * A page's size and paper from the start of its file ([prefix]: the first kilobyte or so).
+     * The encoder writes `width`, `height` and `paper` before `strokes`, so laying out pages
+     * (continuous scrolling) doesn't need the 4 s decode of a dense page. Only keys found before
+     * `strokes` count (a stroke has a `width` of its own). Null when they aren't there or the
+     * page is from a newer schema: the caller then uses the notebook's default size.
+     */
+    fun pageHeaderOf(prefix: String): PageHeader? {
+        val end = prefix.indexOf("\"strokes\"")
+        if (end < 0) return null
+        val head = prefix.substring(0, end)
+        if (runCatching { schemaVersionOf(head) }.getOrNull()?.let { it > SCHEMA_VERSION } != false) return null
+        val w = numberAfter(head, "width") ?: return null
+        val h = numberAfter(head, "height") ?: return null
+        if (!(w > 0f && h > 0f && w.isFinite() && h.isFinite())) return null
+        val paper = stringAfter(head, "paper")?.let { p -> PaperTemplate.entries.firstOrNull { it.name == p } } ?: return null
+        return PageHeader(w, h, paper)
+    }
+
+    /** Index just after `"key":` (whitespace skipped), or -1. */
+    private fun valueStart(text: String, key: String): Int {
+        val k = text.indexOf("\"$key\"")
+        if (k < 0) return -1
+        var i = k + key.length + 2
+        while (i < text.length && text[i].isWhitespace()) i++
+        if (i >= text.length || text[i] != ':') return -1
+        i++
+        while (i < text.length && text[i].isWhitespace()) i++
+        return i
+    }
+
+    private fun numberAfter(text: String, key: String): Float? {
+        val start = valueStart(text, key).takeIf { it >= 0 } ?: return null
+        var i = start
+        while (i < text.length && (text[i].isDigit() || text[i] in "+-.eE")) i++
+        return text.substring(start, i).toFloatOrNull()
+    }
+
+    private fun stringAfter(text: String, key: String): String? {
+        val start = valueStart(text, key).takeIf { it >= 0 } ?: return null
+        if (start >= text.length || text[start] != '"') return null
+        val close = text.indexOf('"', start + 1).takeIf { it > start } ?: return null
+        return text.substring(start + 1, close)
     }
 
     /**

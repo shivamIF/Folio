@@ -1,5 +1,10 @@
 # Test Results (2026-10-19)
 
+## Continuous scrolling (2026-10-20, ADR-10)
+- **Unit:** `./gradlew test`, 234 tests, 0 failures. New: `NotebookHistoryTest` ×7, `PageHeaderTest` ×3, `NotebookStoreTest` +2 (header read, backup fallback with decode outside the lock), `PageStackTest` ×5, `PageViewportTest` +5.
+- **E2E not passed yet.** `scripts/e2e_continuous_scroll.py` (new), `e2e_page_navigator.py` and `e2e_milestone.py` failed in their setup step on `emulator-5554`. That's a 1080×2400 phone image with 3 GB RAM. Its load average stayed at 12–50 after a reboot, and "isn't responding" dialogs appeared: first Folio's library screen during debug cold starts (on an emulator that had already shown them for earlier builds), later the emulator's own system UI. Typed titles were cut off ("S", "M"), and the editor took over 10 s to appear. The canvas idled at 0% CPU and its node was present once the emulator caught up. Re-run on a healthy emulator.
+- **Not run on the Galaxy Tab:** it holds a release-signed build, so a debug `install -r` would be refused, and uninstalling would wipe the user's notebooks.
+
 ## Page navigator (2026-10-20)
 - **Unit:** `./gradlew test`, 212 tests, 0 failures. New: `PageOpsTest` ×6, `NotebookStoreTest` +6 (insert/delete/move/stamp), `PageExportSpecTest` ×5. `BrushEngineTest.buildingIsFastEnoughToRedoEveryFrame` is a wall-clock check: it failed once in a fully parallel build and passed 3/3 on its own.
 - **Galaxy Tab S6 Lite** (`scripts/e2e_page_navigator.py`, landscape, the user's data untouched): 13 checks passed:
