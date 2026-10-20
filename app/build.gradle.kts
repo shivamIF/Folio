@@ -39,6 +39,11 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:ink"))
     implementation(project(":core:storage"))
+    implementation(project(":core:interop"))
+    implementation(project(":core:sync"))
+    // Google sign-in for Drive sync (free; only the private app-folder scope is requested).
+    implementation(libs.play.services.auth)
+    implementation(libs.work.runtime)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
@@ -51,6 +56,12 @@ dependencies {
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.motion.prediction)
+    implementation(libs.graphics.core)
+
+    // Brush Lab (src/debug) compares Folio's engine with AndroidX Ink. Never in release builds.
+    debugImplementation(libs.ink.brush)
+    debugImplementation(libs.ink.strokes)
+    debugImplementation(libs.ink.rendering)
 
     testImplementation(libs.kotlin.test)
 }

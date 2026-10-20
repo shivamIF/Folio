@@ -10,9 +10,27 @@ import kotlin.math.sin
 
 /** Platform-neutral stroke geometry: outlines for filling and hit-testing for erasing. */
 object StrokeGeometry {
+    /**
+     * Engine v2 ([BrushEngine]) draws strokes; false falls back to v1 everywhere (rollback
+     * switch). Stored strokes are the same either way: only their rendering changes.
+     */
+    @Volatile var useV2 = true
+
+    /** Outline of a stroke with the current engine. */
+    fun outline(stroke: Stroke): FloatArray =
+        if (useV2) mesh(stroke)?.outline() ?: FloatArray(0) else outlineV1(stroke)
+
+    /** Engine v2 geometry of a stored stroke. */
+    fun mesh(stroke: Stroke): StrokeMesh? = BrushEngine.mesh(
+        stroke.x, stroke.y, stroke.pressure, stroke.tilt, stroke.orientation, stroke.size, stroke.width, BrushSpec.of(stroke.tool),
+    )
+
+    fun outlineV1(stroke: Stroke): FloatArray = outline(
+        stroke.x, stroke.y, stroke.pressure, stroke.tilt, stroke.size, stroke.width, PenProfile.of(stroke.tool),
+    )
 
     /**
-     * Builds a closed polygon (x0,y0,x1,y1,…) around a variable-width stroke,
+     * Engine v1: builds a closed polygon (x0,y0,x1,y1,…) around a variable-width stroke,
      * with round caps at both ends. Fill it with the non-zero winding rule.
      * Also accepts raw arrays, so live (unfinished) strokes and predicted
      * points use the same code path.
@@ -51,10 +69,6 @@ object StrokeGeometry {
         return out.toFloatArray()
     }
 
-    fun outline(stroke: Stroke): FloatArray = outline(
-        stroke.x, stroke.y, stroke.pressure, stroke.tilt, stroke.size, stroke.width, PenProfile.of(stroke.tool),
-    )
-
     /** Half circle from [startAngle] sweeping clockwise by π around (cx, cy). */
     private fun cap(out: MutableList<Float>, cx: Float, cy: Float, r: Float, startAngle: Float) {
         val steps = 8
@@ -80,7 +94,7 @@ object StrokeGeometry {
 
     /** True if a circle of [radius] at (px, py) touches the stroke's inked area. */
     fun hits(stroke: Stroke, px: Float, py: Float, radius: Float): Boolean {
-        val reach = radius + stroke.width / 2f
+        val reach = radius + stroke.width * stroke.tool.inkReach
         if (!stroke.bounds().inflate(radius).contains(px, py)) return false
         if (stroke.size == 1) return hypot(stroke.x[0] - px, stroke.y[0] - py) <= reach
         for (i in 1 until stroke.size) {

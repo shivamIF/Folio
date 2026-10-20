@@ -101,8 +101,11 @@ class StrokeGeometryTest {
     }
 
     @Test fun singlePointBecomesDot() {
+        assertEquals(32, StrokeGeometry.outlineV1(stroke(5f, 5f)).size)
+        // v2: a closed round dot of the stroke's half-width around the point.
         val o = StrokeGeometry.outline(stroke(5f, 5f))
-        assertEquals(32, o.size)
+        assertTrue(o.size >= 16)
+        for (i in o.indices step 2) assertTrue(kotlin.math.hypot(o[i] - 5f, o[i + 1] - 5f) <= 2.01f)
     }
 
     @Test fun emptyStrokeHasNoOutline() {
@@ -151,5 +154,26 @@ class PressureCurveTest {
 
     @Test fun floorFiltersNoise() {
         assertEquals(0f, PressureCurve(ceiling = 0.6f, floor = 0.02f).map(0.01f))
+    }
+
+    /** How far (in screen px) the stabilised end trails the pen at constant screen speed. */
+    private fun trailPx(stab: Float, pxPerUnit: Float, screenPxPerMs: Float): Float {
+        val b = StrokeBuilder(ToolType.BALLPOINT, 0, 3f, stabilization = stab,
+            minDistance = StrokeBuilder.minDistanceAt(pxPerUnit), pxPerUnit = pxPerUnit)
+        val v = screenPxPerMs / pxPerUnit
+        var x = 0f
+        for (k in 0..120) { x = v * 4f * k; b.add(x, 0f, 0.5f, 0f, 0f, 4L * k) } // 240 Hz
+        val s = b.build()
+        return (x - s.x[s.size - 1]) * pxPerUnit
+    }
+
+    @Test fun stabilisationTrailIsSmallAndTheSameAtEveryZoom() {
+        for (speed in listOf(0.3f, 1f)) { // slow and brisk handwriting, px/ms on a Tab S6 Lite
+            val fit = trailPx(0.1f, 1.6f, speed)
+            val zoomed = trailPx(0.1f, 8f, speed) // 5× zoom
+            println("stabilisation 10%%, %.1f px/ms: trail %.2f px at fit, %.2f px at 5× zoom".format(speed, fit, zoomed))
+            assertTrue(zoomed < 4f, "trail at 5x: $zoomed px")
+            assertEquals(fit, zoomed, 0.5f + 0.15f * fit)
+        }
     }
 }

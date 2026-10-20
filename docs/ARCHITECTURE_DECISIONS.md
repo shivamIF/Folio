@@ -27,7 +27,12 @@
 - **Known gap**: unknown fields are not round-tripped yet (see KNOWN_LIMITATIONS).
 
 ### ADR-4: Native format = JSON per page, atomic writes
-- **Why JSON**: human-inspectable, easy to migrate, adequate size for v1 (about 30 bytes per point). A compact binary page codec can be added behind `DocumentCodec` once profiling shows the need.
+- **Why JSON**: human-inspectable and easy to migrate.
+- **Schema 2 (2026-10-19): packed points.** Each stroke's point channels are one base64 string (`pts`: little-endian float32 x, y, pressure, tilt, orientation, then int32 t; 24 bytes per point). Lossless. Measured on the Tab with an imported 7,106-stroke page: schema 1 took 17.3 s to open, schema 2 takes 4.4 s, and the file is 20% smaller. Schema 1 files still load and are rewritten as schema 2 on their next save. See `StrokeSerializer`.
+- **Schema 3 (2026-10-19): text boxes and pictures** (`Page.texts`, `Page.images`; pictures are notebook attachments `<id>.img`). An older app refuses these pages rather than dropping content on save. Element edits share the undo history (`PutText`, `PutImage`, `Composite`).
+- **Schema 4 (2026-10-19): fine-liner and marker tools** (`ToolType.FINELINER`, `MARKER`). No data migration is needed: schema 3 pages load as they are. Every encode now stamps the current version (before, a page loaded from an older schema kept its old number after edits, so an older app could misread newer content).
+- **No JSON tree on read.** `schemaVersion` is found by a key scan. Building a `JsonElement` tree of a 28 MB page ran out of the 256 MB heap and crashed the app; `core:model` tests now run with a 256 MB heap to catch that.
+- **Still open**: a fully binary page file (and progressive drawing) would cut the remaining 4.4 s for very dense pages.
 - **Writes** (`AtomicFile`): write a temp file, fsync it, copy the previous file to `.bak`, then do an atomic rename.
 - **Reads**: fall back to `.bak` when the main file is corrupt. If no backup exists, raise an error rather than silently showing an empty page.
 - **Ids are validated** (`[A-Za-z0-9-]{1,64}`) before they're used as file names, which prevents path traversal.
@@ -38,6 +43,16 @@
 - Edits mutate state on the main thread. Saving takes an immutable snapshot and writes it on one ordered writer thread (`Dispatchers.IO.limitedParallelism(1)`).
 - Autosave is debounced by 800 ms, and is flushed at once on `ON_STOP`, back navigation and `onCleared`.
 - The same edit objects are the planned unit for the sync operation log (ADR-7).
+
+### ADR-8: Page rendering = own surface + tiles (2026-10-19)
+- **The page draws on a `SurfaceView`, not in the window.** The display hardware composites it under the toolbar, so page frames (pen, pinch, pan) never redraw the Compose UI.
+- **Ink is cached in opaque 512 px tiles** (paper + PDF + ink, so one paint per pixel) at zoom levels 2^(k/2). A level is never more than 11% coarser than the screen.
+  - Workers render only the strokes intersecting a tile.
+  - The UI thread only blits tiles, paints appended strokes onto them, and patches edited areas (re-rendering in the background above 300 strokes per area).
+  - The whole-page level stays cached as the fallback.
+- **The partial eraser wipes the visible tiles directly** (paper repainted along the path). The exact pieces then patch the same area.
+- **Stroke outline Paths are cached on the stroke** (`Stroke.renderCache`, opaque to core) and shared read-only by the render threads; bounds are computed before sharing.
+- Measurements are in `docs/PERFORMANCE.md`.
 
 ### ADR-6: Input pipeline and S Pen strategy
 ```
@@ -59,10 +74,61 @@ MotionEvent → InputPolicy (draw/erase/navigate/ignore)
 - **Pen-only mode** turns on automatically when a stylus is first seen (this can be switched off). Fingers then pan and zoom; two fingers always pan and zoom.
 - **Only public Android APIs** are used. Samsung-private APIs are avoided (see ARTIFACT_INVENTORY).
 
-### ADR-7: Sync (planned, not implemented)
-- **Plan**: local-first.
-  - Each page edit becomes an operation with a stable op id, kept in an outbox.
-  - The server orders operations per notebook with a revision counter, not device clocks.
-  - Strokes are immutable and addressed by id, so concurrent adds merge without conflict.
-  - Concurrent delete-vs-edit of the same stroke resolves "delete wins, unless the stroke was modified after the delete was issued". That case gets surfaced to the user.
-- **Status**: no backend exists. A `SyncEngine` interface and an in-process test server will be built in Phase 7.
+### ADR-7: Sync = Google Drive app folder, three-way file sync (2026-10-19)
+- **Remote:** the user's own Google Drive, in the app-private `appDataFolder` (scope `drive.appdata`). It's free and has no server of ours. Sign-in uses Play services authorisation; the app is registered by package plus SHA-1 in the user's own Cloud project (docs/SYNC_SETUP.md).
+- **Items:**
+  - `f/folders.json`, `n/<nb>/meta.json`, `n/<nb>/p/<page>.json` (gzip on Drive) and `n/<nb>/a/<id>.pdf|img`;
+  - the content MD5 is kept in `appProperties.h`, so a listing shows what changed;
+  - the local layout is unchanged; `StoreSync` maps keys to the store under its lock.
+- **Engine** (`core:sync`, pure Kotlin): a three-way compare per key (local, remote, base at last sync). Edits beat deletes; a true conflict keeps both (a page copy after the original) or merges (notebook details: newer wins, pages united; folders united by id). Attachments go first and details last; the base is saved as it goes; a pass restarts after a conflict.
+- **Safety:**
+  - remote input is validated (key shapes, ids, pages must decode and match their key);
+  - the open notebook still sends its edits; pages arriving for it go through the editor, which merges them with unsaved edits per element (`PageMerge`, three-way by id) and returns the page to store, written on the editor's own writer before any later save; deletions and conflicts there wait until it's closed;
+  - a notebook is removed only when none of its pages remain.
+- **When:** ~0.25 s after any local change; Drive's change feed every 1 s while a notebook is open; a full check every 30 s on screen; WorkManager when the app leaves the screen and every 15 min in the background (network required).
+- **Speed (measured 2026-10-19):** Drive answers a listing in ~0.6 s, saves a small file in ~2 s and serves one in 1–1.5 s, so device-to-device takes ~5–10 s. Small uploads are one multipart request, connections are kept alive, tokens are reused for 40 min. A same-network direct link was discussed for ~1 s and deferred by the user.
+- **Rejected:** a per-edit op-log. It would need a server or a much more complex Drive layout; per-page files fit Drive and our storage, and conflicts are per page.
+
+### ADR-9: Page navigator on the existing model (2026-10-20)
+- **No parallel document model.** Page order stays `NotebookMeta.pageIds`; content stays one `Page` file per page, edited through `PageEditor`; the open page stays `EditorUiState.pageIndex`. The sidebar only reads these.
+- **Page operations are repository calls**: `insertPage` (new, duplicated and restored pages), `deletePage` (unlist, then delete the file; a notebook keeps at least one page) and `movePage`. Each changes `library.json` once under the store lock, so sync sees ordinary `meta.json`/page-file changes. The pure parts (`PageOps`: blank-like, duplicate with fresh ids, erase as one `PageEdit`, move) live in `core:model`.
+- **Undo** for structure changes is a snackbar action. Delete keeps the deleted page and its `PageEditor` in memory and re-inserts them. Erase is a `PageEdit`, so the top-bar Undo also covers it. A notebook-wide undo stack was rejected: it would mix two histories (page and notebook) behind one button.
+- **Thumbnails** are drawn by `PageRenderer` + `PageAssets` (the same code as the canvas and exports) on one low-priority thread. They're cached in memory by content version and on disk by the page file's stamp (`pageStamp`). The editor bumps a page's version only when that page changes, debounced 1 s while writing.
+- **The editor stays one page at a time** (the user's choice). Continuous vertical scrolling is a separate piece of work. *(Superseded by ADR-10.)*
+- **Single-page export** reuses `NotebookPdfExporter` (now taking a page list) for PDF, and `PageRenderer` for PNG/JPEG at 72, 150 or 300 dpi. Output goes only to a file the user picks (`ACTION_CREATE_DOCUMENT`) or to a private share file (`FileProvider`, `cache/exports` only).
+
+
+### ADR-10: Continuous vertical scrolling between pages (2026-10-20)
+Replaces the one-page-at-a-time editor (ADR-9's last open point). The stored model doesn't change: no schema bump, pages are still separate `Page` files in `NotebookMeta.pageIds` order, edited through their own `PageEditor`.
+
+- **How pages stack** (`input/PageStack`, pure Kotlin):
+  - Pages sit in one column in `pageIds` order, each at its own size in page units, with a 24-unit gap between them. They're centred on the widest page, and there's no margin above the first page or below the last.
+  - One view transform (`PageViewport`, now over the whole stack) maps "document units" to view pixels. Page *i* only adds a translation, so ink keeps the same on-screen thickness on every page, and zoom levels and tiles are shared.
+  - Fit-width uses the widest page. The zoom-out limit (half of whole-page) uses the first page. Scrolling stops at the top of the first page; at the end it goes until the last page's top reaches the top of the view. That way "go to page *N*" always puts page *N* at the top, even on a phone where a page is shorter than the screen. When everything fits, the stack is centred, as one page was before.
+  - Page sizes come from a small header read of each page file (`DocumentCodec.pageHeaderOf`, first 1 KB) when the notebook opens. Until then the notebook's default size is used. Whenever the stack changes (sizes known, pages added, deleted, moved, or synced), the page under the reading line keeps its place on screen, so nothing jumps. The reading line is 30 % down the view.
+  - The **page in view** is the page under the reading line (in a gap, the nearer page). It drives "Page X of N", the sidebar highlight, Previous/Next and "Add page after this one". The canvas reports it only when it changes, so scrolling doesn't recompose the UI every frame.
+- **How strokes route to the page under the pen:**
+  - At pen-down the canvas picks the page under the point. In a gap, or beside a narrow page, it takes the nearest page by vertical distance. That page becomes the *active* page for the whole gesture.
+  - All samples of the gesture are mapped into that page's coordinates, even after the pen crosses a page edge. A stroke that runs past the bottom of its page is kept whole on that page and clipped at the page edge when drawn, as before. It never splits or jumps to the next page. The eraser, lasso and text tool follow the same rule (a gesture works on the page where it started).
+  - Every edit callback carries the page id (`onStrokeFinished(pageId, …)` and so on). The view model applies it as a `PageEdit` on that page's `PageEditor`.
+  - Ink on a page whose content is still loading is drawn at once and queued, then applied in order when the page arrives, so no stroke is lost. Erasing, lasso and text wait for the load.
+  - A lasso selection belongs to one page. Starting a gesture on another page clears it.
+- **Tiles across pages:**
+  - Each page shown has its own `TileCache` (its `Content`, diff and patch logic are unchanged).
+  - A shared `TileBudget` keeps one frame clock and one LRU limit for all of them (64 tiles of 512 px, about 64 MB, plus each loaded page's whole-page base level). It also caps rendering at 3 tiles in flight across all pages: visible pages first (centre-out), then the base levels of the pages just above and below.
+  - The canvas holds pages from one above to one below the visible ones. A page leaving that window releases its tiles.
+  - While a page's tiles render, the fallback shows its sidebar thumbnail when one is cached; otherwise it shows the paper.
+- **Undo across pages:**
+  - Each page keeps its own bounded `PageEditor` history (undo still restores exact z-order, and sync's live merge still resets one page's history).
+  - A `NotebookHistory` (in `core:model`) records the *order* of content edits across pages as (page id, edit) pairs. The top-bar Undo/Redo then reverts the notebook's latest edit on whichever page it was made, and scrolls to that page if it isn't on screen.
+  - An entry whose page was reloaded, evicted, or trimmed no longer matches that page's history and is skipped.
+  - Page structure changes (add, delete, move) stay snackbar-only, as ADR-9 decided. This is not the rejected mix of the two histories: it only orders page edits.
+- **Memory limits for dense pages.** A 7,000-stroke page takes about 4.4 s to decode on the Tab (ADR-4) and holds roughly 20 MB of points and outline paths.
+  - **Loading:** one page at a time on a background thread, nearest to the page in view first, for the visible pages and one page above and below. Loading no longer runs on the writer thread, and `loadPage` decodes outside the store lock, so a long load never delays a save. The stroke index is built on the loading thread too.
+  - **Resident pages:** the visible window, every page with unsaved edits or queued ink, and the selection's page are always kept. Beyond those, up to 8 idle pages or 20,000 idle strokes stay in memory (least recently viewed are evicted first, and only once they're saved). An evicted page's undo history is dropped (KNOWN_LIMITATIONS).
+  - **Tiles:** bounded by `TileBudget` as above, whatever the page count.
+- **Pen latency:** the pen path is unchanged. The page lookup at pen-down is a binary search, and samples go through the active page's matrix. Live ink is still drawn by the page surface (or the wet layer, clipped to the active page). The frame draws the visible pages' tiles, which cover the same screen area as one page did. Scrolling and loading never block the pen.
+- **Rejected:**
+  - One giant page: it would need a schema change, and it breaks per-page files, sync, export and thumbnails.
+  - A `LazyColumn` of per-page canvases: one `SurfaceView` per page, plus Compose layout on the pen's path.
+  - Splitting a stroke at the page boundary: it surprises the writer, and it would turn one stroke into two undo steps on two pages.

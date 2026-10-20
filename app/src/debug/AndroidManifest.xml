@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: the Brush Lab. No launcher icon, so the app's own UI is unchanged;
+     open it with `adb shell am start -n app.folio.notes/.lab.BrushLabActivity`. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".lab.BrushLabActivity"
+            android:exported="true"
+            android:label="Folio Brush Lab"
+            android:taskAffinity="app.folio.notes.lab"
+            android:resizeableActivity="true" />
+        <!-- Latency/brush bench: the real writing surface on an in-memory page. -->
+        <activity
+            android:name=".lab.InkBenchActivity"
+            android:exported="true"
+            android:label="Folio Ink Bench"
+            android:taskAffinity="app.folio.notes.lab"
+            android:theme="@style/Theme.Folio" />
+    </application>
+</manifest>

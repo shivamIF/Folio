@@ -4,7 +4,7 @@
 |---|---|---|---|---|
 | 1 | Path traversal through ids used as file names | High | ✅ Mitigated | `SAFE_ID` regex in `FileNotebookStore`; `pathTraversalIdsAreRejected` test |
 | 2 | Torn writes / crash during save → corrupt notebook | High | ✅ Mitigated | `AtomicFile` (fsync + atomic rename + `.bak`); recovery tests |
-| 3 | Malformed or hostile document file crashing the app | Medium | 🟡 Partly mitigated | Codec maps all parse errors to `CorruptDocumentException`; channel-length validation. **Open**: there's no size limit on page files yet (relevant once import exists) |
+| 3 | Malformed or hostile document file crashing the app | Medium | 🟡 Partly mitigated | Codec maps all parse errors to `CorruptDocumentException`; channel-length validation. PDF import: 300 MB cap, `%PDF-` header check, page count ≤ 2000, staged outside the library and discarded on any failure; rendering uses the platform PdfRenderer (password PDFs refused). **Open**: no size cap on native page files |
 | 4 | Notes leaking through Android backup / device transfer | Medium | ✅ Mitigated | `allowBackup=false` plus `data_extraction_rules` exclude all files |
 | 5 | Other apps reading notes | Medium | ✅ Mitigated | App-private `filesDir`; no exported providers; only the launcher activity is exported |
 | 6 | Sensitive logging | Low | ✅ | The app doesn't log note content |

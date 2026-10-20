@@ -36,6 +36,17 @@ internal class AtomicFile(val file: File) {
     fun readMain(): ByteArray? = file.takeIf { it.exists() }?.readBytes()
     fun readBackup(): ByteArray? = backup.takeIf { it.exists() }?.readBytes()
 
+    /** Up to [max] bytes from the start of the main file (or the backup when it's missing); null if neither exists. */
+    fun readPrefix(max: Int): ByteArray? {
+        val f = file.takeIf { it.exists() } ?: backup.takeIf { it.exists() } ?: return null
+        return f.inputStream().use { input ->
+            val buf = ByteArray(max)
+            var n = 0
+            while (n < max) { val r = input.read(buf, n, max - n); if (r < 0) break; n += r }
+            buf.copyOf(n)
+        }
+    }
+
     fun exists() = file.exists() || backup.exists()
 
     fun delete() {
