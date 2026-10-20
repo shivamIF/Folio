@@ -1,9 +1,11 @@
 # Implementation Plan
 
 ## Next task (start here)
-**Merge the page navigator** (branch claude/folio-page-navigator-178027) with the library redesign (claude/goodnotes-landing-page-rea-4f69be) into one build. Then finish the Tab checks of single-page export (`scripts/e2e_page_navigator.py`).
+**Samsung Notes-style editor** (user request 2026-10-20): follow [SAMSUNG_EDITOR_PLAN.md](SAMSUNG_EDITOR_PLAN.md), tasks T1→T10. The UI/UX spec is docs/research/samsung-notes-editor-teardown.md; ink/icon techniques are in docs/research/samsung-notes-ink-techniques.md. This branch (claude/new-session-6a4076) already merges the page navigator, the library redesign and continuous scrolling (79606d5).
 
-**Continuous vertical scrolling** (ADR-10) is done on its own branch, on top of the page navigator. It needs merging into the integrated build. Then the user's hand checks on the Tab: writing across page edges, scroll feel, and a dense imported notebook (load time, memory).
+Done 2026-10-20: page navigator + library redesign (d65028e) and continuous scrolling (08c3058) are merged at 79606d5. Still open: finish the Tab checks of single-page export (`scripts/e2e_page_navigator.py`).
+
+**Continuous vertical scrolling** (ADR-10) is merged here; it still needs the user's hand checks on the Tab: writing across page edges, scroll feel, and a dense imported notebook (load time, memory).
 
 **Brush engine v2** (docs/BRUSH_ENGINE_PLAN.md, proposed change 1), plugged into the Brush Lab's v2 column; compare on the Tab before switching the app over. Fine liner and marker are already real shelf tools (schema 4).
 
