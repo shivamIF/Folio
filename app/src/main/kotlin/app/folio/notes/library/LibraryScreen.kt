@@ -83,6 +83,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -124,6 +130,8 @@ private sealed interface Dialog {
 
 /** Below this width the sidebar always shows as the narrow icon rail. */
 private val CompactWidth = 600.dp
+private val SidebarWide = 264.dp
+private val SidebarRail = 76.dp
 
 @Composable
 fun LibraryScreen(
@@ -209,12 +217,17 @@ fun LibraryScreen(
     Surface(color = LocalLibraryColors.current.content, contentColor = MaterialTheme.colorScheme.onSurface) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxWidth < CompactWidth
-        Row(Modifier.fillMaxSize()) {
-            Sidebar(
-                expanded = state.sidebarExpanded && !compact, canExpand = !compact, section = q.section, trashCount = state.trashCount,
-                onToggle = vm::toggleSidebar, onSection = vm::showSection, onSettings = { dialog = Dialog.Settings },
-            )
-            Column(Modifier.weight(1f).fillMaxHeight().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))) {
+        val expanded = state.sidebarExpanded && !compact
+        val target = if (expanded) SidebarWide else SidebarRail
+        val sidebarWidth = animateDpAsState(target, spring(dampingRatio = 0.9f, stiffness = 500f), label = "sidebar")
+        // Only the sidebar animates. The content takes its new width once, when the sidebar has
+        // finished opening (it slides over the content) or right away when closing, so the grid
+        // isn't re-laid out on every animation frame.
+        val inset by remember(target) {
+            derivedStateOf { if (target == SidebarWide && sidebarWidth.value < SidebarWide - 1.dp) SidebarRail else target }
+        }
+        Box(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().padding(start = inset).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))) {
                 if (state.selecting) SelectionBar(
                     state, onDone = vm::stopSelecting, onSelectAll = vm::selectAll,
                     onFavorite = { keys, fav -> vm.setFavorite(keys, fav) }, onMove = { dialog = Dialog.Move(it) },
@@ -236,6 +249,10 @@ fun LibraryScreen(
                     Content(state, actions, onNewNotebook = { dialog = Dialog.NewNotebook }, onShowAll = { vm.setFilter(ItemFilter.ALL) })
                 }
             }
+            Sidebar(
+                width = sidebarWidth, expanded = expanded, canExpand = !compact, section = q.section, trashCount = state.trashCount,
+                onToggle = vm::toggleSidebar, onSection = vm::showSection, onSettings = { dialog = Dialog.Settings },
+            )
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 8.dp))
     }
@@ -276,12 +293,19 @@ fun LibraryScreen(
 /** Collapsible sidebar: full width with labels, or a narrow rail of icons. The width change is animated. */
 @Composable
 private fun Sidebar(
-    expanded: Boolean, canExpand: Boolean, section: Section, trashCount: Int,
+    width: State<Dp>, expanded: Boolean, canExpand: Boolean, section: Section, trashCount: Int,
     onToggle: () -> Unit, onSection: (Section) -> Unit, onSettings: () -> Unit,
 ) {
-    val width by animateDpAsState(if (expanded) 264.dp else 76.dp, spring(dampingRatio = 0.9f, stiffness = 500f), label = "sidebar")
     Column(
-        Modifier.width(width).fillMaxHeight().background(LocalLibraryColors.current.sidebar)
+        Modifier
+            // Read in the layout phase: animation frames re-measure the sidebar without recomposing.
+            .layout { measurable, constraints ->
+                val w = width.value.roundToPx()
+                val placeable = measurable.measure(Constraints.fixed(w, constraints.maxHeight))
+                layout(w, constraints.maxHeight) { placeable.place(0, 0) }
+            }
+            .clipToBounds()
+            .background(LocalLibraryColors.current.sidebar)
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
@@ -526,7 +550,7 @@ private fun CheckedItem(label: String, checked: Boolean, onClick: () -> Unit) = 
 @Composable
 private fun Content(state: LibraryUiState, actions: ItemActions, onNewNotebook: () -> Unit, onShowAll: () -> Unit) {
     val q = state.query
-    val items = state.items
+    val items = remember(state.index, q) { state.items }
     if (state.loading) return
     if (items.isEmpty()) {
         val modifier = Modifier.fillMaxSize()

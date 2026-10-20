@@ -1,11 +1,11 @@
 package app.folio.notes.library
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -71,28 +72,30 @@ fun FolderArt(color: Long, icon: FolderIcon, modifier: Modifier = Modifier, icon
     val frontTop = lerp(base, Color.White, 0.14f)
     val glyph = lerp(base, Color.Black, 0.5f).copy(alpha = 0.85f)
     Box(modifier) {
-        Canvas(Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            val r = w * 0.07f
-            val tabW = w * 0.42f
-            val tabH = h * 0.13f
-            val back = Path().apply {
-                addRoundRect(RoundRect(0f, tabH * 0.7f, w, h, CornerRadius(r)))
-                addRoundRect(RoundRect(0f, 0f, tabW, tabH * 1.8f, CornerRadius(r * 0.8f)))
-            }
-            drawPath(back, backColor)
-            drawRoundRect(
-                Color.White.copy(alpha = 0.94f), topLeft = Offset(w * 0.08f, tabH * 1.35f),
-                size = Size(w * 0.84f, h * 0.5f), cornerRadius = CornerRadius(r * 0.5f),
-            )
-            val frontY = h * 0.3f
-            drawRoundRect(
-                Brush.verticalGradient(listOf(frontTop, base), startY = frontY, endY = h),
-                topLeft = Offset(0f, frontY), size = Size(w, h - frontY), cornerRadius = CornerRadius(r),
-            )
-            drawLine(Color.White.copy(alpha = 0.3f), Offset(r, frontY + 1.5f), Offset(w - r, frontY + 1.5f), strokeWidth = 2f)
-        }
+        Spacer(
+            Modifier.fillMaxSize().drawWithCache {
+                val w = size.width
+                val h = size.height
+                val r = w * 0.07f
+                val tabW = w * 0.42f
+                val tabH = h * 0.13f
+                val back = Path().apply {
+                    addRoundRect(RoundRect(0f, tabH * 0.7f, w, h, CornerRadius(r)))
+                    addRoundRect(RoundRect(0f, 0f, tabW, tabH * 1.8f, CornerRadius(r * 0.8f)))
+                }
+                val frontY = h * 0.3f
+                val front = Brush.verticalGradient(listOf(frontTop, base), startY = frontY, endY = h)
+                onDrawBehind {
+                    drawPath(back, backColor)
+                    drawRoundRect(
+                        Color.White.copy(alpha = 0.94f), topLeft = Offset(w * 0.08f, tabH * 1.35f),
+                        size = Size(w * 0.84f, h * 0.5f), cornerRadius = CornerRadius(r * 0.5f),
+                    )
+                    drawRoundRect(front, topLeft = Offset(0f, frontY), size = Size(w, h - frontY), cornerRadius = CornerRadius(r))
+                    drawLine(Color.White.copy(alpha = 0.3f), Offset(r, frontY + 1.5f), Offset(w - r, frontY + 1.5f), strokeWidth = 2f)
+                }
+            },
+        )
         icon.vector?.let {
             // Centred on the front panel, which spans the lower 70 % of the art.
             Icon(it, contentDescription = null, tint = glyph, modifier = Modifier.align(BiasAlignment(0f, 0.34f)).size(iconSize))
@@ -123,12 +126,19 @@ fun CoverArt(cover: Cover, title: String, modifier: Modifier = Modifier, showTit
     }
 }
 
+/**
+ * Previews render two at a time. Each can load thousands of strokes and a PDF page, and
+ * rendering every visible one at once starved the UI thread (GC pauses) on the Tab.
+ */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+private val ThumbnailRendering = Dispatchers.IO.limitedParallelism(2)
+
 /** First page of a notebook, rendered in the background; the cover shows until it's ready. */
 @Composable
 fun PagePreview(nb: NotebookMeta, modifier: Modifier = Modifier, showTitle: Boolean = true) {
     val thumbs = (LocalContext.current.applicationContext as FolioApp).thumbnails
     val bmp by produceState(thumbs.cached(nb), nb.id, nb.modifiedAt) {
-        value = withContext(Dispatchers.IO) { thumbs.load(nb) }
+        value = withContext(ThumbnailRendering) { thumbs.load(nb) }
     }
     Box(
         modifier.clip(RoundedCornerShape(8.dp)).background(Color.White)
@@ -177,10 +187,16 @@ fun SelectionCheck(selected: Boolean, modifier: Modifier = Modifier) {
     ) { if (selected) Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp)) }
 }
 
+/** Built once per locale: creating formatters for every tile was a large share of building the grid. Main thread only. */
+private var formatters: Triple<java.util.Locale, DateFormat, DateFormat>? = null
+
 /** "16 Aug 2026 at 6:50 PM", in the device's locale. */
 fun formatDateTime(ms: Long): String {
+    val locale = java.util.Locale.getDefault()
+    val f = formatters?.takeIf { it.first == locale }
+        ?: Triple(locale, DateFormat.getDateInstance(DateFormat.MEDIUM), DateFormat.getTimeInstance(DateFormat.SHORT)).also { formatters = it }
     val d = Date(ms)
-    return DateFormat.getDateInstance(DateFormat.MEDIUM).format(d) + " at " + DateFormat.getTimeInstance(DateFormat.SHORT).format(d)
+    return f.second.format(d) + " at " + f.third.format(d)
 }
 
 fun folderContents(notebooks: Int, folders: Int): String {

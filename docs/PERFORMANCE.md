@@ -65,3 +65,15 @@ Writing input→drawn p95 is 5–6.5 ms at every density (8–14 ms before).
 - **Rebuilding the 3,000-stroke stress page** takes about 0.85 s in the background. During that time the previous image is shown, for example right after an undo.
 - **Zooming in** shows a scaled (softer) image until the pinch pauses for 150 ms.
 - **Front-buffered rendering** (`GLFrontBufferedRenderer`) isn't used yet. It's the next lever for raw pen-to-glass latency.
+
+## Library (2026-10-20, Galaxy Tab S6 Lite, the user's own library)
+Measured with `scripts/perf_library.py` (taps and scrolls only, safe on real data) and per-interaction `dumpsys gfxinfo` framestats.
+
+| | Debug build | `perf` build (not debuggable) |
+|---|---|---|
+| Scroll jank | 34% (GPU p50 15 ms, p90 25 ms) | 14–42% (GPU-bound; noisy right after install) |
+| Section switch / grid↔list: one UI-thread frame | 200–300 ms | 140–230 ms |
+| Sidebar collapse/expand: UI thread p50 | 6 ms | 5 ms |
+
+Changes: the sidebar animates in the layout phase and the grid re-lays out once instead of every frame; page previews render two at a time; library items are `@Immutable` and memoised, so unrelated state changes don't recompose tiles; folder art caches its shapes; date formatters are built once.
+**Still open:** building a full grid takes 140–230 ms on the UI thread, and every library frame costs about 15 ms of GPU on this tablet. Next steps: profile one grid build with a Perfetto trace, and add a baseline profile (`androidx.profileinstaller`) so release-type builds start compiled.

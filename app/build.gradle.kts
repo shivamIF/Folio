@@ -21,6 +21,16 @@ android {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        // The build to judge smoothness with: the debug build's code, but not debuggable, so ART
+        // compiles it fully and Compose skips its debug-only bookkeeping. Signed with the debug
+        // key, so it installs over a debug build (adb install -r) and keeps the notebooks.
+        // Not debuggable means no `run-as`: back up and run the E2E scripts with a debug build.
+        create("perf") {
+            initWith(getByName("debug"))
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("debug")
+        }
     }
 
     compileOptions {

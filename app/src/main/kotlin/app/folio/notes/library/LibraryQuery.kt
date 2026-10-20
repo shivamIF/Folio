@@ -1,5 +1,6 @@
 package app.folio.notes.library
 
+import androidx.compose.runtime.Immutable
 import app.folio.core.model.Folder
 import app.folio.core.model.LibraryIndex
 import app.folio.core.model.NotebookMeta
@@ -28,6 +29,7 @@ sealed interface LibraryItem {
     val modifiedAt: Long
     val favorite: Boolean
 
+    @Immutable
     data class FolderItem(val folder: Folder, val notebookCount: Int, val folderCount: Int, override val modifiedAt: Long) : LibraryItem {
         override val key get() = folderKey(folder.id)
         override val title get() = folder.name
@@ -35,6 +37,7 @@ sealed interface LibraryItem {
         override val favorite get() = folder.favorite
     }
 
+    @Immutable
     data class NotebookItem(val meta: NotebookMeta) : LibraryItem {
         override val key get() = notebookKey(meta.id)
         override val title get() = meta.title

@@ -221,7 +221,14 @@ def main():
 
     # ------------------------------------------------------------ set up
     def create():
-        d.tap("New notebook")
+        # The library's "New notebook" button only shows while the library is empty;
+        # otherwise a notebook is made from the header's New menu.
+        try:
+            d.find("New notebook", timeout=2)
+            d.tap("New notebook")
+        except AssertionError:
+            d.tap("New")
+            d.tap("Notebook")
         x, y, _ = d.find("Title")
         d.sh("shell", "input", "tap", str(x), str(y))
         d.sh("shell", "input", "text", title.replace(" ", "%s"))
@@ -376,7 +383,8 @@ def main():
 
     # ------------------------------------------------------------ export
     def last_share_file(ext):
-        out = d.run_as("sh", "-c", "'ls -t cache/exports/*/*." + ext + "'").split()
+        # One name per line: export names contain spaces ("Navigator check 142904 – page 2.png").
+        out = d.run_as("sh", "-c", "'ls -t cache/exports/*/*." + ext + "'").splitlines()
         assert out and not out[0].startswith("ls:"), f"no shared .{ext} file"
         return out[0]
 
@@ -398,7 +406,8 @@ def main():
         time.sleep(0.8)
         path = last_share_file(ext)
         assert path.endswith(f"– page 2.{ext}"), path
-        data = subprocess.run([ADB, "-s", a.serial, "exec-out", "run-as", PKG, "cat", path], capture_output=True).stdout
+        # adb joins the arguments into one shell line, so the spaced path must be quoted.
+        data = subprocess.run([ADB, "-s", a.serial, "exec-out", "run-as", PKG, "cat", f"'{path}'"], capture_output=True).stdout
         size = png_size(data) if ext == "png" else jpeg_size(data)
         w, h = page_size(pid)
         assert size == raster_size(w, h, dpi), f"{ext} is {size}, expected {raster_size(w, h, dpi)} for {w}×{h} at {dpi} dpi"
