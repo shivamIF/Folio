@@ -1,6 +1,8 @@
 # Implementation Plan
 
 ## Next task (start here)
+**Merge the page navigator** (branch claude/folio-page-navigator-178027) with the library redesign (claude/goodnotes-landing-page-rea-4f69be) into one build. Then finish the Tab checks of single-page export (`scripts/e2e_page_navigator.py`). Continuous vertical page scrolling is a separate follow-up (docs/research/page-navigator-spec.md §4).
+
 **Brush engine v2** (docs/BRUSH_ENGINE_PLAN.md, proposed change 1), plugged into the Brush Lab's v2 column; compare on the Tab before switching the app over. Fine liner and marker are already real shelf tools (schema 4).
 
 **Commit the editor, import and sync work** (waiting for the user's go-ahead). Then the user's on-device checks of shapes, text boxes, pictures and PDF zoom. Later: search inside handwritten notes (phase 8); before any wide release, slow the 1 s Drive change check (see KNOWN_LIMITATIONS 9).

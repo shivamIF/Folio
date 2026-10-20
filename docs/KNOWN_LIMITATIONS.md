@@ -27,5 +27,14 @@
 13. **Text boxes:** there's no rich text (bold, mixed sizes), no text rotation, and the box doesn't scroll into view above the keyboard yet.
 14. **Pictures:** removing a picture keeps its file in the notebook, so undo can bring it back. Files aren't cleaned up yet.
 15. **No Mac app yet.** The core modules are plain Kotlin, ready for one.
-16. **Folder extras and older builds.** Folder icon, folder star and folder Trash were added without a schema bump, so schema-5 builds still open the library. Those builds ignore the three fields, though, and if one of them saves the library, folder icons and stars are dropped and trashed folders reappear. Notebooks are unaffected. Folders deleted forever can come back through Drive sync, because sync unites folder lists by id; use Trash instead (it syncs) until sync learns folder deletions.
-17. **Library moves use a picker**: no drag-and-drop onto folders yet.
+16. **Page navigator (2026-10-20):**
+   - The editor still shows one page at a time. The sidebar follows the open page; there's no continuous vertical scroll between pages.
+   - No copy/paste of pages between notebooks (it would have to copy PDF attachments), and no multi-select. Duplicate covers copying within a notebook.
+   - No bookmarks, page rotation, hidden pages, outline or per-page template change. Each needs a persisted field and a schema migration.
+   - Undo for delete and move lasts while the snackbar is shown (about 10 s). Erase is also in the page's own undo history.
+   - Deleting a page keeps its PDF or picture attachments in the notebook (as with pictures, item 14).
+   - Thumbnail PNGs in `cache/page-thumbs` aren't pruned when a notebook is deleted. They're cache, so Android may clear them.
+   - Single-page export offers PDF, PNG and JPEG only. Word, PowerPoint and text need a text layer Folio doesn't have.
+   - Sync: a page deleted here can come back if another device edits the same notebook's details before syncing (notebook details merge pages as a union, ADR-7).
+17. **Folder extras and older builds.** Folder icon, folder star and folder Trash were added without a schema bump, so schema-5 builds still open the library. Those builds ignore the three fields, though, and if one of them saves the library, folder icons and stars are dropped and trashed folders reappear. Notebooks are unaffected. Folders deleted forever can come back through Drive sync, because sync unites folder lists by id; use Trash instead (it syncs) until sync learns folder deletions.
+18. **Library moves use a picker**: no drag-and-drop onto folders yet.

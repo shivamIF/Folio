@@ -52,6 +52,24 @@ interface DocumentRepository {
     fun addPage(notebookId: String, afterIndex: Int): NotebookMeta
 
     /**
+     * Writes [page] and lists it at [index] (clamped), as one change to the notebook: new,
+     * duplicated and restored (undone delete) pages. The page id must be new to the notebook.
+     */
+    fun insertPage(notebookId: String, index: Int, page: Page): NotebookMeta
+
+    /** Unlists a page and deletes its file. A notebook always keeps at least one page. */
+    fun deletePage(notebookId: String, pageId: String): NotebookMeta
+
+    /** Moves a page so it ends up at [toIndex] (clamped). */
+    fun movePage(notebookId: String, pageId: String, toIndex: Int): NotebookMeta
+
+    /**
+     * Changes whenever the page's saved file changes; null if it has none. Cheap (no read),
+     * for caches of rendered pages.
+     */
+    fun pageStamp(notebookId: String, pageId: String): String?
+
+    /**
      * Copies an incoming file into a private staging area, enforcing [maxBytes]
      * and checking for a PDF header. Nothing is visible in the library yet.
      */
@@ -315,14 +333,48 @@ class FileNotebookStore(
     }
 
     override fun addPage(notebookId: String, afterIndex: Int): NotebookMeta = synchronized(lock) {
-        val idx = loadIndex()
-        val meta = idx.notebooks.firstOrNull { it.id == notebookId } ?: error("notebook not found")
-        val page = Page(width = meta.pageWidth, height = meta.pageHeight, paper = meta.paper)
+        val meta = notebook(notebookId)
+        insertPage(notebookId, afterIndex + 1, Page(width = meta.pageWidth, height = meta.pageHeight, paper = meta.paper))
+    }
+
+    override fun insertPage(notebookId: String, index: Int, page: Page): NotebookMeta = synchronized(lock) {
+        val meta = notebook(notebookId)
+        require(page.id !in meta.pageIds) { "page is already in this notebook" }
+        // The file first: a crash in between leaves an unlisted file, never a listed page without one.
         writePage(notebookId, page)
-        val ids = meta.pageIds.toMutableList().apply { add((afterIndex + 1).coerceIn(0, size), page.id) }
-        val updated = meta.copy(pageIds = ids, modifiedAt = clock())
-        saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == notebookId) updated else it }))
+        val ids = meta.pageIds.toMutableList().apply { add(index.coerceIn(0, size), page.id) }
+        putNotebook(meta.copy(pageIds = ids, modifiedAt = clock()))
+    }
+
+    override fun deletePage(notebookId: String, pageId: String): NotebookMeta = synchronized(lock) {
+        val meta = notebook(notebookId)
+        require(pageId in meta.pageIds) { "page not found" }
+        require(meta.pageIds.size > 1) { "a notebook needs at least one page" }
+        // Unlist first: a crash in between leaves an orphan file, never a listed page without one.
+        val updated = putNotebook(meta.copy(pageIds = meta.pageIds - pageId, modifiedAt = clock()))
+        pageFile(notebookId, pageId).delete()
         updated
+    }
+
+    override fun movePage(notebookId: String, pageId: String, toIndex: Int): NotebookMeta = synchronized(lock) {
+        val meta = notebook(notebookId)
+        val from = meta.pageIds.indexOf(pageId)
+        require(from >= 0) { "page not found" }
+        val ids = app.folio.core.model.PageOps.moved(meta.pageIds, from, toIndex)
+        if (ids === meta.pageIds) meta else putNotebook(meta.copy(pageIds = ids, modifiedAt = clock()))
+    }
+
+    override fun pageStamp(notebookId: String, pageId: String): String? = synchronized(lock) {
+        val f = pageFile(notebookId, pageId).file
+        if (f.exists()) "${f.lastModified()}-${f.length()}" else null
+    }
+
+    private fun notebook(id: String): NotebookMeta = loadIndex().notebooks.firstOrNull { it.id == id } ?: error("notebook not found")
+
+    private fun putNotebook(meta: NotebookMeta): NotebookMeta {
+        val idx = loadIndex()
+        saveIndex(idx.copy(notebooks = idx.notebooks.map { if (it.id == meta.id) meta else it }))
+        return meta
     }
 
     override fun stagePdf(source: java.io.InputStream, maxBytes: Long): StagedFile =

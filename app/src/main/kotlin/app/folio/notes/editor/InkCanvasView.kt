@@ -52,7 +52,7 @@ import kotlin.math.max
  * tip but are never stored.
  */
 @SuppressLint("ViewConstructor")
-class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
+class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Callback2, Choreographer.FrameCallback {
 
     // ---- rendering surface ----
     // The page is drawn on its own surface rather than in the app window. Measured on a
@@ -185,6 +185,17 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
     override fun surfaceCreated(holder: SurfaceHolder) { surfaceReady = true; requestRender() }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { requestRender() }
+
+    /**
+     * The surface was resized (sidebar opened or closed, rotation, split screen): draw at the
+     * new size before returning. Otherwise the last frame, drawn at the old size, stays up
+     * stretched to the new frame (seen on the Tab S6 Lite as a black strip beside the page).
+     */
+    override fun surfaceRedrawNeeded(holder: SurfaceHolder) {
+        if (!surfaceReady) return
+        val c = try { holder.lockHardwareCanvas() } catch (e: Exception) { Log.w(TAG, "lockHardwareCanvas failed", e); null } ?: return
+        try { renderFrame(c) } finally { holder.unlockCanvasAndPost(c) }
+    }
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surfaceReady = false
         if (frameScheduled) { Choreographer.getInstance().removeFrameCallback(this); frameScheduled = false }
@@ -428,6 +439,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         viewport.resize(w.toFloat(), h.toFloat())
         syncMatrices()
+        requestRender()
     }
 
     private fun fitIfNeeded() {

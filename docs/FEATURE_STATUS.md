@@ -28,7 +28,10 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Editor | Eraser menu: stroke eraser or partial eraser (cuts strokes, instant pixel wipe), "erase highlighter only", size slider; side button uses the same settings | ✅ | `PartialEraserTest` ×6; Tab E2E (stroke, partial + undo, highlighter-only); erase latency in PERFORMANCE.md |
 | Performance | Ink layer cache, background rebuilds, fast erasing | ✅ | docs/PERFORMANCE.md: dense-page writing and scrolling p95 about 23 ms (was 93–117 ms) |
 | Editor | Undo / redo | ✅ | Unit + E2E step 5 |
-| Editor | Multiple pages: add, previous/next | 🟡 | Implemented; not E2E tested |
+| Editor | Multiple pages: add, previous/next | ✅ | Tab E2E (page navigator run) |
+| Editor | Page sidebar (top-bar toggle, remembered): live thumbnails (cached; only the edited page re-renders, 1 s after writing pauses), tap to open, open page outlined and kept in view, "+" tile adds a page at the end | ✅ | Tab E2E 2026-10-20 (`scripts/e2e_page_navigator.py`); spec: docs/research/page-navigator-spec.md |
+| Editor | Page ⋮ menu: add before/after, duplicate, move… (+ long-press drag), delete (confirm + Undo), erase (only with content; Undo), export… | ✅ | `PageOpsTest` ×6, store tests ×6; Tab E2E for every item except export |
+| Formats | Single-page export: PDF (one page, real size), PNG/JPEG at 72/150/300 dpi; Save to device (system picker) or Share | 🟡 | `PageExportSpecTest` ×5; on the Tab the share sheet opens with the page; full export checks interrupted (see TEST_RESULTS) |
 | Editor | Paper: blank / ruled / grid / dotted | 🟡 | Rendered; seen on screenshot (ruled) |
 | Editor | Page locked to screen: fit-width on open, zoom out to whole page (centred), edge-stopped pan, fling, rotation keeps place | 🟡 | `PageViewportTest` ×9; awaiting the user's check on the Tab |
 | Editor | Lasso select (freeform or rectangle; any touch selects the whole stroke), move, resize, duplicate, delete, recolour; one undo step each | ✅ | `LassoTest` ×12; Tab E2E incl. on-screen pixel check after a move; resize by hand only |

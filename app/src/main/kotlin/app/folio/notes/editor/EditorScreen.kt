@@ -99,6 +99,20 @@ import app.folio.core.ink.SelectionTransform
 import app.folio.core.model.Stroke
 import app.folio.notes.R
 import app.folio.core.model.ToolType
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material.icons.automirrored.outlined.ViewSidebar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.runtime.saveable.rememberSaveable
+import app.folio.notes.export.PageExportSpec
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,6 +123,34 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
         override fun <T : ViewModel> create(modelClass: Class<T>): T = EditorViewModel(app, notebookId) as T
     })
     val state by vm.state.collectAsStateWithLifecycle()
+
+    // Page navigator: dialogs open for a page id (kept across rotation), notices with Undo, sharing.
+    var deleteFor by rememberSaveable { mutableStateOf<String?>(null) }
+    var moveFor by rememberSaveable { mutableStateOf<String?>(null) }
+    var exportFor by rememberSaveable { mutableStateOf<String?>(null) }
+    val pageActions = remember { PageMenuActions(onMove = { moveFor = it }, onDelete = { deleteFor = it }, onExport = { exportFor = it }) }
+    val snackbar = remember { SnackbarHostState() }
+    val context = LocalContext.current
+    val saveDocument = androidx.activity.compose.rememberLauncherForActivityResult(CreateDocumentAs()) { uri -> vm.savePageTo(uri) }
+    LaunchedEffect(vm) {
+        vm.events.collect { e ->
+            when (e) {
+                is PageEvent.Notice -> launch {
+                    snackbar.currentSnackbarData?.dismiss() // the newest notice replaces the last one
+                    val r = snackbar.showSnackbar(
+                        e.message, actionLabel = if (e.undo != null) "Undo" else null, withDismissAction = true,
+                        duration = if (e.undo != null) SnackbarDuration.Long else SnackbarDuration.Short,
+                    )
+                    if (r == SnackbarResult.ActionPerformed) e.undo?.invoke()
+                }
+                is PageEvent.Share -> try {
+                    sharePage(context, e)
+                } catch (_: android.content.ActivityNotFoundException) {
+                    vm.reportError("No app on this device can receive the page.")
+                }
+            }
+        }
+    }
 
     // Make acknowledged edits durable as soon as the app leaves the foreground.
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.flush() }
@@ -127,6 +169,10 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 GlassIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back to library", close)
+                GlassIconButton(
+                    Icons.AutoMirrored.Outlined.ViewSidebar, if (state.sidebarOpen) "Hide pages" else "Show pages", vm::toggleSidebar,
+                    tint = if (state.sidebarOpen) g.accent else null, modifier = Modifier.testTag("toggle-pages"),
+                )
                 Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
                     Text(state.meta?.title ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis, color = g.ink, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
                     Text(
@@ -143,7 +189,7 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                 GlassIconButton(Icons.AutoMirrored.Filled.NavigateBefore, "Previous page", { vm.openPage(state.pageIndex - 1) }, enabled = state.pageIndex > 0)
                 GlassIconButton(Icons.AutoMirrored.Filled.NavigateNext, "Next page", { vm.openPage(state.pageIndex + 1) }, enabled = state.pageIndex < (state.meta?.pageIds?.size ?: 1) - 1)
                 GlassIconButton(Icons.AutoMirrored.Filled.NoteAdd, "Add page after this one", vm::addPage)
-                GlassIconButton(Icons.Default.PictureAsPdf, "Export as PDF", vm::exportPdf, enabled = !state.exporting)
+                GlassIconButton(Icons.Default.PictureAsPdf, "Export notebook as PDF", vm::exportPdf, enabled = !state.exporting)
             }
             var canvasRef by remember { mutableStateOf<InkCanvasView?>(null) }
             var viewportTick by remember { mutableStateOf(0) }
@@ -156,7 +202,21 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                     pickImage.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
             )
-            Box(Modifier.fillMaxSize().clipToBounds()) {
+            Row(Modifier.fillMaxSize()) {
+            // Slides and fades without animating its width, so the canvas is resized once
+            // (PageViewport.resize keeps zoom and position) instead of on every frame.
+            val meta = state.meta
+            AnimatedVisibility(
+                visible = state.sidebarOpen && meta != null,
+                enter = slideInHorizontally { -it } + fadeIn(), exit = slideOutHorizontally { -it } + fadeOut(),
+            ) {
+                if (meta != null) PageSidebar(
+                    vm = vm, pageIds = meta.pageIds, current = state.pageIndex, defaultAspect = meta.pageHeight / meta.pageWidth,
+                    actions = pageActions,
+                    modifier = Modifier.width(SIDEBAR_WIDTH).fillMaxHeight().padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
+                )
+            }
+            Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
                 val page = state.page
                 if (page != null) {
                     val tools = state.tools
@@ -210,9 +270,42 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
                     )
                 }
             }
+            }
         }
+        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).systemBarsPadding().padding(bottom = 16.dp))
     }
     }
+
+    // ---- page navigator dialogs ----
+    val pageNumber = { id: String -> (state.meta?.pageIds?.indexOf(id) ?: 0) + 1 }
+    deleteFor?.let { id ->
+        DeletePageDialog(pageNumber(id), onDelete = { vm.deletePage(id) }, onDismiss = { deleteFor = null })
+    }
+    moveFor?.let { id ->
+        MovePageDialog(pageNumber(id), state.meta?.pageIds?.size ?: 1, onMove = { to -> vm.movePage(id, to) }, onDismiss = { moveFor = null })
+    }
+    exportFor?.let { id ->
+        val size = vm.thumbnails.peekAny(id)?.let { it.pageWidth to it.pageHeight } ?: state.meta?.let { it.pageWidth to it.pageHeight }
+        ExportPageDialog(
+            pageNumber(id), size,
+            onSave = { spec ->
+                vm.pendingSave = id to spec
+                try {
+                    saveDocument.launch(spec.format.mime to vm.exportFileName(id, spec))
+                } catch (e: android.content.ActivityNotFoundException) {
+                    vm.pendingSave = null
+                    vm.reportError("No app on this device can save files. Use Share instead.")
+                }
+            },
+            onShare = { spec -> vm.sharePage(id, spec) },
+            onDismiss = { exportFor = null },
+        )
+    }
+    if (state.pageExporting) AlertDialog(
+        onDismissRequest = {}, confirmButton = {},
+        title = { Text("Exporting page…") },
+        text = { androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth()) },
+    )
 
     if (state.exporting) AlertDialog(
         onDismissRequest = {}, confirmButton = {},
@@ -220,7 +313,6 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
         text = { androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth()) },
     )
     state.exported?.let { result ->
-        val context = LocalContext.current
         AlertDialog(
             onDismissRequest = vm::dismissExport,
             title = { Text("PDF exported") },

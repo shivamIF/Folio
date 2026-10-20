@@ -24,13 +24,14 @@ object NotebookPdfExporter {
     /** Pictures are embedded at most this many pixels on the long side. */
     private const val EXPORT_IMAGE_PX = 2400
 
-    fun write(repo: DocumentRepository, meta: NotebookMeta, out: OutputStream) {
+    /** Writes [pageIds] (all pages by default, in notebook order) as one PDF. */
+    fun write(repo: DocumentRepository, meta: NotebookMeta, out: OutputStream, pageIds: List<String> = meta.pageIds) {
         val doc = PdfDocument()
         val renderer = PageRenderer(forPdf = true)
         val sources = HashMap<String, PdfFile>()
         val pictures = HashMap<String, android.graphics.Bitmap?>()
         try {
-            for ((i, pageId) in meta.pageIds.withIndex()) {
+            for ((i, pageId) in pageIds.withIndex()) {
                 val page = repo.loadPage(meta.id, pageId)
                 val wPt = (page.width * POINTS_PER_UNIT).roundToInt().coerceAtLeast(1)
                 val hPt = (page.height * POINTS_PER_UNIT).roundToInt().coerceAtLeast(1)
