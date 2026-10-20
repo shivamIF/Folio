@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only page exports written for the share sheet are shareable; notebooks are never exposed. -->
+<paths>
+    <cache-path name="exports" path="exports/" />
+</paths>

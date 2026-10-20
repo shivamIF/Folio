@@ -1,14 +1,30 @@
-# Test Results (2026-10-18)
+# Test Results (2026-10-19)
 
-## Unit tests: `./gradlew test`. 62 tests, 0 failures (40 in the first table below, plus page formats ×3, page size storage ×2, PageViewport ×10, notebook defaults ×2, pressure curve ×4, natural-tilt pencil ×1)
+## Page navigator (2026-10-20)
+- **Unit:** `./gradlew test`, 212 tests, 0 failures. New: `PageOpsTest` ×6, `NotebookStoreTest` +6 (insert/delete/move/stamp), `PageExportSpecTest` ×5. `BrushEngineTest.buildingIsFastEnoughToRedoEveryFrame` is a wall-clock check: it failed once in a fully parallel build and passed 3/3 on its own.
+- **Galaxy Tab S6 Lite** (`scripts/e2e_page_navigator.py`, landscape, the user's data untouched): 13 checks passed:
+  - notebook with 3 pages; sidebar opens and the canvas makes room; thumbnails show each page's ink; tap opens a page;
+  - writing refreshes only that page's thumbnail;
+  - duplicate; move + Undo; add before; Erase hidden on a blank page; erase + Undo; delete (Cancel, then Delete, page file removed) + Undo;
+  - long-press drag reorders.
+
+  The share sheet then opened with the exported page. The user stopped testing there, so the remaining checks were not re-run on the final build: export pixel sizes, PDF save, cancel, hide/show, and restart.
+- **Defects found on the Tab and fixed:**
+  1. After the sidebar opened or closed, the page surface kept its last frame at the old size, stretched, leaving a black strip. Fix: `InkCanvasView` requests a frame on resize and draws one in `surfaceRedrawNeeded`. Verified: 5 open/close cycles, buffer = view size each time.
+  2. Long-press drag did nothing: the thumbnail's long-click consumed the gesture. Fix: plain click on the thumbnail; the list owns long-press.
+
+## Unit tests: `./gradlew test`. 170 tests, 0 failures (brush work: schema 3 → 4 upgrade and new tool round-trip ×2, Brush Lab input ×5; shape refinement: closing and level lines ×2, regularisation ×6; sync work since: open-notebook sends/live receive ×3, store live hand-off ×1, page merge ×6, Drive multipart/resumable ×1 and change feed ×1; sync before that added 17: engine ×9, store-to-store ×6, fake-Drive HTTP ×2; step 5 added 12; earlier: 115).
 | Module | Suites | Tests | Covers |
 |---|---|---|---|
 | core:model | CodecTest, PageEditorTest | 10 | Every stroke channel round-trips; Unicode; newer schema rejected; malformed, truncated, empty and inconsistent input → `CorruptDocumentException`; unknown fields tolerated; add/erase/undo/redo with z-order; redo cleared by a new edit; replace; snapshot isolation; bounded history |
 | core:ink | PenProfileTest, StrokeBuilderTest, StrokeGeometryTest | 14 | Pressure→width; highlighter ignores pressure; tilt widens pencil; clamping; stabilisation reduces jitter; stroke ends at the pen-up point; monotonic time; duplicate merging; buffer growth; outline width and caps; dot; empty; eraser hit/miss; fast eraser swipe doesn't skip strokes |
 | core:storage | NotebookStoreTest | 10 | Reopen after "restart"; corrupt page → `.bak` recovery; corrupt with no backup → error, not silent loss; leftover `.tmp` after a crash ignored; nested folders and safe folder delete; unknown parent rejected; page insert position; delete removes files; path-traversal ids rejected; blank names |
+| app | ToolStateTest | 7 | Recent colours most-recent-first, de-duplicated, capped at 6; picking a colour leaves eraser/lasso; 3 size presets per tool inside its range with the default in the middle; pen slot remembers the last pen style across pencil; selecting a writing tool leaves eraser/lasso/text; every pen style shares the pen slot; swatch grid rectangular without duplicates |
 | app | InputPolicyTest | 6 | Finger draws until a stylus is seen, then navigates; barrel button / eraser end / eraser tool erase; large contact = palm; finger within 400 ms of pen = palm; multi-touch navigates; pen-only can be switched off |
 
-## End-to-end: `scripts/e2e_milestone.py`. 6/6 checks, 4 consecutive green runs
+## End-to-end: `scripts/e2e_milestone.py`. 18 checks (milestone 6 + lasso 5 + PDF 3 + library 2 + eraser 2); latest run 20/20 on the emulator (2026-10-19, adds shape snap and text box checks), and 18/18 on the Galaxy Tab S6 Lite before it. Not re-run on the Tab, because it clears app data and the Tab holds the user's imported notes
+
+Performance results are in `docs/PERFORMANCE.md` (`scripts/perf_tab.py`).
 - **Device**: Android emulator `sdk_gphone64_arm64`, API 35, 1080×2400 (a phone form factor, not a tablet).
 - **Input**: `adb shell input stylus swipe` (`TOOL_TYPE_STYLUS`, constant pressure).
 
@@ -38,6 +54,26 @@ Each step also fails the run if an error dialog is on screen.
 | 11 | user | Page size was asked for on every new notebook | Default page size (A4/A5/Letter/Legal/Auto), orientation and paper moved to Settings on the home screen |
 | 13 | Tab data + user | Lines too thin: normal writing pressure is about 0.3, but pens assumed 1.0 | `PressureCurve` (raw 0.6 = full effort, applied when writing, stored in the stroke), "Pen pressure" slider (light ↔ firm hand), fountain pen retuned. On the user's 3,245 recorded samples the median width went from 42% to 70% of the set size, and the light-to-firm range from 32–56% to 52–89%. **Awaiting the user's feel test** |
 | 14 | Tab data | Pencil shaded during normal writing (natural tilt 37–54°) | Shading starts only past 52° of lean |
+| 15 | user | Lasso needed most of a stroke inside the loop | Any touch (point inside, or the loop outline crossing the ink) selects the whole stroke |
+| 16 | user + log | Moved selection snapped back on pen-up and looked deselected. The data had moved; the screen drew a stale cached path (cache keyed by stroke id only) | Cache also checks stroke identity. E2E now checks screen pixels after a move |
+| 17 | Tab E2E | In portrait the toolbar overflowed, hiding Lasso/Eraser off-screen | Toolbar groups wrap onto extra rows |
+| 18 | Tab E2E + log | A finger touching mid-stroke made Android 13 cancel the pen, and the stroke was lost | Cancelled *pen* strokes are kept up to the cancel point; finger strokes are still discarded |
+| 19 | PDF E2E | Imported Letter pages were normalised to A4 width, so the export was 3% smaller | Physical page size kept; E2E asserts the 612×792 pt MediaBox round-trips |
+| 21 | screenshot review | Selected black swatch looked like an empty ring on the dark toolbar | Outer selection ring with gap + thin outline on every swatch; verified on a Tab screenshot |
+| 22 | Tab benchmark | Rendering every stroke as vector paths each frame: 600 strokes gave 25–36 ms frames; 3,000 gave 100% jank | Ink layer cache (PERFORMANCE.md) |
+| 23 | perf log | Cache rebuilt endlessly at the page bottom (height rounded down 0.67 units short) | Round sizes up; one-pixel coverage tolerance |
+| 24 | user + benchmark | Partial erase lagged behind the pen (15–26 ms p95, up to 64% jank) | Pixel wipe on the cache, exact pieces at pen-up, wiped cache adopted; now about 5 ms |
+| 25 | Tab E2E | "Erase highlighter only": tapping the label didn't toggle it | The whole row toggles |
+| 20 | build | After moving to Desktop, builds ran stale copied outputs and iCloud created conflict copies (`Lasso 2.kt`); builds took 10 min | Project moved to `~/Developer/Folio` (not synced); clean rebuild; committed code re-verified (62/62) |
+| 26 | Tab | Opening an imported 7,106-stroke Samsung page crashed the app (OutOfMemoryError: the codec built a JSON tree of the 28 MB page just to read `schemaVersion`) | Key scan instead of a tree; regression test in a 256 MB heap, confirmed to fail with the old approach |
+| 27 | Tab perf log | That page then took 17.3 s to open (parsing about 7 million numbers) | Schema 2 packed points: 4.4 s, file 20% smaller |
+| 28 | user + perf_zoom | Zooming a dense page lagged (36–57% janky frames) and blurred for 2+ s | Page on its own SurfaceView; tiled renderer (ADR-8): 0–0.2% janky, sharp within one frame |
+| 29 | Tab screenshot | After the SurfaceView change the page was black (my `invalidate()` override swallowed SurfaceView's hole-punch invalidation) | Explicit `requestRender()`; `invalidate()` left alone |
+| 30 | build | Gradle cache files were deleted outside the project; builds failed with missing transforms, then damaged outputs restored from the build cache | Cleared `~/.gradle/caches/9.3.1/transforms` and `build-cache-1` (regenerable) |
+| 31 | user + perf_erase | The eraser lagged on a dense page (5–29 frames per rub, latency up to 260 ms) | Stroke grid index, id-based tile diffs, one-pass piece cutting in the background, O(n) split/undo (see PERFORMANCE.md) |
+| 32 | E2E | A finger tap in the Text tool did nothing (fingers only scroll once a pen has been seen) | Quick single-finger taps place or edit text |
+| 33 | emulator screenshot | On narrow screens the new buttons pushed the eraser off the toolbar | The tool group wraps |
+| 34 | research | Samsung: 1,896 strokes with recognition data, 588 shape-tool strokes and 367 rotated strokes were skipped; about 1,100 strokes were misread as highlighters | Whole-object header search, header-size range 8–64, colour flag in header byte 4, validated rotation |
 | 12 | user | Wanted to zoom out further, page always centred | Zoom out to half of whole-page, centred on both axes in both orientations; Auto page size shaped like the screen. **Awaiting confirmation** |
 
 ## Physical device: Galaxy Tab S6 Lite (SM-P615, Android 13, One UI 5.1.1)

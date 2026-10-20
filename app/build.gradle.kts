@@ -21,6 +21,16 @@ android {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        // The build to judge smoothness with: the debug build's code, but not debuggable, so ART
+        // compiles it fully and Compose skips its debug-only bookkeeping. Signed with the debug
+        // key, so it installs over a debug build (adb install -r) and keeps the notebooks.
+        // Not debuggable means no `run-as`: back up and run the E2E scripts with a debug build.
+        create("perf") {
+            initWith(getByName("debug"))
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("debug")
+        }
     }
 
     compileOptions {
@@ -39,6 +49,11 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:ink"))
     implementation(project(":core:storage"))
+    implementation(project(":core:interop"))
+    implementation(project(":core:sync"))
+    // Google sign-in for Drive sync (free; only the private app-folder scope is requested).
+    implementation(libs.play.services.auth)
+    implementation(libs.work.runtime)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
@@ -51,6 +66,12 @@ dependencies {
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.motion.prediction)
+    implementation(libs.graphics.core)
+
+    // Brush Lab (src/debug) compares Folio's engine with AndroidX Ink. Never in release builds.
+    debugImplementation(libs.ink.brush)
+    debugImplementation(libs.ink.strokes)
+    debugImplementation(libs.ink.rendering)
 
     testImplementation(libs.kotlin.test)
 }
