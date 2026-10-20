@@ -1,6 +1,11 @@
 package app.folio.core.model
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonNames
 import kotlinx.serialization.ExperimentalSerializationApi
 import java.util.UUID
@@ -56,6 +61,30 @@ data class Cover(
 @Serializable
 enum class CoverStyle { PLAIN, STRIPE, CORNER }
 
+/**
+ * Glyph drawn on a folder. Stored by name; the app maps each one to its own artwork.
+ * A name this build doesn't know (added by a newer one) reads as [NONE].
+ */
+@Serializable(with = FolderIconSerializer::class)
+enum class FolderIcon {
+    NONE, BOOK, NOTES, SCHOOL, INSTITUTION, LAW, GLOBE, HISTORY, ETHICS, ECONOMY, CHART,
+    SCIENCE, BIOLOGY, MATH, FUNCTIONS, CODE, LANGUAGE, PSYCHOLOGY, IDEA, COMPASS, ART,
+    MUSIC, WORK, HOME, HEART, STAR, SMILE,
+}
+
+internal object FolderIconSerializer : KSerializer<FolderIcon> {
+    override val descriptor = PrimitiveSerialDescriptor("app.folio.FolderIcon", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: FolderIcon) = encoder.encodeString(value.name)
+    override fun deserialize(decoder: Decoder): FolderIcon =
+        decoder.decodeString().let { n -> FolderIcon.entries.firstOrNull { it.name == n } } ?: FolderIcon.NONE
+}
+
+/**
+ * [icon], [favorite] and [deletedAt] were added without a schema bump: they are optional with
+ * defaults, so files from before them load unchanged, and an older schema-5 build still opens
+ * new files (it ignores the three fields). Every change to a folder, starring and trashing
+ * included, moves [modifiedAt] on, because sync merges folders by newest [modifiedAt].
+ */
 @Serializable
 data class Folder(
     val id: String = newId(),
@@ -64,6 +93,10 @@ data class Folder(
     val color: Argb = 0xFF98C1D9,
     val createdAt: Long,
     val modifiedAt: Long = createdAt,
+    val icon: FolderIcon = FolderIcon.NONE,
+    val favorite: Boolean = false,
+    /** Set when moved to Trash (epoch ms); its subfolders and notebooks go with it. Null for live folders. */
+    val deletedAt: Long? = null,
 )
 
 /**
@@ -100,7 +133,31 @@ data class LibraryIndex(
     val schemaVersion: Int = SCHEMA_VERSION,
     val folders: List<Folder> = emptyList(),
     val notebooks: List<NotebookMeta> = emptyList(),
-)
+) {
+    /** Ids of folders that are in Trash, directly or because an ancestor is. */
+    fun trashedFolderIds(): Set<String> {
+        val byId = folders.associateBy { it.id }
+        val out = HashSet<String>()
+        for (f in folders) {
+            var cur: Folder? = f
+            var steps = 0
+            // The step limit guards against a parent cycle in a damaged file.
+            while (cur != null && steps++ <= folders.size) {
+                if (cur.deletedAt != null) { out += f.id; break }
+                cur = cur.parentId?.let(byId::get)
+            }
+        }
+        return out
+    }
+
+    /** [rootId] and every folder below it. */
+    fun descendantFolderIds(rootId: String): Set<String> {
+        val out = linkedSetOf(rootId)
+        var grew = true
+        while (grew) grew = out.addAll(folders.filter { it.parentId in out }.map { it.id })
+        return out
+    }
+}
 
 /**
  * Persisted by name. FINELINER and MARKER arrived in schema 4, AIRBRUSH in schema 5.

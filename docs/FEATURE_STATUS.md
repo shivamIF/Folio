@@ -10,12 +10,15 @@ Legend: ✅ done and tested · 🟡 implemented, partially verified · ⏳ plann
 | Foundation | Restore open notebook after rotation / process death | 🟡 | `rememberSaveable` route; not tested yet |
 | Library | Create notebook (title, cover colour/style, paper) | ✅ | E2E step 2 |
 | Library | Default page size in Settings: A4 / A5 / Letter / Legal / Auto (screen-shaped), portrait or landscape, default paper | 🟡 | Model, store and defaults unit-tested; Settings UI not E2E tested |
-| Library | Nested folders: create, rename, delete (keeps notebooks) | 🟡 | Store unit-tested; UI not E2E tested |
-| Library | Rename / recolour notebook, favourites, delete with confirm | 🟡 | UI wired to the repository; not E2E tested |
-| Library | Sort (recent / title / created), title search | 🟡 | Implemented; not tested |
+| Library | Goodnotes-style layout: collapsible sidebar (full ↔ icon rail, remembered), Documents / Favorites / Trash, breadcrumb header, dark and light themes | 🟡 | Emulator walkthrough (light + dark, landscape); Tab check pending |
+| Library | Folders: create, nest, customise colour (10 presets + custom hue/shade) and icon (26), rename, star, move, Trash with contents, restore, delete forever | 🟡 | Store tests ×7, codec tests ×4; emulator walkthrough |
+| Library | Move notebooks and folders to any folder (folder-tree picker; refuses moving a folder into itself) | 🟡 | Store test; emulator walkthrough |
+| Library | Rename / recolour notebook, duplicate (pages + attachments), star from the tile or menu | 🟡 | Duplicate store test; emulator walkthrough |
+| Library | Sort (last modified / name / date created / type, either direction), filter (all / notebooks / folders), grid or list, search across folders | 🟡 | LibraryQueryTest ×7; emulator walkthrough |
 | Library | First-page previews (default: imported PDFs; Settings: all notebooks or covers only); refresh when edited | ✅ | Tab E2E checks the preview's pixels; cached as PNGs in the cache dir |
 | Library | Trash: Move to Trash (with Undo), Restore (to root if folder gone), Delete forever, Empty trash, auto-purge after 30 days | ✅ | Storage tests ×4; Tab E2E trash → restore with content intact |
-| Library | Subject collections, multi-select, drag-and-drop | ⏳ | |
+| Library | Multi-select: select all, bulk star / move / Trash; in Trash bulk restore / delete forever | 🟡 | Emulator walkthrough |
+| Library | Drag-and-drop onto folders, subject collections | ⏳ | Move uses the picker for now |
 | Editor | Fountain, ballpoint, fine liner, pencil, brush, airbrush, marker, highlighter (glass shelf: pen tray + utilities tray) | 🟡 | Profiles unit-tested; `everyPenStyleIsDistinct` checks no two tools look alike. Airbrush added 2026-10-19 (schema 5, docs/research/pen-styles.md); calligraphy, crayon and watercolour tried on the Tab and withdrawn |
 | Editor | Brush Lab (debug builds only, no launcher icon): one capture replayed through v1, v2 (slot) and AndroidX Ink | 🟡 | Runs on the Tab; v2 column waits for engine v2. `adb shell am start -n app.folio.notes/.lab.BrushLabActivity --ez sample true` |
 | Editor | Colour palette, per-tool width, stabilisation slider | 🟡 | Persisted in prefs; not E2E tested |

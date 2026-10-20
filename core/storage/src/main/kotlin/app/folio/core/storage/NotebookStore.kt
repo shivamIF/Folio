@@ -4,6 +4,8 @@ import app.folio.core.model.CorruptDocumentException
 import app.folio.core.model.Cover
 import app.folio.core.model.DocumentCodec
 import app.folio.core.model.Folder
+import app.folio.core.model.newId
+import app.folio.core.model.FolderIcon
 import app.folio.core.model.LibraryIndex
 import app.folio.core.model.NotebookMeta
 import app.folio.core.model.Page
@@ -27,8 +29,26 @@ interface DocumentRepository {
     fun trashNotebook(id: String)
     /** Brings a notebook back from Trash (to the root if its folder no longer exists). */
     fun restoreNotebook(id: String)
-    /** Permanently deletes trashed notebooks deleted before [cutoff] (epoch ms). Returns how many. */
+    /**
+     * Permanently deletes notebooks and folders that went to Trash before [cutoff] (epoch ms);
+     * a folder takes its subfolders and their notebooks with it. Returns how many items were in Trash.
+     */
     fun purgeTrash(cutoff: Long): Int
+
+    /** Changes a folder's name, colour or icon; a null argument leaves that field as it is. */
+    fun updateFolder(id: String, name: String? = null, color: Long? = null, icon: FolderIcon? = null): Folder
+    /** Stars or unstars notebooks and folders (they show in Favorites). */
+    fun setFavorite(notebookIds: Collection<String>, folderIds: Collection<String>, favorite: Boolean)
+    /** Moves notebooks and folders into [targetFolderId] (null = top level). A folder can't go inside itself. */
+    fun moveItems(notebookIds: Collection<String>, folderIds: Collection<String>, targetFolderId: String?)
+    /** Copies a notebook with its pages and attachments; the copy is placed next to the original. */
+    fun duplicateNotebook(id: String): NotebookMeta
+    /** Moves a folder to Trash; everything inside it goes too and keeps its files. */
+    fun trashFolder(id: String)
+    /** Brings a folder back from Trash (to the top level if its parent is gone or still in Trash). */
+    fun restoreFolder(id: String)
+    /** Permanently deletes a folder, its subfolders and every notebook in them. */
+    fun deleteFolderForever(id: String)
     fun addPage(notebookId: String, afterIndex: Int): NotebookMeta
 
     /**
@@ -166,7 +186,8 @@ class FileNotebookStore(
 
     override fun restoreNotebook(id: String) = synchronized(lock) {
         val idx = loadIndex()
-        val folders = idx.folders.mapTo(HashSet()) { it.id }
+        // A folder that is itself in Trash doesn't count: the notebook would stay hidden.
+        val folders = idx.folders.mapTo(HashSet()) { it.id } - idx.trashedFolderIds()
         saveIndex(
             idx.copy(
                 notebooks = idx.notebooks.map {
@@ -178,12 +199,112 @@ class FileNotebookStore(
 
     override fun purgeTrash(cutoff: Long): Int = synchronized(lock) {
         val idx = loadIndex()
-        val doomed = idx.notebooks.filter { (it.deletedAt ?: Long.MAX_VALUE) < cutoff }
-        if (doomed.isEmpty()) return@synchronized 0
-        // Drop them from the index first: a crash mid-way then leaves orphan files, never a broken entry.
-        saveIndex(idx.copy(notebooks = idx.notebooks - doomed.toSet()))
-        doomed.forEach { notebookDir(it.id).deleteRecursively() }
-        doomed.size
+        val trashed = idx.trashedFolderIds()
+        val expiredFolders = idx.folders.filter { (it.deletedAt ?: Long.MAX_VALUE) < cutoff && it.parentId !in trashed }
+        val doomedFolders = expiredFolders.flatMap { idx.descendantFolderIds(it.id) }.toSet()
+        val doomed = idx.notebooks.filter { (it.deletedAt ?: Long.MAX_VALUE) < cutoff || it.folderId in doomedFolders }
+        if (doomed.isEmpty() && doomedFolders.isEmpty()) return@synchronized 0
+        removeForever(idx, doomed.mapTo(HashSet()) { it.id }, doomedFolders)
+        doomed.count { it.deletedAt != null } + expiredFolders.size
+    }
+
+    override fun updateFolder(id: String, name: String?, color: Long?, icon: FolderIcon?): Folder = synchronized(lock) {
+        val idx = loadIndex()
+        val old = idx.folders.firstOrNull { it.id == id } ?: throw IllegalArgumentException("folder not found")
+        val updated = old.copy(
+            name = name?.trim()?.ifEmpty { null } ?: old.name,
+            color = color ?: old.color,
+            icon = icon ?: old.icon,
+            modifiedAt = clock(),
+        )
+        saveIndex(idx.copy(folders = idx.folders.map { if (it.id == id) updated else it }))
+        updated
+    }
+
+    override fun setFavorite(notebookIds: Collection<String>, folderIds: Collection<String>, favorite: Boolean) = synchronized(lock) {
+        val idx = loadIndex()
+        val now = clock()
+        saveIndex(
+            idx.copy(
+                folders = idx.folders.map { if (it.id in folderIds) it.copy(favorite = favorite, modifiedAt = now) else it },
+                notebooks = idx.notebooks.map { if (it.id in notebookIds) it.copy(favorite = favorite, modifiedAt = now) else it },
+            ),
+        )
+    }
+
+    override fun moveItems(notebookIds: Collection<String>, folderIds: Collection<String>, targetFolderId: String?) = synchronized(lock) {
+        val idx = loadIndex()
+        if (targetFolderId != null) {
+            require(idx.folders.any { it.id == targetFolderId }) { "destination folder not found" }
+            require(targetFolderId !in idx.trashedFolderIds()) { "destination folder is in Trash" }
+            for (f in folderIds) require(targetFolderId !in idx.descendantFolderIds(f)) { "a folder can't be moved inside itself" }
+        }
+        val now = clock()
+        saveIndex(
+            idx.copy(
+                folders = idx.folders.map {
+                    when {
+                        it.id in folderIds -> it.copy(parentId = targetFolderId, modifiedAt = now)
+                        it.id == targetFolderId -> it.copy(modifiedAt = now)
+                        else -> it
+                    }
+                },
+                notebooks = idx.notebooks.map { if (it.id in notebookIds) it.copy(folderId = targetFolderId, modifiedAt = now) else it },
+            ),
+        )
+    }
+
+    override fun duplicateNotebook(id: String): NotebookMeta = synchronized(lock) {
+        val idx = loadIndex()
+        val src = idx.notebooks.firstOrNull { it.id == id } ?: throw IllegalArgumentException("notebook not found")
+        val now = clock()
+        val titles = idx.notebooks.mapTo(HashSet()) { it.title }
+        var title = "${src.title} (copy)"
+        var n = 2
+        while (title in titles) title = "${src.title} (copy ${n++})"
+        val copyId = newId()
+        // One page at a time: an imported page can be large, and the heap is small on tablets.
+        val pageIds = src.pageIds.map { pid ->
+            val page = readWithFallback(pageFile(src.id, pid), DocumentCodec::decodePage)
+                ?: Page(id = pid, width = src.pageWidth, height = src.pageHeight, paper = src.paper)
+            val copy = page.copy(id = newId())
+            writePage(copyId, copy)
+            copy.id
+        }
+        // Pages refer to attachments by id, so the files keep their names.
+        File(notebookDir(src.id), "attachments").takeIf { it.isDirectory }
+            ?.copyRecursively(File(notebookDir(copyId), "attachments"), overwrite = true)
+        val copy = src.copy(id = copyId, title = title, pageIds = pageIds, createdAt = now, modifiedAt = now, favorite = false, deletedAt = null)
+        val list = idx.notebooks.toMutableList().apply { add(indexOfFirst { it.id == id } + 1, copy) }
+        saveIndex(idx.copy(notebooks = list))
+        copy
+    }
+
+    override fun trashFolder(id: String) = synchronized(lock) {
+        val idx = loadIndex()
+        require(idx.folders.any { it.id == id }) { "folder not found" }
+        val now = clock()
+        saveIndex(idx.copy(folders = idx.folders.map { if (it.id == id) it.copy(deletedAt = now, modifiedAt = now) else it }))
+    }
+
+    override fun restoreFolder(id: String) = synchronized(lock) {
+        val idx = loadIndex()
+        val now = clock()
+        val restored = idx.copy(folders = idx.folders.map { if (it.id == id) it.copy(deletedAt = null, modifiedAt = now) else it })
+        val home = restored.folders.mapTo(HashSet()) { it.id } - restored.trashedFolderIds() - restored.descendantFolderIds(id)
+        saveIndex(restored.copy(folders = restored.folders.map { if (it.id == id && it.parentId !in home) it.copy(parentId = null) else it }))
+    }
+
+    override fun deleteFolderForever(id: String) = synchronized(lock) {
+        val idx = loadIndex()
+        val doomedFolders = idx.descendantFolderIds(id)
+        removeForever(idx, idx.notebooks.filter { it.folderId in doomedFolders }.mapTo(HashSet()) { it.id }, doomedFolders)
+    }
+
+    /** Index first, then files: a crash in between leaves unreferenced files on disk, never a broken entry. */
+    private fun removeForever(idx: LibraryIndex, notebookIds: Set<String>, folderIds: Set<String>) {
+        saveIndex(idx.copy(folders = idx.folders.filter { it.id !in folderIds }, notebooks = idx.notebooks.filter { it.id !in notebookIds }))
+        notebookIds.forEach { notebookDir(it).deleteRecursively() }
     }
 
     override fun deleteNotebook(id: String) = synchronized(lock) {

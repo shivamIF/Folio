@@ -27,3 +27,5 @@
 13. **Text boxes:** there's no rich text (bold, mixed sizes), no text rotation, and the box doesn't scroll into view above the keyboard yet.
 14. **Pictures:** removing a picture keeps its file in the notebook, so undo can bring it back. Files aren't cleaned up yet.
 15. **No Mac app yet.** The core modules are plain Kotlin, ready for one.
+16. **Folder extras and older builds.** Folder icon, folder star and folder Trash were added without a schema bump, so schema-5 builds still open the library. Those builds ignore the three fields, though, and if one of them saves the library, folder icons and stars are dropped and trashed folders reappear. Notebooks are unaffected. Folders deleted forever can come back through Drive sync, because sync unites folder lists by id; use Trash instead (it syncs) until sync learns folder deletions.
+17. **Library moves use a picker**: no drag-and-drop onto folders yet.

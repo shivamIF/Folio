@@ -1,62 +1,87 @@
 package app.folio.notes.library
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.automirrored.outlined.ViewList
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material3.SnackbarDuration
-import androidx.compose.material3.SnackbarResult
-import androidx.compose.ui.graphics.asImageBitmap
-import kotlinx.coroutines.launch
-import androidx.compose.material.icons.filled.PictureAsPdf
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.CreateNewFolder
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FileOpen
+import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material.icons.outlined.NoteAdd
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.RestoreFromTrash
+import androidx.compose.material.icons.outlined.SearchOff
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.material.icons.outlined.ViewSidebar
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,48 +91,40 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import app.folio.core.model.Cover
-import app.folio.core.model.CoverStyle
 import app.folio.core.model.Folder
 import app.folio.core.model.NotebookMeta
-import app.folio.core.model.PaperTemplate
-import app.folio.notes.ui.CoverColors
-import app.folio.notes.ui.GlassBackdrop
-import app.folio.notes.ui.LocalGlass
-import app.folio.notes.ui.ProvideGlass
-import app.folio.notes.ui.androidxClickable
-import app.folio.notes.ui.glass
-import app.folio.notes.ui.springy
-import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.layout.statusBarsPadding
-import java.text.DateFormat
-import java.util.Date
+import app.folio.notes.ui.LocalLibraryColors
 
 private sealed interface Dialog {
     data object NewNotebook : Dialog
     data object NewFolder : Dialog
     data object Settings : Dialog
+    data object EmptyTrash : Dialog
     data class EditNotebook(val meta: NotebookMeta) : Dialog
-    data class RenameFolder(val folder: Folder) : Dialog
-    data class ConfirmDeleteForever(val meta: NotebookMeta) : Dialog
-    data object ConfirmEmptyTrash : Dialog
-    data class ConfirmDeleteFolder(val folder: Folder) : Dialog
+    data class CustomizeFolder(val folder: Folder) : Dialog
+    data class Move(val keys: Set<String>) : Dialog
+    data class DeleteForever(val keys: Set<String>) : Dialog
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Below this width the sidebar always shows as the narrow icon rail. */
+private val CompactWidth = 600.dp
+
 @Composable
 fun LibraryScreen(
     onOpenNotebook: (String) -> Unit,
@@ -116,135 +133,112 @@ fun LibraryScreen(
     vm: LibraryViewModel = viewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val pickPdf = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
-    ) { uri -> if (uri != null) vm.importDocument(uri, onCreated = onOpenNotebook) }
-    // A PDF opened or shared from another app.
+    // Any file: the type is detected from its contents (PDF, GoodNotes, Samsung Notes).
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.importDocument(uri, onCreated = onOpenNotebook)
+    }
+    // A file opened or shared from another app.
     LaunchedEffect(importRequest) {
         if (importRequest != null) { vm.importDocument(importRequest, onCreated = onOpenNotebook); onImportHandled() }
     }
     var dialog by remember { mutableStateOf<Dialog?>(null) }
-    var searching by remember { mutableStateOf(false) }
-    var sortMenu by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
+    val q = state.query
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
-    LaunchedEffect(state.message) { state.message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
-    BackHandler(enabled = state.showingTrash) { vm.showTrash(false) }
-    BackHandler(enabled = !state.showingTrash && state.folderId != null) { vm.goUp() }
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-
-    ProvideGlass {
-    val g = LocalGlass.current
-    Box(Modifier.fillMaxSize()) {
-    GlassBackdrop()
-    Scaffold(
-        containerColor = Color.Transparent,
-        topBar = {
-            TopAppBar(
-                colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = g.ink, actionIconContentColor = g.ink, navigationIconContentColor = g.ink),
-                modifier = Modifier.statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp).glass(RoundedCornerShape(28.dp), elevation = 12.dp),
-                windowInsets = androidx.compose.foundation.layout.WindowInsets(0),
-                title = {
-                    if (searching) OutlinedTextField(
-                        value = state.query, onValueChange = vm::setQuery, singleLine = true,
-                        placeholder = { Text("Search notebooks") }, modifier = Modifier.fillMaxWidth().testTag("search"),
-                    ) else Text(if (state.showingTrash) "Trash" else state.currentFolder?.name ?: "Notebooks", fontWeight = FontWeight.Bold, fontSize = 26.sp)
-                },
-                navigationIcon = {
-                    if (state.showingTrash) IconButton(onClick = { vm.showTrash(false) }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to notebooks")
-                    } else if (state.folderId != null) IconButton(onClick = vm::goUp) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to parent folder")
-                    }
-                },
-                actions = if (state.showingTrash) ({
-                    TextButton(onClick = { dialog = Dialog.ConfirmEmptyTrash }, enabled = state.trashed.isNotEmpty()) { Text("Empty trash") }
-                }) else ({
-                    IconButton(onClick = { searching = !searching; if (!searching) vm.setQuery("") }) {
-                        Icon(Icons.Default.Search, contentDescription = "Search")
-                    }
-                    Box {
-                        IconButton(onClick = { sortMenu = true }) { Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort") }
-                        DropdownMenu(sortMenu, onDismissRequest = { sortMenu = false }) {
-                            SortOrder.entries.forEach { o ->
-                                DropdownMenuItem(
-                                    text = { Text((if (o == state.sort) "✓ " else "") + o.name.lowercase().replaceFirstChar { it.uppercase() }) },
-                                    onClick = { vm.setSort(o); sortMenu = false },
-                                )
-                            }
-                        }
-                    }
-                    // Any file: the type is detected from its contents (PDF, GoodNotes).
-                    IconButton(onClick = { pickPdf.launch(arrayOf("*/*")) }, enabled = !state.importing) {
-                        Icon(Icons.Default.PictureAsPdf, contentDescription = "Import PDF or GoodNotes")
-                    }
-                    IconButton(onClick = { dialog = Dialog.NewFolder }) { Icon(Icons.Default.CreateNewFolder, contentDescription = "New folder") }
-                    IconButton(onClick = { vm.showTrash(true) }) { Icon(Icons.Outlined.Delete, contentDescription = "Trash") }
-                    IconButton(onClick = { dialog = Dialog.Settings }) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
-                }),
-            )
-        },
-        floatingActionButton = {
-            if (!state.showingTrash) Row(
-                Modifier.testTag("new-notebook").springy(hoverScale = 1.06f)
-                    .glass(RoundedCornerShape(30.dp), elevation = 18.dp, tint = g.accent)
-                    .androidxClickable("New notebook") { dialog = Dialog.NewNotebook }
-                    .padding(horizontal = 22.dp, vertical = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, tint = g.ink)
-                Text("New notebook", color = g.ink, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 10.dp))
-            }
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { pad ->
-        if (state.importing) androidx.compose.material3.LinearProgressIndicator(
-            Modifier.fillMaxWidth().padding(pad).semantics { contentDescription = "Importing" },
+    LaunchedEffect(state.message) {
+        val m = state.message ?: return@LaunchedEffect
+        // Undo stays up longer so there is time to reach it.
+        val result = snackbar.showSnackbar(
+            m.text, actionLabel = if (m.undo != null) "Undo" else null,
+            duration = if (m.undo != null) SnackbarDuration.Long else SnackbarDuration.Short,
         )
-        if (state.showingTrash) {
-            TrashContent(state, pad, onRestore = vm::restoreNotebook, onDeleteForever = { dialog = Dialog.ConfirmDeleteForever(it) })
-            return@Scaffold
+        if (result == SnackbarResult.ActionPerformed) m.undo?.invoke()
+        vm.clearMessage()
+    }
+    BackHandler(enabled = state.selecting || state.searching || q.folderId != null || q.section != Section.DOCUMENTS) {
+        when {
+            state.selecting -> vm.stopSelecting()
+            state.searching -> vm.setSearching(false)
+            q.folderId != null -> vm.goUp()
+            else -> vm.showSection(Section.DOCUMENTS)
         }
-        val empty = state.subfolders.isEmpty() && state.notebooks.isEmpty()
-        if (empty) {
-            Box(Modifier.fillMaxSize().padding(pad).padding(24.dp), contentAlignment = Alignment.Center) {
-                if (!state.loading) Text(
-                    modifier = Modifier.glass(RoundedCornerShape(28.dp)).padding(28.dp),
-                    text = if (state.query.isNotBlank()) "No notebooks match \"${state.query}\"" else "No notebooks yet. Tap New notebook to start writing.",
-                    style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    }
+
+    val actions = remember(q.section, state.defaults) {
+        val open: (LibraryItem) -> Unit = { item ->
+            when {
+                q.section == Section.TRASH -> vm.startSelecting(item.key) // trashed items open via Restore
+                item is LibraryItem.FolderItem -> vm.openFolder(item.folder.id)
+                item is LibraryItem.NotebookItem -> onOpenNotebook(item.meta.id)
             }
-        } else LazyVerticalGrid(
-            columns = GridCells.Adaptive(170.dp),
-            modifier = Modifier.fillMaxSize().padding(pad),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(24.dp),
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
-            verticalArrangement = Arrangement.spacedBy(28.dp),
-        ) {
-            if (state.subfolders.isNotEmpty()) {
-                items(state.subfolders, key = { "f" + it.id }) { f ->
-                    FolderCard(f, onOpen = { vm.openFolder(f.id) },
-                        onRename = { dialog = Dialog.RenameFolder(f) }, onDelete = { dialog = Dialog.ConfirmDeleteFolder(f) })
-                }
-                item(span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(0.dp)) }
-            }
-            items(state.notebooks, key = { it.id }) { nb ->
-                NotebookCard(
-                    nb, onOpen = { onOpenNotebook(nb.id) },
-                    onEdit = { dialog = Dialog.EditNotebook(nb) },
-                    onToggleFavorite = { vm.updateNotebook(nb.copy(favorite = !nb.favorite)) },
-                    preview = state.defaults.showsPreview(nb),
-                    onDelete = {
-                        vm.trashNotebook(nb.id)
-                        scope.launch {
-                            val r = snackbar.showSnackbar("\"${nb.title}\" moved to Trash", actionLabel = "Undo", duration = SnackbarDuration.Long)
-                            if (r == SnackbarResult.ActionPerformed) vm.restoreNotebook(nb.id)
+        }
+        ItemActions(
+            open = open,
+            toggleFavorite = { vm.setFavorite(listOf(it.key), !it.favorite) },
+            toggleSelected = { vm.toggleSelected(it.key) },
+            showsPreview = state.defaults::showsPreview,
+            menu = { item ->
+                if (q.section == Section.TRASH) listOf(
+                    MenuAction("Restore", Icons.Outlined.RestoreFromTrash) { vm.restore(listOf(item.key)) },
+                    MenuAction("Delete forever", Icons.Outlined.DeleteForever, destructive = true) { dialog = Dialog.DeleteForever(setOf(item.key)) },
+                ) else buildList {
+                    add(MenuAction("Open", Icons.AutoMirrored.Outlined.OpenInNew) { open(item) })
+                    when (item) {
+                        is LibraryItem.NotebookItem -> {
+                            add(MenuAction("Rename & cover", Icons.Outlined.Edit) { dialog = Dialog.EditNotebook(item.meta) })
+                            add(MenuAction("Duplicate", Icons.Outlined.ContentCopy) { vm.duplicate(item.meta.id) })
                         }
-                    },
+                        is LibraryItem.FolderItem -> add(MenuAction("Customize", Icons.Outlined.Palette) { dialog = Dialog.CustomizeFolder(item.folder) })
+                    }
+                    add(MenuAction("Move to…", Icons.AutoMirrored.Outlined.DriveFileMove) { dialog = Dialog.Move(setOf(item.key)) })
+                    add(
+                        MenuAction(
+                            if (item.favorite) "Remove from Favorites" else "Add to Favorites",
+                            if (item.favorite) Icons.Outlined.StarOutline else Icons.Filled.Star,
+                        ) { vm.setFavorite(listOf(item.key), !item.favorite) },
+                    )
+                    add(MenuAction("Select", Icons.Outlined.CheckCircle) { vm.startSelecting(item.key) })
+                    add(MenuAction("Move to Trash", Icons.Outlined.Delete, destructive = true, dividerBefore = true) { vm.trash(listOf(item.key)) })
+                }
+            },
+        )
+    }
+
+    // A Surface so text picks up the theme's content colour (dark mode) without a Scaffold.
+    Surface(color = LocalLibraryColors.current.content, contentColor = MaterialTheme.colorScheme.onSurface) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val compact = maxWidth < CompactWidth
+        Row(Modifier.fillMaxSize()) {
+            Sidebar(
+                expanded = state.sidebarExpanded && !compact, canExpand = !compact, section = q.section, trashCount = state.trashCount,
+                onToggle = vm::toggleSidebar, onSection = vm::showSection, onSettings = { dialog = Dialog.Settings },
+            )
+            Column(Modifier.weight(1f).fillMaxHeight().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))) {
+                if (state.selecting) SelectionBar(
+                    state, onDone = vm::stopSelecting, onSelectAll = vm::selectAll,
+                    onFavorite = { keys, fav -> vm.setFavorite(keys, fav) }, onMove = { dialog = Dialog.Move(it) },
+                    onTrash = vm::trash, onRestore = { vm.restore(it) }, onDeleteForever = { dialog = Dialog.DeleteForever(it) },
+                ) else TopBar(
+                    state, onBack = vm::goUp, onHome = { vm.showSection(Section.DOCUMENTS) },
+                    onSearch = vm::setSearching, onSearchText = vm::setSearch,
                 )
+                Header(state, onNavigate = vm::openFolder)
+                Toolbar(
+                    state, onFilter = vm::setFilter, onSort = vm::setSort, onDescending = vm::setDescending,
+                    onViewMode = vm::setViewMode, onSelect = { vm.startSelecting() },
+                    onNewNotebook = { dialog = Dialog.NewNotebook }, onNewFolder = { dialog = Dialog.NewFolder },
+                    onImport = { pickFile.launch(arrayOf("*/*")) },
+                    onEmptyTrash = { dialog = Dialog.EmptyTrash },
+                )
+                if (state.importing) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 24.dp).semantics { contentDescription = "Importing" })
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    Content(state, actions, onNewNotebook = { dialog = Dialog.NewNotebook }, onShowAll = { vm.setFilter(ItemFilter.ALL) })
+                }
             }
         }
+        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 8.dp))
+    }
     }
 
     when (val d = dialog) {
@@ -257,292 +251,338 @@ fun LibraryScreen(
             dialog = null
             vm.updateNotebook(d.meta.copy(title = title.ifBlank { d.meta.title }, cover = cover))
         }
-        Dialog.Settings -> SettingsDialog(state.defaults, onDismiss = { dialog = null }) { dialog = null; vm.saveDefaults(it) }
-        Dialog.NewFolder -> FolderDialog("New folder", "", onDismiss = { dialog = null }) { name, color ->
-            dialog = null; vm.createFolder(name, color)
+        Dialog.NewFolder -> FolderDialog(null, onDismiss = { dialog = null }) { name, color, icon ->
+            dialog = null; vm.createFolder(name, color, icon)
         }
-        is Dialog.RenameFolder -> FolderDialog("Rename folder", d.folder.name, onDismiss = { dialog = null }) { name, _ ->
-            dialog = null; vm.renameFolder(d.folder.id, name)
+        is Dialog.CustomizeFolder -> FolderDialog(d.folder, onDismiss = { dialog = null }) { name, color, icon ->
+            dialog = null; vm.customizeFolder(d.folder.id, name, color, icon)
         }
-        is Dialog.ConfirmDeleteForever -> ConfirmDialog(
-            "Delete \"${d.meta.title}\" forever?", "This permanently removes the notebook and all its pages. It can't be undone.",
-            onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.deleteForever(d.meta.id) },
+        is Dialog.Move -> MoveDialog(state.index, d.keys, q.folderId.takeIf { q.section == Section.DOCUMENTS && !state.searching }, onDismiss = { dialog = null }) {
+            dialog = null; vm.moveTo(d.keys, it)
+        }
+        is Dialog.DeleteForever -> ConfirmDialog(
+            if (d.keys.size == 1) "Delete forever?" else "Delete ${d.keys.size} items forever?",
+            "This can't be undone. Folders are deleted with everything inside them.", "Delete",
+            onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.deleteForever(d.keys) },
         )
-        Dialog.ConfirmEmptyTrash -> ConfirmDialog(
-            "Empty Trash?", "All ${state.trashed.size} notebooks in Trash will be deleted forever. This can't be undone.",
+        Dialog.EmptyTrash -> ConfirmDialog(
+            "Empty Trash?", "Everything in Trash (${state.trashCount} items) will be deleted forever. This can't be undone.", "Empty Trash",
             onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.emptyTrash() },
         )
-        is Dialog.ConfirmDeleteFolder -> ConfirmDialog(
-            "Delete folder \"${d.folder.name}\"?", "Notebooks inside are kept and moved up one level.",
-            onDismiss = { dialog = null }, onConfirm = { dialog = null; vm.deleteFolder(d.folder.id) },
-        )
-    }
-    }
+        Dialog.Settings -> SettingsDialog(state.defaults, onDismiss = { dialog = null }) { dialog = null; vm.saveDefaults(it) }
     }
 }
 
+/** Collapsible sidebar: full width with labels, or a narrow rail of icons. The width change is animated. */
 @Composable
-private fun FolderCard(f: Folder, onOpen: () -> Unit, onRename: () -> Unit, onDelete: () -> Unit) {
-    var menu by remember { mutableStateOf(false) }
-    Box {
-        Column(
-            Modifier.springy(pressedScale = 0.94f, hoverScale = 1.05f)
-                .glass(RoundedCornerShape(22.dp), elevation = 10.dp).padding(12.dp)
-                .combinedClickable(onClick = onOpen, onLongClick = { menu = true })
-                .semantics { contentDescription = "Folder ${f.name}" },
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Box(
-                Modifier.fillMaxWidth().aspectRatio(1.35f).clip(RoundedCornerShape(16.dp)).background(Color(f.color)),
-                contentAlignment = Alignment.Center,
-            ) { Icon(Icons.Default.Folder, contentDescription = null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(48.dp)) }
-            Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp), fontWeight = FontWeight.Medium)
-        }
-        DropdownMenu(menu, onDismissRequest = { menu = false }) {
-            DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; onRename() })
-            DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete() })
-        }
-    }
-}
-
-@Composable
-private fun NotebookCard(nb: NotebookMeta, onOpen: () -> Unit, onEdit: () -> Unit, onToggleFavorite: () -> Unit, preview: Boolean, onDelete: () -> Unit) {
-    var menu by remember { mutableStateOf(false) }
-    Box {
-        Column(
-            Modifier.springy(pressedScale = 0.94f, hoverScale = 1.05f)
-                .glass(RoundedCornerShape(22.dp), elevation = 10.dp).padding(12.dp)
-                .combinedClickable(onClick = onOpen, onLongClick = { menu = true })
-                .semantics { contentDescription = "Notebook ${nb.title}" }.testTag("notebook-${nb.title}"),
-        ) {
-            if (preview) PagePreview(nb, Modifier.fillMaxWidth().aspectRatio(0.75f))
-            else CoverArt(nb.cover, nb.title, Modifier.fillMaxWidth().aspectRatio(0.75f))
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                if (nb.favorite) Icon(Icons.Default.Star, contentDescription = "Favourite", tint = Color(0xFFE9C46A), modifier = Modifier.size(16.dp))
-                Text(nb.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-            }
-            Text(
-                DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(nb.modifiedAt)) + " · ${nb.pageIds.size} page" + if (nb.pageIds.size == 1) "" else "s",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        DropdownMenu(menu, onDismissRequest = { menu = false }) {
-            DropdownMenuItem(text = { Text("Rename & cover") }, onClick = { menu = false; onEdit() })
-            DropdownMenuItem(text = { Text(if (nb.favorite) "Remove from favourites" else "Add to favourites") }, onClick = { menu = false; onToggleFavorite() })
-            DropdownMenuItem(text = { Text("Move to Trash") }, onClick = { menu = false; onDelete() })
-        }
-    }
-}
-
-/** First page of a notebook, rendered in the background; the cover shows until it's ready. */
-@Composable
-private fun PagePreview(nb: NotebookMeta, modifier: Modifier = Modifier) {
-    val thumbs = (androidx.compose.ui.platform.LocalContext.current.applicationContext as app.folio.notes.FolioApp).thumbnails
-    val bmp by androidx.compose.runtime.produceState(thumbs.cached(nb), nb.id, nb.modifiedAt) {
-        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { thumbs.load(nb) }
-    }
-    Box(
-        modifier.clip(RoundedCornerShape(8.dp)).background(Color.White)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-            .semantics { contentDescription = "First page of ${nb.title}" },
-        contentAlignment = Alignment.Center,
-    ) {
-        val b = bmp
-        if (b != null) androidx.compose.foundation.Image(
-            b.asImageBitmap(), contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-            modifier = Modifier.fillMaxSize(),
-        ) else CoverArt(nb.cover, nb.title, Modifier.fillMaxSize())
-    }
-}
-
-@Composable
-private fun TrashContent(state: LibraryUiState, pad: androidx.compose.foundation.layout.PaddingValues, onRestore: (String) -> Unit, onDeleteForever: (NotebookMeta) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(pad)) {
-        Text(
-            "Notebooks in Trash are deleted forever after ${LibraryViewModel.TRASH_DAYS} days.",
-            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-        )
-        if (state.trashed.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Trash is empty", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            return
-        }
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(170.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(24.dp),
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
-            verticalArrangement = Arrangement.spacedBy(28.dp),
-        ) {
-            items(state.trashed, key = { it.id }) { nb ->
-                var menu by remember { mutableStateOf(false) }
-                Box {
-                    Column(
-                        Modifier.combinedClickable(onClick = { menu = true }, onLongClick = { menu = true })
-                            .semantics { contentDescription = "Trashed notebook ${nb.title}" },
-                    ) {
-                        if (state.defaults.showsPreview(nb)) PagePreview(nb, Modifier.fillMaxWidth().aspectRatio(0.75f))
-                        else CoverArt(nb.cover, nb.title, Modifier.fillMaxWidth().aspectRatio(0.75f))
-                        Text(nb.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 8.dp))
-                        val daysLeft = LibraryViewModel.TRASH_DAYS - ((System.currentTimeMillis() - (nb.deletedAt ?: 0)) / 86_400_000L).toInt()
-                        Text(
-                            "Deleted in ${daysLeft.coerceAtLeast(0)} day" + if (daysLeft == 1) "" else "s",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    DropdownMenu(menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("Restore") }, onClick = { menu = false; onRestore(nb.id) })
-                        DropdownMenuItem(text = { Text("Delete forever") }, onClick = { menu = false; onDeleteForever(nb) })
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** Original cover artwork: a coloured board with a spine and an optional decoration. */
-@Composable
-fun CoverArt(cover: Cover, title: String, modifier: Modifier = Modifier) {
-    val base = Color(cover.color)
-    Box(modifier.clip(RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp, topEnd = 14.dp, bottomEnd = 14.dp)).background(base)) {
-        Box(Modifier.width(12.dp).fillMaxSize().background(Color.Black.copy(alpha = 0.18f)))
-        when (cover.style) {
-            CoverStyle.PLAIN -> Unit
-            CoverStyle.STRIPE -> Box(Modifier.fillMaxWidth().height(28.dp).align(Alignment.BottomCenter).padding(bottom = 18.dp).background(Color.White.copy(alpha = 0.35f)))
-            CoverStyle.CORNER -> Box(Modifier.size(56.dp).align(Alignment.TopEnd).clip(RoundedCornerShape(bottomStart = 56.dp)).background(Color.White.copy(alpha = 0.3f)))
-        }
-        Box(
-            Modifier.align(Alignment.Center).padding(horizontal = 22.dp).clip(RoundedCornerShape(6.dp))
-                .background(Color.White.copy(alpha = 0.92f)).padding(horizontal = 10.dp, vertical = 6.dp),
-        ) { Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge, color = Color(0xFF293241)) }
-    }
-}
-
-@Composable
-private fun ColorRow(colors: List<Long>, selected: Long, onPick: (Long) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        colors.forEach { c ->
-            Box(
-                Modifier.size(30.dp).clip(CircleShape).background(Color(c))
-                    .border(if (c == selected) 3.dp else 0.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
-                    .combinedClickable(onClick = { onPick(c) })
-                    .semantics { contentDescription = "Colour ${"%08X".format(c)}" + if (c == selected) ", selected" else "" },
-            )
-        }
-    }
-}
-
-@Composable
-private fun NotebookDialog(
-    existing: NotebookMeta?, defaults: NotebookDefaults, onDismiss: () -> Unit, onDone: (String, Cover, PaperTemplate) -> Unit,
+private fun Sidebar(
+    expanded: Boolean, canExpand: Boolean, section: Section, trashCount: Int,
+    onToggle: () -> Unit, onSection: (Section) -> Unit, onSettings: () -> Unit,
 ) {
-    var title by remember { mutableStateOf(existing?.title ?: "") }
-    var color by remember { mutableStateOf(existing?.cover?.color ?: CoverColors.first()) }
-    var style by remember { mutableStateOf(existing?.cover?.style ?: CoverStyle.PLAIN) }
-    var paper by remember { mutableStateOf(existing?.paper ?: defaults.paper) }
-    val confirm = { onDone(title, Cover(color, style), paper) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (existing == null) "New notebook" else "Edit notebook") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    CoverArt(Cover(color, style), title.ifBlank { "Untitled" }, Modifier.width(90.dp).aspectRatio(0.75f))
-                    OutlinedTextField(
-                        title, { title = it }, label = { Text("Title") }, singleLine = true, modifier = Modifier.testTag("title-field"),
-                        // On a landscape tablet the keyboard can cover the dialog buttons; "Done" confirms directly.
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, capitalization = KeyboardCapitalization.Sentences),
-                        keyboardActions = KeyboardActions(onDone = { confirm() }),
-                    )
-                }
-                Text("Cover", style = MaterialTheme.typography.labelLarge)
-                ColorRow(CoverColors.take(5), color) { color = it }
-                ColorRow(CoverColors.drop(5), color) { color = it }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CoverStyle.entries.forEach { s -> FilterChip(s == style, { style = s }, label = { Text(s.name.lowercase().replaceFirstChar { it.uppercase() }) }) }
-                }
-                if (existing == null) {
-                    Text("Paper", style = MaterialTheme.typography.labelLarge)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        PaperTemplate.entries.forEach { p -> FilterChip(p == paper, { paper = p }, label = { Text(p.name.lowercase().replaceFirstChar { it.uppercase() }) }) }
-                    }
-                    Text(
-                        "Page: ${defaults.describe()} · change the default in Settings",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+    val width by animateDpAsState(if (expanded) 264.dp else 76.dp, spring(dampingRatio = 0.9f, stiffness = 500f), label = "sidebar")
+    Column(
+        Modifier.width(width).fillMaxHeight().background(LocalLibraryColors.current.sidebar)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        if (canExpand) IconButton(onClick = onToggle, modifier = Modifier.padding(start = 2.dp)) {
+            Icon(Icons.Outlined.ViewSidebar, contentDescription = if (expanded) "Collapse sidebar" else "Expand sidebar")
+        } else Spacer(Modifier.height(48.dp))
+        Box(Modifier.height(64.dp).padding(start = 10.dp), contentAlignment = Alignment.CenterStart) {
+            if (expanded) Text("Folio", fontSize = 34.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+        }
+        SidebarItem(Icons.Filled.Folder, Section.DOCUMENTS.label, section == Section.DOCUMENTS, expanded) { onSection(Section.DOCUMENTS) }
+        SidebarItem(
+            if (section == Section.FAVORITES) Icons.Filled.Star else Icons.Outlined.StarOutline,
+            Section.FAVORITES.label, section == Section.FAVORITES, expanded,
+        ) { onSection(Section.FAVORITES) }
+        SidebarItem(Icons.Outlined.Delete, Section.TRASH.label, section == Section.TRASH, expanded, badge = trashCount) { onSection(Section.TRASH) }
+        Spacer(Modifier.weight(1f))
+        SidebarItem(Icons.Outlined.Settings, "Settings", false, expanded, onClick = onSettings)
+    }
+}
+
+@Composable
+private fun SidebarItem(icon: ImageVector, label: String, selected: Boolean, expanded: Boolean, badge: Int = 0, onClick: () -> Unit) {
+    val primary = MaterialTheme.colorScheme.primary
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp).height(48.dp).clip(RoundedCornerShape(12.dp))
+            .background(if (selected) LocalLibraryColors.current.selectedItem else Color.Transparent)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = label; this.selected = selected }
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = if (selected) primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+        if (expanded) {
+            Text(
+                label, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip, modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            )
+            if (badge > 0) Text("$badge", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        }
+    }
+}
+
+@Composable
+private fun TopBar(state: LibraryUiState, onBack: () -> Unit, onHome: () -> Unit, onSearch: (Boolean) -> Unit, onSearchText: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (state.query.section != Section.DOCUMENTS && !state.searching) IconButton(onClick = onHome) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to notebooks")
+        } else if (state.query.folderId != null && !state.searching) IconButton(onClick = onBack) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to parent folder")
+        }
+        if (state.searching) {
+            val focus = remember { FocusRequester() }
+            LaunchedEffect(Unit) { focus.requestFocus() }
+            TextField(
+                value = state.query.search, onValueChange = onSearchText, singleLine = true,
+                placeholder = { Text("Search notebooks and folders") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = { IconButton(onClick = { onSearch(false) }) { Icon(Icons.Filled.Close, contentDescription = "Close search") } },
+                shape = RoundedCornerShape(12.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                modifier = Modifier.weight(1f).focusRequester(focus).testTag("search"),
+            )
+        } else {
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = { onSearch(true) }) { Icon(Icons.Filled.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.primary) }
+        }
+    }
+}
+
+@Composable
+private fun SelectionBar(
+    state: LibraryUiState, onDone: () -> Unit, onSelectAll: () -> Unit,
+    onFavorite: (Set<String>, Boolean) -> Unit, onMove: (Set<String>) -> Unit, onTrash: (Set<String>) -> Unit,
+    onRestore: (Set<String>) -> Unit, onDeleteForever: (Set<String>) -> Unit,
+) {
+    val sel = state.selection.orEmpty()
+    val any = sel.isNotEmpty()
+    val error = MaterialTheme.colorScheme.error
+    Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onDone) { Icon(Icons.Filled.Close, contentDescription = "Done selecting") }
+        Text(if (any) "${sel.size} selected" else "Select items", style = MaterialTheme.typography.titleMedium)
+        TextButton(onClick = onSelectAll) { Text("Select all") }
+        Spacer(Modifier.weight(1f))
+        if (state.query.section == Section.TRASH) {
+            TextButton(onClick = { onRestore(sel) }, enabled = any) {
+                Icon(Icons.Outlined.RestoreFromTrash, contentDescription = null); Spacer(Modifier.width(6.dp)); Text("Restore")
             }
-        },
-        confirmButton = { TextButton(onClick = { confirm() }, modifier = Modifier.testTag("create")) { Text(if (existing == null) "Create" else "Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun FolderDialog(heading: String, initial: String, onDismiss: () -> Unit, onDone: (String, Long) -> Unit) {
-    var name by remember { mutableStateOf(initial) }
-    var color by remember { mutableStateOf(CoverColors[3]) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(heading) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
-                if (initial.isEmpty()) { ColorRow(CoverColors.take(5), color) { color = it }; ColorRow(CoverColors.drop(5), color) { color = it } }
+            TextButton(onClick = { onDeleteForever(sel) }, enabled = any) {
+                Icon(Icons.Outlined.DeleteForever, contentDescription = null, tint = if (any) error else Color.Unspecified)
+                Spacer(Modifier.width(6.dp)); Text("Delete", color = if (any) error else Color.Unspecified)
             }
-        },
-        confirmButton = { TextButton(onClick = { onDone(name, color) }) { Text("OK") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun ConfirmDialog(title: String, body: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss, title = { Text(title) }, text = { Text(body) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun SettingsDialog(current: NotebookDefaults, onDismiss: () -> Unit, onSave: (NotebookDefaults) -> Unit) {
-    var size by remember { mutableStateOf(current.size) }
-    var landscape by remember { mutableStateOf(current.landscape) }
-    var paper by remember { mutableStateOf(current.paper) }
-    var preview by remember { mutableStateOf(current.libraryPreview) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Settings") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                val folio = androidx.compose.ui.platform.LocalContext.current.applicationContext as app.folio.notes.FolioApp
-                app.folio.notes.sync.AutoSyncRow(folio.sync)
-                androidx.compose.material3.HorizontalDivider()
-                Text("Default page size for new notebooks", style = MaterialTheme.typography.labelLarge)
-                PageSizeChoice.entries.forEach { c ->
-                    FilterChip(c == size, { size = c }, label = { Text(c.label) }, modifier = Modifier.fillMaxWidth())
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(!landscape, { landscape = false }, label = { Text("Portrait") })
-                    FilterChip(landscape, { landscape = true }, label = { Text("Landscape") })
-                }
-                Text("Library shows", style = MaterialTheme.typography.labelLarge)
-                LibraryPreview.entries.forEach { p ->
-                    FilterChip(p == preview, { preview = p }, label = { Text(p.label) }, modifier = Modifier.fillMaxWidth())
-                }
-                Text("Default paper", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PaperTemplate.entries.forEach { p -> FilterChip(p == paper, { paper = p }, label = { Text(p.name.lowercase().replaceFirstChar { it.uppercase() }) }) }
-                }
-                Text(
-                    "Existing notebooks keep their size. Auto shapes the page like this screen.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        } else {
+            val allFavorite = any && state.items.filter { it.key in sel }.all { it.favorite }
+            IconButton(onClick = { onFavorite(sel, !allFavorite) }, enabled = any) {
+                Icon(
+                    if (allFavorite) Icons.Filled.Star else Icons.Outlined.StarOutline,
+                    contentDescription = if (allFavorite) "Remove from favorites" else "Add to favorites",
                 )
             }
-        },
-        confirmButton = { TextButton(onClick = { onSave(NotebookDefaults(size, landscape, paper, preview)) }) { Text("Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
+            IconButton(onClick = { onMove(sel) }, enabled = any) { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = "Move to") }
+            IconButton(onClick = { onTrash(sel) }, enabled = any) {
+                Icon(Icons.Outlined.Delete, contentDescription = "Move to Trash", tint = if (any) error else Color.Unspecified)
+            }
+        }
+    }
+}
+
+/** Breadcrumb path (inside folders) and the large page title. */
+@Composable
+private fun Header(state: LibraryUiState, onNavigate: (String?) -> Unit) {
+    val q = state.query
+    val title = when {
+        state.searching -> "Search"
+        q.section == Section.DOCUMENTS -> state.currentFolder?.name ?: Section.DOCUMENTS.label
+        else -> q.section.label
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp)) {
+        if (q.section == Section.DOCUMENTS && state.path.isNotEmpty() && !state.searching) {
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Crumb(Section.DOCUMENTS.label) { onNavigate(null) }
+                state.path.dropLast(1).forEach { f ->
+                    Separator()
+                    Crumb(f.name) { onNavigate(f.id) }
+                }
+                Separator()
+            }
+        }
+        Text(title, fontSize = 34.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun Crumb(name: String, onClick: () -> Unit) = Text(
+    name, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleSmall, maxLines = 1,
+    modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick).padding(horizontal = 4.dp, vertical = 4.dp),
+)
+
+@Composable
+private fun Separator() = Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 2.dp))
+
+@Composable
+private fun Toolbar(
+    state: LibraryUiState, onFilter: (ItemFilter) -> Unit, onSort: (SortOrder) -> Unit, onDescending: (Boolean) -> Unit,
+    onViewMode: (ViewMode) -> Unit, onSelect: () -> Unit, onNewNotebook: () -> Unit, onNewFolder: () -> Unit,
+    onImport: () -> Unit, onEmptyTrash: () -> Unit,
+) {
+    val q = state.query
+    val primary = MaterialTheme.colorScheme.primary
+    Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        var filterMenu by remember { mutableStateOf(false) }
+        Box {
+            TextButton(onClick = { filterMenu = true }, modifier = Modifier.semantics { contentDescription = "Filter: ${q.filter.label}" }) {
+                Icon(Icons.Outlined.FilterList, contentDescription = null, tint = primary)
+                Spacer(Modifier.width(8.dp))
+                Text(q.filter.label, color = primary, style = MaterialTheme.typography.titleMedium)
+            }
+            DropdownMenu(filterMenu, onDismissRequest = { filterMenu = false }) {
+                ItemFilter.entries.forEach { f ->
+                    CheckedItem(f.label, f == q.filter) { filterMenu = false; onFilter(f) }
+                }
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        if (q.section == Section.DOCUMENTS && !state.searching && !state.selecting) {
+            var newMenu by remember { mutableStateOf(false) }
+            Box {
+                Button(
+                    onClick = { newMenu = true }, shape = RoundedCornerShape(10.dp),
+                    contentPadding = ButtonDefaults.ButtonWithIconContentPadding, modifier = Modifier.testTag("new-item"),
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("New", style = MaterialTheme.typography.titleMedium)
+                }
+                DropdownMenu(newMenu, onDismissRequest = { newMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Notebook") }, leadingIcon = { Icon(Icons.Outlined.NoteAdd, contentDescription = null) },
+                        onClick = { newMenu = false; onNewNotebook() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Folder") }, leadingIcon = { Icon(Icons.Outlined.CreateNewFolder, contentDescription = null) },
+                        onClick = { newMenu = false; onNewFolder() },
+                    )
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                    DropdownMenuItem(
+                        text = { Text("Import PDF, GoodNotes or Samsung Notes") },
+                        leadingIcon = { Icon(Icons.Outlined.FileOpen, contentDescription = null) },
+                        enabled = !state.importing,
+                        onClick = { newMenu = false; onImport() },
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+        }
+        if (q.section == Section.TRASH && state.items.isNotEmpty() && !state.selecting) {
+            TextButton(onClick = onEmptyTrash) { Text("Empty Trash", color = MaterialTheme.colorScheme.error) }
+        }
+        val grid = state.viewMode == ViewMode.GRID
+        IconButton(onClick = { onViewMode(if (grid) ViewMode.LIST else ViewMode.GRID) }) {
+            Icon(
+                if (grid) Icons.Outlined.GridView else Icons.AutoMirrored.Outlined.ViewList,
+                contentDescription = if (grid) "Switch to list view" else "Switch to grid view", tint = primary,
+            )
+        }
+        var more by remember { mutableStateOf(false) }
+        Box {
+            IconButton(onClick = { more = true }) { Icon(Icons.Filled.MoreHoriz, contentDescription = "Sort and select", tint = primary) }
+            DropdownMenu(more, onDismissRequest = { more = false }) {
+                MenuHeading("Sort by")
+                SortOrder.entries.forEach { s -> CheckedItem(s.label, s == q.sort) { onSort(s) } }
+                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                val dates = q.sort == SortOrder.MODIFIED || q.sort == SortOrder.CREATED
+                CheckedItem(if (dates) "Newest first" else "A to Z", if (dates) q.descending else !q.descending) { onDescending(dates) }
+                CheckedItem(if (dates) "Oldest first" else "Z to A", if (dates) !q.descending else q.descending) { onDescending(!dates) }
+                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                DropdownMenuItem(
+                    text = { Text("Select items") }, leadingIcon = { Icon(Icons.Outlined.CheckCircle, contentDescription = null) },
+                    onClick = { more = false; onSelect() },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MenuHeading(text: String) = Text(
+    text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+)
+
+@Composable
+private fun CheckedItem(label: String, checked: Boolean, onClick: () -> Unit) = DropdownMenuItem(
+    text = { Text(label) },
+    trailingIcon = { if (checked) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary) },
+    onClick = onClick,
+)
+
+@Composable
+private fun Content(state: LibraryUiState, actions: ItemActions, onNewNotebook: () -> Unit, onShowAll: () -> Unit) {
+    val q = state.query
+    val items = state.items
+    if (state.loading) return
+    if (items.isEmpty()) {
+        val modifier = Modifier.fillMaxSize()
+        Box(modifier, contentAlignment = Alignment.Center) {
+            val filtered = q.filter != ItemFilter.ALL && q.copy(filter = ItemFilter.ALL).items(state.index).isNotEmpty()
+            when {
+                q.search.isNotBlank() -> EmptyState(Icons.Outlined.SearchOff, "No results", "Nothing in your library matches \"${q.search.trim()}\".")
+                filtered -> EmptyState(Icons.Outlined.FilterList, "Nothing matches this filter", "There are no ${q.filter.label.lowercase()} here.") {
+                    TextButton(onClick = onShowAll) { Text("Show all") }
+                }
+                q.section == Section.FAVORITES -> EmptyState(
+                    Icons.Outlined.StarOutline, "No favorites yet", "Tap the star on any notebook or folder to keep it here.",
+                )
+                q.section == Section.TRASH -> EmptyState(
+                    Icons.Outlined.Delete, "Trash is empty",
+                    "Notebooks and folders you delete wait here for ${LibraryViewModel.TRASH_DAYS} days, then they're deleted for good.",
+                )
+                q.folderId != null -> EmptyState(Icons.Outlined.FolderOpen, "This folder is empty", "Create a notebook here or move existing ones in.") {
+                    NewNotebookButton(onNewNotebook)
+                }
+                else -> EmptyState(Icons.Outlined.NoteAdd, "Ready to start writing?", "No notebooks yet. Tap New notebook to start writing.") {
+                    NewNotebookButton(onNewNotebook)
+                }
+            }
+        }
+        return
+    }
+    val showStar = q.section != Section.TRASH
+    when (state.viewMode) {
+        ViewMode.GRID -> LazyVerticalGrid(
+            columns = GridCells.Adaptive(176.dp),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 96.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalArrangement = Arrangement.spacedBy(26.dp),
+        ) {
+            items(items, key = { it.key }, contentType = { it is LibraryItem.FolderItem }) { item ->
+                ItemTile(item, state.selection?.contains(item.key), showStar, actions, Modifier.animateItem())
+            }
+        }
+        ViewMode.LIST -> LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+        ) {
+            items(items, key = { it.key }, contentType = { it is LibraryItem.FolderItem }) { item ->
+                ItemRow(item, state.selection?.contains(item.key), showStar, actions, Modifier.animateItem())
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewNotebookButton(onClick: () -> Unit) {
+    Button(onClick = onClick, shape = RoundedCornerShape(10.dp), modifier = Modifier.testTag("new-notebook")) {
+        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(6.dp))
+        Text("New notebook")
+    }
 }

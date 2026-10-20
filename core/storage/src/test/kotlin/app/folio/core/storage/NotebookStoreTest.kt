@@ -2,6 +2,7 @@ package app.folio.core.storage
 
 import app.folio.core.model.CorruptDocumentException
 import app.folio.core.model.Cover
+import app.folio.core.model.FolderIcon
 import app.folio.core.model.Page
 import app.folio.core.model.PageImage
 import app.folio.core.model.PaperTemplate
@@ -272,5 +273,114 @@ class NotebookStoreTest {
         assertTrue(store.imageFile(meta.id, pic.id).exists())
         val bad = Page(images = listOf(PageImage(attachmentId = "not-staged", x = 0f, y = 0f, width = 10f, height = 10f)))
         assertFailsWith<IllegalArgumentException> { store.createNotebookFromImport("Bad", null, Cover(), emptyList(), listOf(bad)) }
+    }
+
+    // ------------------------------------------------------------ folders (library redesign)
+
+    @Test fun folderCustomizationPersists() {
+        val store = FileNotebookStore(root)
+        val f = store.createFolder("UPSC", null, 0xFF000001)
+        store.updateFolder(f.id, color = 0xFF4FB6E3, icon = FolderIcon.INSTITUTION)
+        store.updateFolder(f.id, name = "  ")
+        val back = FileNotebookStore(root).library().folders.single()
+        assertEquals("UPSC", back.name, "a blank name keeps the old one")
+        assertEquals(0xFF4FB6E3, back.color)
+        assertEquals(FolderIcon.INSTITUTION, back.icon)
+    }
+
+    @Test fun favouritesAreSavedAndCountAsChangesForSync() {
+        var now = 100L
+        val store = FileNotebookStore(root) { now }
+        val nb = store.createNotebook("A", null, Cover(), PaperTemplate.BLANK)
+        val f = store.createFolder("F", null, 0)
+        now = 500L
+        store.setFavorite(listOf(nb.id), listOf(f.id), true)
+        val idx = FileNotebookStore(root).library()
+        assertTrue(idx.notebooks.single().favorite && idx.folders.single().favorite)
+        // Sync keeps the newer copy of a folder or notebook, so the star must move modifiedAt on.
+        assertEquals(500L, idx.folders.single().modifiedAt)
+    }
+
+    @Test fun moveIntoFolderAndRefuseCycles() {
+        val store = FileNotebookStore(root)
+        val a = store.createFolder("A", null, 0)
+        val b = store.createFolder("B", a.id, 0)
+        val nb = store.createNotebook("N", null, Cover(), PaperTemplate.BLANK)
+        store.moveItems(listOf(nb.id), emptyList(), b.id)
+        assertEquals(b.id, store.library().notebooks.single().folderId)
+        assertFailsWith<IllegalArgumentException> { store.moveItems(emptyList(), listOf(a.id), b.id) }
+        assertFailsWith<IllegalArgumentException> { store.moveItems(emptyList(), listOf(a.id), a.id) }
+        store.moveItems(emptyList(), listOf(b.id), null)
+        assertNull(store.library().folders.single { it.id == b.id }.parentId)
+    }
+
+    @Test fun duplicateCopiesPagesAndAttachments() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("Notes", null, Cover(), PaperTemplate.GRID)
+        store.savePage(nb.id, store.loadPage(nb.id, nb.pageIds.first()).copy(strokes = listOf(stroke("s1"))))
+        store.addPage(nb.id, 0)
+        File(root, "notebooks/${nb.id}/attachments").mkdirs()
+        File(root, "notebooks/${nb.id}/attachments/abc.pdf").writeText("%PDF-1.4 test")
+        val copy = store.duplicateNotebook(nb.id)
+        assertEquals("Notes (copy)", copy.title)
+        assertEquals(2, copy.pageIds.size)
+        assertTrue(copy.pageIds.none { it in nb.pageIds }, "pages get new ids")
+        val reopened = FileNotebookStore(root)
+        assertEquals(listOf("s1"), reopened.loadPage(copy.id, copy.pageIds.first()).strokes.map { it.id })
+        assertEquals("%PDF-1.4 test", reopened.attachmentFile(copy.id, "abc").readText())
+        assertEquals("Notes (copy 2)", reopened.duplicateNotebook(nb.id).title)
+    }
+
+    @Test fun folderTrashRestoreAndDeleteForever() {
+        val store = FileNotebookStore(root)
+        val f = store.createFolder("F", null, 0)
+        val sub = store.createFolder("Sub", f.id, 0)
+        val inside = store.createNotebook("Inside", sub.id, Cover(), PaperTemplate.BLANK)
+        val loose = store.createNotebook("Loose", null, Cover(), PaperTemplate.BLANK)
+        store.trashFolder(f.id)
+        assertEquals(setOf(f.id, sub.id), store.library().trashedFolderIds())
+        assertTrue(File(root, "notebooks/${inside.id}").exists(), "trashing keeps files")
+
+        store.restoreFolder(f.id)
+        assertTrue(store.library().trashedFolderIds().isEmpty())
+
+        store.trashFolder(f.id)
+        store.deleteFolderForever(f.id)
+        val after = FileNotebookStore(root).library()
+        assertTrue(after.folders.isEmpty())
+        assertEquals(listOf(loose.id), after.notebooks.map { it.id }, "the folder took its notebooks with it")
+        assertTrue(!File(root, "notebooks/${inside.id}").exists())
+    }
+
+    @Test fun restoringIntoATrashedFolderGoesToTheTopLevel() {
+        val store = FileNotebookStore(root)
+        val f = store.createFolder("F", null, 0)
+        val child = store.createFolder("Child", f.id, 0)
+        val nb = store.createNotebook("N", f.id, Cover(), PaperTemplate.BLANK)
+        store.trashNotebook(nb.id)
+        store.trashFolder(child.id)
+        store.trashFolder(f.id)
+        store.restoreNotebook(nb.id)
+        store.restoreFolder(child.id)
+        val idx = store.library()
+        assertNull(idx.notebooks.single().folderId)
+        assertNull(idx.folders.single { it.id == child.id }.parentId)
+        assertTrue(child.id !in idx.trashedFolderIds())
+    }
+
+    @Test fun purgeTrashRemovesExpiredFoldersWithTheirContents() {
+        var now = 1_000L
+        val store = FileNotebookStore(root) { now }
+        val old = store.createFolder("Old", null, 0)
+        val inOld = store.createNotebook("In old", old.id, Cover(), PaperTemplate.BLANK)
+        val keep = store.createNotebook("Keep", null, Cover(), PaperTemplate.BLANK)
+        store.trashFolder(old.id)
+        now = 5_000L
+        assertEquals(0, store.purgeTrash(cutoff = 500L), "nothing expired yet")
+        assertEquals(1, store.purgeTrash(cutoff = 2_000L))
+        val idx = store.library()
+        assertTrue(idx.folders.isEmpty())
+        assertEquals(listOf(keep.id), idx.notebooks.map { it.id })
+        assertTrue(!File(root, "notebooks/${inOld.id}").exists())
     }
 }

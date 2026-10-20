@@ -11,7 +11,7 @@
 | 0 Discovery | ✅ done (docs/PROJECT_INVENTORY, ARTIFACT_INVENTORY, REUSE_AND_COMPATIBILITY, BASELINE) |
 | 1 Architecture | ✅ ADR-1…7, canonical model, repository interface |
 | 2 Android foundation | ✅ builds, launches, persists, survives a restart |
-| 3 Library | 🟡 folders/covers/sort/search implemented. Next: thumbnails, trash/recovery, multi-select, E2E coverage |
+| 3 Library | 🟡 Goodnotes-style redesign (sidebar, folder colours/icons, move, duplicate, favourites, folder Trash, list view, multi-select); see docs/research/goodnotes-mac-library-teardown.md. Next: drag-and-drop onto folders, the user's check on the Tab |
 | 4 Handwriting slice | 🟡 milestone passes on the emulator. Next: hardware validation (above) |
 | 5 Editor expansion | ✅ lasso, PDF import/export, shape snap, text boxes, pictures |
 | 6 Formats | ✅ `.goodnotes` and `.sdocx` import (strokes, PDFs, text). Open: pictures/sticky memos/GoodNotes shapes (need samples) |

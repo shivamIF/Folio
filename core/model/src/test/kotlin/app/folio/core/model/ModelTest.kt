@@ -125,6 +125,50 @@ class CodecTest {
         DocumentCodec.decodePage(text)
     }
 
+    @Test fun schema5LibraryWithoutFolderExtrasLoads() {
+        // library.json as schema-5 builds write it (no folder icon, favourite or trash yet).
+        val v5 = """{"schemaVersion":5,
+            "folders":[{"id":"f1","name":"UPSC","parentId":null,"color":4288201177,"createdAt":10,"modifiedAt":20}],
+            "notebooks":[{"id":"n1","title":"Polity","folderId":"f1","cover":{"color":4282210944,"style":"PLAIN"},"paper":"RULED",
+              "pageWidth":1000.0,"pageHeight":1414.0,"pageIds":["p1"],"createdAt":5,"modifiedAt":6,"favorite":true,"deletedAt":null,"fromPdf":false}]}"""
+        val idx = DocumentCodec.decodeLibrary(v5)
+        val f = idx.folders.single()
+        assertEquals("UPSC", f.name)
+        assertEquals(FolderIcon.NONE, f.icon)
+        assertFalse(f.favorite)
+        assertEquals(null, f.deletedAt)
+        assertEquals("f1", idx.notebooks.single().folderId)
+        // Still stamped 5, so schema-5 builds keep opening the library after this one writes it.
+        assertTrue("\"schemaVersion\":5" in DocumentCodec.encodeLibrary(idx))
+    }
+
+    @Test fun folderExtrasRoundTrip() {
+        val idx = LibraryIndex(
+            folders = listOf(Folder(name = "Law", color = 0xFF4FB6E3, createdAt = 1, icon = FolderIcon.LAW, favorite = true, deletedAt = 99)),
+        )
+        assertEquals(idx, DocumentCodec.decodeLibrary(DocumentCodec.encodeLibrary(idx)))
+    }
+
+    @Test fun unknownFolderIconReadsAsNone() {
+        val text = DocumentCodec.encodeLibrary(LibraryIndex(folders = listOf(Folder(name = "x", createdAt = 1, icon = FolderIcon.STAR))))
+            .replace("\"STAR\"", "\"ROCKET_FROM_THE_FUTURE\"")
+        assertEquals(FolderIcon.NONE, DocumentCodec.decodeLibrary(text).folders.single().icon)
+    }
+
+    @Test fun trashedFolderTakesItsSubfoldersAlong() {
+        val idx = LibraryIndex(
+            folders = listOf(
+                Folder(id = "a", name = "a", createdAt = 1, deletedAt = 5),
+                Folder(id = "b", name = "b", parentId = "a", createdAt = 1),
+                Folder(id = "c", name = "c", createdAt = 1),
+                // A parent cycle in a damaged file must not hang.
+                Folder(id = "x", name = "x", parentId = "y", createdAt = 1), Folder(id = "y", name = "y", parentId = "x", createdAt = 1),
+            ),
+        )
+        assertEquals(setOf("a", "b"), idx.trashedFolderIds())
+        assertEquals(setOf("a", "b"), idx.descendantFolderIds("a"))
+    }
+
     @Test fun schemaVersionIsReadWithoutParsingTheWholeDocument() {
         assertEquals(SCHEMA_VERSION, DocumentCodec.schemaVersionOf("""{"id":"a"}"""))
         assertEquals(7, DocumentCodec.schemaVersionOf("""{ "schemaVersion" :  7 , "id":"a"}"""))
