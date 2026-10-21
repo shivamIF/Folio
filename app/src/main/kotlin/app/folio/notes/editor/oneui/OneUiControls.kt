@@ -82,6 +82,9 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import app.folio.notes.ui.glass.GlassRole
+import app.folio.notes.ui.glass.LocalGlassSettings
+import app.folio.notes.ui.glass.glassSurface
 import kotlin.math.roundToInt
 
 // ------------------------------------------------------------------ popup frame
@@ -134,6 +137,7 @@ fun OneUiPopup(
         val top = (anchorBottomPx ?: (window.height / 6)) + gapPx
         (window.height - top - marginPx).coerceAtLeast(160.dp.roundToPx()).toDp()
     }
+    val glass = LocalGlassSettings.current
     val appear = remember { Animatable(0f) }
     LaunchedEffect(Unit) { appear.animateTo(1f, tween(170, easing = FastOutSlowInEasing)) }
     Popup(popupPositionProvider = provider, onDismissRequest = onDismiss, properties = PopupProperties(focusable = focusable)) {
@@ -146,10 +150,11 @@ fun OneUiPopup(
                     transformOrigin = TransformOrigin(0.5f, if (placement == PopupPlacement.ABOVE_CENTRED) 1f else 0f)
                 }
                 .padding(6.dp) // room for the shadow
-                .shadow(14.dp, RoundedCornerShape(26.dp), ambientColor = c.shadow, spotColor = c.shadow)
-                .clip(RoundedCornerShape(26.dp))
-                .background(c.popup)
-                .border(1.dp, c.popupRim, RoundedCornerShape(26.dp))
+                .then(
+                    if (glass.enabled && glass.glassPopups) Modifier.glassSurface(RoundedCornerShape(26.dp), GlassRole.POPUP).clip(RoundedCornerShape(26.dp))
+                    else Modifier.shadow(14.dp, RoundedCornerShape(26.dp), ambientColor = c.shadow, spotColor = c.shadow)
+                        .clip(RoundedCornerShape(26.dp)).background(c.popup).border(1.dp, c.popupRim, RoundedCornerShape(26.dp)),
+                )
                 .width(width)
                 .heightIn(max = maxH)
                 .verticalScroll(rememberScrollState()),
@@ -543,7 +548,11 @@ fun OneUiDialog(
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         BoxWithConstraints(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.BottomCenter) {
             Column(
-                Modifier.widthIn(max = 520.dp).fillMaxWidth().clip(RoundedCornerShape(26.dp)).background(c.popup)
+                Modifier.widthIn(max = 520.dp).fillMaxWidth()
+                    .then(
+                        if (LocalGlassSettings.current.let { it.enabled && it.glassDialogs }) Modifier.glassSurface(RoundedCornerShape(26.dp), GlassRole.DIALOG).clip(RoundedCornerShape(26.dp))
+                        else Modifier.clip(RoundedCornerShape(26.dp)).background(c.popup),
+                    )
                     .padding(top = 22.dp, start = 4.dp, end = 4.dp, bottom = 4.dp),
             ) {
                 Text(title, style = OneUiType.popupTitle, color = c.text, modifier = Modifier.padding(horizontal = 22.dp))

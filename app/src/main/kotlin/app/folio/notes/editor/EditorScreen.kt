@@ -97,6 +97,9 @@ import app.folio.notes.editor.oneui.MenuEntry
 import app.folio.notes.editor.oneui.OneUiDialog
 import app.folio.notes.editor.oneui.OneUiType
 import app.folio.notes.editor.oneui.ProvideOneUi
+import app.folio.notes.ui.glass.LocalGlassBackdrop
+import app.folio.notes.ui.glass.SurfaceBackdropSampler
+import app.folio.notes.ui.glass.rememberGlassBackdrop
 import app.folio.notes.export.PageExportSpec
 import kotlinx.coroutines.launch
 
@@ -108,7 +111,11 @@ fun EditorScreen(notebookId: String, onClose: () -> Unit) {
         override fun <T : ViewModel> create(modelClass: Class<T>): T = EditorViewModel(app, notebookId) as T
     })
     val state by vm.state.collectAsStateWithLifecycle()
-    ProvideOneUi { EditorContent(vm, state, onClose) }
+    // Glass over the page blurs a quarter-resolution copy of it (the page is a SurfaceView).
+    val glassBackdrop = rememberGlassBackdrop()
+    androidx.compose.runtime.CompositionLocalProvider(LocalGlassBackdrop provides glassBackdrop) {
+        ProvideOneUi { EditorContent(vm, state, onClose) }
+    }
 }
 
 @Composable
@@ -176,6 +183,7 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
 
     var canvasRef by remember { mutableStateOf<InkCanvasView?>(null) }
     var viewportTick by remember { mutableIntStateOf(0) }
+    GlassPageBackdrop(canvasRef, viewportTick, state.pages, popup, insertMenu, moreMenu)
     val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
     ) { uri -> val area = canvasRef?.visiblePageArea(); if (uri != null && area != null) vm.insertImage(uri, area.first, area.second) }
@@ -631,4 +639,13 @@ private fun TextEditBar(onDelete: () -> Unit, onDone: () -> Unit, modifier: Modi
         IconAction(FIcon.DELETE, "Delete text box", onDelete)
         IconAction(FIcon.CHECK, "Done typing", onDone)
     }
+}
+
+/** Keeps the glass backdrop fed with the page as it scrolls, changes or a popup opens over it. */
+@Composable
+private fun GlassPageBackdrop(canvas: InkCanvasView?, vararg keys: Any?) {
+    val backdrop = LocalGlassBackdrop.current ?: return
+    val sampler = remember(canvas) { canvas?.let { SurfaceBackdropSampler(it, backdrop) } }
+    androidx.compose.runtime.DisposableEffect(sampler) { onDispose { sampler?.release() } }
+    LaunchedEffect(sampler, *keys) { sampler?.request() }
 }
