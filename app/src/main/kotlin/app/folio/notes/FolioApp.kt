@@ -32,6 +32,7 @@ class FolioApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        app.folio.notes.ui.glass.GlassPrefs.init(this)
         repository = FileNotebookStore(File(filesDir, "library"))
         thumbnails = app.folio.notes.library.Thumbnails(this, repository)
         sync = app.folio.notes.sync.SyncManager(this, repository as FileNotebookStore, appScope, ioWriter)

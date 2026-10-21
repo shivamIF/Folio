@@ -40,7 +40,10 @@ fun FolioTheme(content: @Composable () -> Unit) {
     val dark = isSystemInDarkTheme()
     val library = if (dark) LibraryColors(Color(0xFF1C1C1F), Color(0xFF000000), Color(0xFF1B3557), Color(0xFFFFC83D))
     else LibraryColors(Color(0xFFF4F4F6), Color(0xFFFFFFFF), Color(0xFFDCE8FC), Color(0xFFFFB800))
-    androidx.compose.runtime.CompositionLocalProvider(LocalLibraryColors provides library) {
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalLibraryColors provides library,
+        app.folio.notes.ui.glass.LocalGlassSettings provides app.folio.notes.ui.glass.rememberGlassSettings(),
+    ) {
         MaterialTheme(colorScheme = if (dark) Dark else Light, content = content)
     }
 }
