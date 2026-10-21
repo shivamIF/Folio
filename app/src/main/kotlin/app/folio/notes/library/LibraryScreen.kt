@@ -66,7 +66,6 @@ import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material.icons.outlined.ViewSidebar
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -116,6 +115,48 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.folio.core.model.Folder
 import app.folio.core.model.NotebookMeta
 import app.folio.notes.ui.LocalLibraryColors
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Canvas
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import app.folio.notes.ui.glass.GlassDropdownMenu
+import app.folio.notes.ui.glass.GlassMath
+import app.folio.notes.ui.glass.GlassRole
+import app.folio.notes.ui.glass.GlassShader
+import app.folio.notes.ui.glass.LocalGlassBackdrop
+import app.folio.notes.ui.glass.LocalGlassSettings
+import app.folio.notes.ui.glass.ProvideBackdropColors
+import app.folio.notes.ui.glass.ProvideGlassColors
+import app.folio.notes.ui.glass.glassBackdropSource
+import app.folio.notes.ui.glass.glassMenuItemColors
+import app.folio.notes.ui.glass.glassPressable
+import app.folio.notes.ui.glass.glassSpec
+import app.folio.notes.ui.glass.glassSpring
+import app.folio.notes.ui.glass.glassSurface
+import app.folio.notes.ui.glass.rememberGlassBackdrop
+import kotlin.math.max
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 private sealed interface Dialog {
     data object NewNotebook : Dialog
@@ -213,46 +254,107 @@ fun LibraryScreen(
         )
     }
 
+    val glass = LocalGlassSettings.current
+    // Glass chrome: the sidebar and the bars float as glass over a wallpaper, and the grid scrolls
+    // under the bars. Off, the library is laid out as it always was.
+    val glassChrome = glass.enabled && glass.glassSidebar
+    val dark = isSystemInDarkTheme()
+    // The library as glass sees it: the chrome, menus and dialogs blur it live.
+    val backdrop = rememberGlassBackdrop()
+    val record = if (glass.seeThrough && glass.liveBlur && GlassShader.supported) Modifier.glassBackdropSource(backdrop) else Modifier
+    val motion = remember { ContentMotion() }
+    val wallpaper = remember { Wallpaper() }
+
+    CompositionLocalProvider(LocalGlassBackdrop provides backdrop) {
     // A Surface so text picks up the theme's content colour (dark mode) without a Scaffold.
-    Surface(color = LocalLibraryColors.current.content, contentColor = MaterialTheme.colorScheme.onSurface) {
+    Surface(color = if (glassChrome) Color.Transparent else LocalLibraryColors.current.content, contentColor = MaterialTheme.colorScheme.onSurface) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxWidth < CompactWidth
         val expanded = state.sidebarExpanded && !compact
         val target = if (expanded) SidebarWide else SidebarRail
-        val sidebarWidth = animateDpAsState(target, spring(dampingRatio = 0.9f, stiffness = 500f), label = "sidebar")
+        val sidebarSpec = if (glassChrome) glassSpring<Dp>(stiffness = 500f) else spring<Dp>(dampingRatio = 0.9f, stiffness = 500f)
+        val sidebarWidth = animateDpAsState(target, sidebarSpec, label = "sidebar")
         // Only the sidebar animates. The content takes its new width once, when the sidebar has
         // finished opening (it slides over the content) or right away when closing, so the grid
-        // isn't re-laid out on every animation frame.
+        // isn't re-laid out on every animation frame. Once there it stays, even if a bouncy
+        // spring swings back a little.
         val inset by remember(target) {
-            derivedStateOf { if (target == SidebarWide && sidebarWidth.value < SidebarWide - 1.dp) SidebarRail else target }
-        }
-        Box(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().padding(start = inset).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))) {
-                if (state.selecting) SelectionBar(
-                    state, onDone = vm::stopSelecting, onSelectAll = vm::selectAll,
-                    onFavorite = { keys, fav -> vm.setFavorite(keys, fav) }, onMove = { dialog = Dialog.Move(it) },
-                    onTrash = vm::trash, onRestore = { vm.restore(it) }, onDeleteForever = { dialog = Dialog.DeleteForever(it) },
-                ) else TopBar(
-                    state, onBack = vm::goUp, onHome = { vm.showSection(Section.DOCUMENTS) },
-                    onSearch = vm::setSearching, onSearchText = vm::setSearch,
-                )
-                Header(state, onNavigate = vm::openFolder)
-                Toolbar(
-                    state, onFilter = vm::setFilter, onSort = vm::setSort, onDescending = vm::setDescending,
-                    onViewMode = vm::setViewMode, onSelect = { vm.startSelecting() },
-                    onNewNotebook = { dialog = Dialog.NewNotebook }, onNewFolder = { dialog = Dialog.NewFolder },
-                    onImport = { pickFile.launch(arrayOf("*/*")) },
-                    onEmptyTrash = { dialog = Dialog.EmptyTrash },
-                )
-                if (state.importing) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 24.dp).semantics { contentDescription = "Importing" })
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    Content(state, actions, onNewNotebook = { dialog = Dialog.NewNotebook }, onShowAll = { vm.setFilter(ItemFilter.ALL) })
-                }
+            var arrived = false
+            derivedStateOf {
+                if (target == SidebarWide && !arrived && sidebarWidth.value < SidebarWide - 1.dp) SidebarRail
+                else { arrived = true; target }
             }
+        }
+        val bars: @Composable () -> Unit = {
+            if (state.selecting) SelectionBar(
+                state, onDone = vm::stopSelecting, onSelectAll = vm::selectAll,
+                onFavorite = { keys, fav -> vm.setFavorite(keys, fav) }, onMove = { dialog = Dialog.Move(it) },
+                onTrash = vm::trash, onRestore = { vm.restore(it) }, onDeleteForever = { dialog = Dialog.DeleteForever(it) },
+            ) else TopBar(
+                state, onBack = vm::goUp, onHome = { vm.showSection(Section.DOCUMENTS) },
+                onSearch = vm::setSearching, onSearchText = vm::setSearch,
+            )
+            Header(state, onNavigate = vm::openFolder)
+            Toolbar(
+                state, onFilter = vm::setFilter, onSort = vm::setSort, onDescending = vm::setDescending,
+                onViewMode = vm::setViewMode, onSelect = { vm.startSelecting() },
+                onNewNotebook = { dialog = Dialog.NewNotebook }, onNewFolder = { dialog = Dialog.NewFolder },
+                onImport = { pickFile.launch(arrayOf("*/*")) },
+                onEmptyTrash = { dialog = Dialog.EmptyTrash },
+            )
+            if (state.importing) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 24.dp).semantics { contentDescription = "Importing" })
+        }
+        val content: @Composable (underBar: (() -> Dp)?) -> Unit = { underBar ->
+            Content(
+                state, actions, underBar, motion.takeIf { underBar != null },
+                onNewNotebook = { dialog = Dialog.NewNotebook }, onShowAll = { vm.setFilter(ItemFilter.ALL) },
+            )
+        }
+        val sidebar: @Composable () -> Unit = {
             Sidebar(
-                width = sidebarWidth, expanded = expanded, canExpand = !compact, section = q.section, trashCount = state.trashCount,
+                width = sidebarWidth, glass = glassChrome, expanded = expanded, canExpand = !compact, section = q.section, trashCount = state.trashCount,
                 onToggle = vm::toggleSidebar, onSection = vm::showSection, onSettings = { dialog = Dialog.Settings },
             )
+        }
+        if (glassChrome) {
+            val density = LocalDensity.current
+            // Measured below; starts near the usual height so the first frame doesn't jump.
+            val barHeight = remember { mutableIntStateOf(with(density) { 176.dp.roundToPx() }) }
+            // Read when the content is measured, never in composition.
+            val underBar = remember(density) { { with(density) { barHeight.intValue.toDp() } - PanelRadius + 12.dp } }
+            // The bars' panel and the content share one frame right of the sidebar.
+            val frame = Modifier
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                .padding(start = inset + GlassGap * 2, top = GlassGap, end = GlassGap)
+            // Recorded for the glass: the wallpaper and the content. The glass is drawn after it, never inside.
+            Box(Modifier.fillMaxSize().then(record).drawBehind { wallpaper.draw(this, dark) }) {
+                // Content is clipped below the panel's rounded top, so nothing peeks round its corners.
+                Box(frame.padding(top = PanelRadius).fillMaxSize()) {
+                    WallpaperColors(dark) {
+                        content(underBar)
+                    }
+                }
+            }
+            CompositionLocalProvider(LocalGlassChrome provides true) {
+                ProvideGlassColors(GlassRole.CHROME) {
+                    Column(
+                        frame.fillMaxWidth()
+                            .onSizeChanged { barHeight.intValue = it.height }
+                            // The glass samples the content while drawing, so redraw it as the content moves.
+                            .drawBehind { motion.read() }
+                            .glassSurface(PanelShape, GlassRole.CHROME),
+                    ) { bars() }
+                    sidebar()
+                }
+            }
+        } else {
+            Box(Modifier.fillMaxSize().then(record)) {
+                Column(Modifier.fillMaxSize().padding(start = inset).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))) {
+                    bars()
+                    Box(Modifier.weight(1f).fillMaxWidth()) { content(null) }
+                }
+                sidebar()
+            }
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 8.dp))
     }
@@ -288,28 +390,144 @@ fun LibraryScreen(
         )
         Dialog.Settings -> SettingsDialog(state.defaults, onDismiss = { dialog = null }) { dialog = null; vm.saveDefaults(it) }
     }
+    }
 }
 
-/** Collapsible sidebar: full width with labels, or a narrow rail of icons. The width change is animated. */
+/** Room between the floating glass panels and the screen edges. */
+private val GlassGap = 10.dp
+private val PanelRadius = 24.dp
+private val PanelShape = RoundedCornerShape(PanelRadius)
+
+/** True inside the library's glass chrome: buttons there squish on press and lift under the S Pen. */
+private val LocalGlassChrome = staticCompositionLocalOf { false }
+
+@Composable
+private fun Modifier.chromePress(pressed: Float = 0.92f, hover: Float = 1.06f): Modifier =
+    if (LocalGlassChrome.current) glassPressable(pressed, hover) else this
+
+/**
+ * Lets the glass over the content redraw as the content moves (the glass samples it while it
+ * draws). Read in the draw phase only, so scrolling never recomposes.
+ */
+@Stable
+private class ContentMotion {
+    var probe: (() -> Int)? by mutableStateOf(null)
+    /** Bumped after items settle (re-sorted, filtered), when no scroll redraws the glass. */
+    var settled by mutableIntStateOf(0)
+    fun read() { probe?.invoke(); settled }
+}
+
+/** Content padding that clears the glass bar; [top] is read when the list is measured, so the bar's height never recomposes it. */
+@Stable
+private class UnderBar(private val start: Dp, private val end: Dp, private val bottom: Dp, private val top: () -> Dp) : PaddingValues {
+    override fun calculateLeftPadding(layoutDirection: LayoutDirection) = if (layoutDirection == LayoutDirection.Ltr) start else end
+    override fun calculateTopPadding() = top().coerceAtLeast(0.dp)
+    override fun calculateRightPadding(layoutDirection: LayoutDirection) = if (layoutDirection == LayoutDirection.Ltr) end else start
+    override fun calculateBottomPadding() = bottom
+}
+
+/** One soft colour field of the wallpaper: a glow at ([x], [y]) with radius [r], as fractions of the screen. */
+private class Field(val x: Float, val y: Float, val r: Float, val color: Color)
+private class WallpaperPalette(val base: Color, val fields: List<Field>) {
+    /** The colour text on the wallpaper contrasts least with. */
+    fun hardest(dark: Boolean): Color = (fields.map { it.color } + base).let { c -> if (dark) c.maxBy { it.luminance() } else c.minBy { it.luminance() } }
+}
+
+private val WallpaperLight = WallpaperPalette(
+    Color(0xFFEEF1F7),
+    listOf(
+        Field(0.08f, 0.02f, 0.75f, Color(0xFFD2E0FB)), // sky
+        Field(0.98f, 0.12f, 0.60f, Color(0xFFE7DCF8)), // lilac
+        Field(0.92f, 1.00f, 0.70f, Color(0xFFF9E1D6)), // peach
+        Field(0.12f, 0.96f, 0.60f, Color(0xFFD8EFE6)), // mint
+    ),
+)
+private val WallpaperDark = WallpaperPalette(
+    Color(0xFF0C0E13),
+    listOf(
+        Field(0.08f, 0.02f, 0.75f, Color(0xFF1A2846)),
+        Field(0.98f, 0.12f, 0.60f, Color(0xFF261B38)),
+        Field(0.92f, 1.00f, 0.70f, Color(0xFF2B1D19)),
+        Field(0.12f, 0.96f, 0.60f, Color(0xFF0F2A28)),
+    ),
+)
+
+/**
+ * The library wallpaper behind the glass: soft colour fields, painted once per size and theme
+ * at a quarter of the screen's resolution and stretched (it's all gentle gradients), so each
+ * frame costs one bitmap draw.
+ */
+private class Wallpaper {
+    private var image: ImageBitmap? = null
+    private var key: Triple<Int, Int, Boolean>? = null
+
+    fun draw(scope: DrawScope, dark: Boolean) = with(scope) {
+        val w = (size.width / 4).roundToInt().coerceAtLeast(1)
+        val h = (size.height / 4).roundToInt().coerceAtLeast(1)
+        val k = Triple(w, h, dark)
+        val img = image.takeIf { key == k } ?: paint(if (dark) WallpaperDark else WallpaperLight, w, h).also { image = it; key = k }
+        drawImage(img, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()), filterQuality = FilterQuality.Low)
+    }
+
+    private fun paint(p: WallpaperPalette, w: Int, h: Int): ImageBitmap {
+        val img = ImageBitmap(w, h)
+        CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
+            drawRect(p.base)
+            val m = max(w, h).toFloat()
+            p.fields.forEach { f ->
+                drawRect(
+                    Brush.radialGradient(
+                        0f to f.color, 0.4f to f.color.copy(alpha = 0.6f), 0.75f to f.color.copy(alpha = 0.18f), 1f to f.color.copy(alpha = 0f),
+                        center = Offset(f.x * w, f.y * h), radius = f.r * m,
+                    ),
+                )
+            }
+        }
+        return img
+    }
+}
+
+/** Colours for content on the wallpaper: secondary text darkened (or lightened) until it reads on every field. */
+@Composable
+private fun WallpaperColors(dark: Boolean, content: @Composable () -> Unit) {
+    val base = MaterialTheme.colorScheme
+    val scheme = remember(base, dark) {
+        val hardest = (if (dark) WallpaperDark else WallpaperLight).hardest(dark)
+        base.copy(onSurfaceVariant = Color(GlassMath.ensureContrast(base.onSurfaceVariant.toArgb(), hardest.toArgb(), 4.5f)))
+    }
+    ProvideBackdropColors(scheme, content)
+}
+
+/**
+ * Collapsible sidebar: full width with labels, or a narrow rail of icons. The width change is
+ * animated. With [glass] it's a floating glass panel inset from the screen edges.
+ */
 @Composable
 private fun Sidebar(
-    width: State<Dp>, expanded: Boolean, canExpand: Boolean, section: Section, trashCount: Int,
+    width: State<Dp>, glass: Boolean, expanded: Boolean, canExpand: Boolean, section: Section, trashCount: Int,
     onToggle: () -> Unit, onSection: (Section) -> Unit, onSettings: () -> Unit,
 ) {
-    Column(
+    // Read in the layout phase: animation frames re-measure the sidebar without recomposing.
+    val animatedWidth = Modifier.layout { measurable, constraints ->
+        val w = width.value.roundToPx()
+        val placeable = measurable.measure(Constraints.fixed(w, constraints.maxHeight))
+        layout(w, constraints.maxHeight) { placeable.place(0, 0) }
+    }
+    val frame = if (glass) {
         Modifier
-            // Read in the layout phase: animation frames re-measure the sidebar without recomposing.
-            .layout { measurable, constraints ->
-                val w = width.value.roundToPx()
-                val placeable = measurable.measure(Constraints.fixed(w, constraints.maxHeight))
-                layout(w, constraints.maxHeight) { placeable.place(0, 0) }
-            }
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start))
+            .padding(GlassGap)
+            .then(animatedWidth)
+            .glassSurface(PanelShape, GlassRole.CHROME)
+            .clip(PanelShape)
+    } else {
+        animatedWidth
             .clipToBounds()
             .background(LocalLibraryColors.current.sidebar)
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-    ) {
-        if (canExpand) IconButton(onClick = onToggle, modifier = Modifier.padding(start = 2.dp)) {
+    }
+    Column(frame.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        if (canExpand) IconButton(onClick = onToggle, modifier = Modifier.padding(start = 2.dp).chromePress()) {
             Icon(Icons.Outlined.ViewSidebar, contentDescription = if (expanded) "Collapse sidebar" else "Expand sidebar")
         } else Spacer(Modifier.height(48.dp))
         Box(Modifier.height(64.dp).padding(start = 10.dp), contentAlignment = Alignment.CenterStart) {
@@ -329,9 +547,12 @@ private fun Sidebar(
 @Composable
 private fun SidebarItem(icon: ImageVector, label: String, selected: Boolean, expanded: Boolean, badge: Int = 0, onClick: () -> Unit) {
     val primary = MaterialTheme.colorScheme.primary
+    val glass = LocalGlassChrome.current
+    // On glass, the selected item sits on the glass's selection platter and items lift under the S Pen.
+    val platter = if (glass) glassSpec(GlassRole.CHROME).selection else LocalLibraryColors.current.selectedItem
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 2.dp).height(48.dp).clip(RoundedCornerShape(12.dp))
-            .background(if (selected) LocalLibraryColors.current.selectedItem else Color.Transparent)
+        Modifier.fillMaxWidth().padding(vertical = 2.dp).chromePress(pressed = 0.96f, hover = 1.03f).height(48.dp).clip(RoundedCornerShape(12.dp))
+            .background(if (selected) platter else Color.Transparent)
             .clickable(onClick = onClick)
             .semantics { contentDescription = label; this.selected = selected }
             .padding(horizontal = 14.dp),
@@ -352,9 +573,9 @@ private fun SidebarItem(icon: ImageVector, label: String, selected: Boolean, exp
 @Composable
 private fun TopBar(state: LibraryUiState, onBack: () -> Unit, onHome: () -> Unit, onSearch: (Boolean) -> Unit, onSearchText: (String) -> Unit) {
     Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (state.query.section != Section.DOCUMENTS && !state.searching) IconButton(onClick = onHome) {
+        if (state.query.section != Section.DOCUMENTS && !state.searching) IconButton(onClick = onHome, modifier = Modifier.chromePress()) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to notebooks")
-        } else if (state.query.folderId != null && !state.searching) IconButton(onClick = onBack) {
+        } else if (state.query.folderId != null && !state.searching) IconButton(onClick = onBack, modifier = Modifier.chromePress()) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to parent folder")
         }
         if (state.searching) {
@@ -374,7 +595,7 @@ private fun TopBar(state: LibraryUiState, onBack: () -> Unit, onHome: () -> Unit
             )
         } else {
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = { onSearch(true) }) { Icon(Icons.Filled.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.primary) }
+            IconButton(onClick = { onSearch(true) }, modifier = Modifier.chromePress()) { Icon(Icons.Filled.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.primary) }
         }
     }
 }
@@ -389,28 +610,28 @@ private fun SelectionBar(
     val any = sel.isNotEmpty()
     val error = MaterialTheme.colorScheme.error
     Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onDone) { Icon(Icons.Filled.Close, contentDescription = "Done selecting") }
+        IconButton(onClick = onDone, modifier = Modifier.chromePress()) { Icon(Icons.Filled.Close, contentDescription = "Done selecting") }
         Text(if (any) "${sel.size} selected" else "Select items", style = MaterialTheme.typography.titleMedium)
-        TextButton(onClick = onSelectAll) { Text("Select all") }
+        TextButton(onClick = onSelectAll, modifier = Modifier.chromePress()) { Text("Select all") }
         Spacer(Modifier.weight(1f))
         if (state.query.section == Section.TRASH) {
-            TextButton(onClick = { onRestore(sel) }, enabled = any) {
+            TextButton(onClick = { onRestore(sel) }, enabled = any, modifier = Modifier.chromePress()) {
                 Icon(Icons.Outlined.RestoreFromTrash, contentDescription = null); Spacer(Modifier.width(6.dp)); Text("Restore")
             }
-            TextButton(onClick = { onDeleteForever(sel) }, enabled = any) {
+            TextButton(onClick = { onDeleteForever(sel) }, enabled = any, modifier = Modifier.chromePress()) {
                 Icon(Icons.Outlined.DeleteForever, contentDescription = null, tint = if (any) error else Color.Unspecified)
                 Spacer(Modifier.width(6.dp)); Text("Delete", color = if (any) error else Color.Unspecified)
             }
         } else {
             val allFavorite = any && state.items.filter { it.key in sel }.all { it.favorite }
-            IconButton(onClick = { onFavorite(sel, !allFavorite) }, enabled = any) {
+            IconButton(onClick = { onFavorite(sel, !allFavorite) }, enabled = any, modifier = Modifier.chromePress()) {
                 Icon(
                     if (allFavorite) Icons.Filled.Star else Icons.Outlined.StarOutline,
                     contentDescription = if (allFavorite) "Remove from favorites" else "Add to favorites",
                 )
             }
-            IconButton(onClick = { onMove(sel) }, enabled = any) { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = "Move to") }
-            IconButton(onClick = { onTrash(sel) }, enabled = any) {
+            IconButton(onClick = { onMove(sel) }, enabled = any, modifier = Modifier.chromePress()) { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = "Move to") }
+            IconButton(onClick = { onTrash(sel) }, enabled = any, modifier = Modifier.chromePress()) {
                 Icon(Icons.Outlined.Delete, contentDescription = "Move to Trash", tint = if (any) error else Color.Unspecified)
             }
         }
@@ -461,12 +682,12 @@ private fun Toolbar(
     Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         var filterMenu by remember { mutableStateOf(false) }
         Box {
-            TextButton(onClick = { filterMenu = true }, modifier = Modifier.semantics { contentDescription = "Filter: ${q.filter.label}" }) {
+            TextButton(onClick = { filterMenu = true }, modifier = Modifier.chromePress().semantics { contentDescription = "Filter: ${q.filter.label}" }) {
                 Icon(Icons.Outlined.FilterList, contentDescription = null, tint = primary)
                 Spacer(Modifier.width(8.dp))
                 Text(q.filter.label, color = primary, style = MaterialTheme.typography.titleMedium)
             }
-            DropdownMenu(filterMenu, onDismissRequest = { filterMenu = false }) {
+            GlassDropdownMenu(filterMenu, onDismissRequest = { filterMenu = false }) {
                 ItemFilter.entries.forEach { f ->
                     CheckedItem(f.label, f == q.filter) { filterMenu = false; onFilter(f) }
                 }
@@ -478,37 +699,37 @@ private fun Toolbar(
             Box {
                 Button(
                     onClick = { newMenu = true }, shape = RoundedCornerShape(10.dp),
-                    contentPadding = ButtonDefaults.ButtonWithIconContentPadding, modifier = Modifier.testTag("new-item"),
+                    contentPadding = ButtonDefaults.ButtonWithIconContentPadding, modifier = Modifier.chromePress().testTag("new-item"),
                 ) {
                     Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("New", style = MaterialTheme.typography.titleMedium)
                 }
-                DropdownMenu(newMenu, onDismissRequest = { newMenu = false }) {
+                GlassDropdownMenu(newMenu, onDismissRequest = { newMenu = false }) {
                     DropdownMenuItem(
                         text = { Text("Notebook") }, leadingIcon = { Icon(Icons.Outlined.NoteAdd, contentDescription = null) },
-                        onClick = { newMenu = false; onNewNotebook() },
+                        onClick = { newMenu = false; onNewNotebook() }, colors = glassMenuItemColors(),
                     )
                     DropdownMenuItem(
                         text = { Text("Folder") }, leadingIcon = { Icon(Icons.Outlined.CreateNewFolder, contentDescription = null) },
-                        onClick = { newMenu = false; onNewFolder() },
+                        onClick = { newMenu = false; onNewFolder() }, colors = glassMenuItemColors(),
                     )
                     HorizontalDivider(Modifier.padding(vertical = 4.dp))
                     DropdownMenuItem(
                         text = { Text("Import PDF, GoodNotes or Samsung Notes") },
                         leadingIcon = { Icon(Icons.Outlined.FileOpen, contentDescription = null) },
                         enabled = !state.importing,
-                        onClick = { newMenu = false; onImport() },
+                        onClick = { newMenu = false; onImport() }, colors = glassMenuItemColors(),
                     )
                 }
             }
             Spacer(Modifier.width(8.dp))
         }
         if (q.section == Section.TRASH && state.items.isNotEmpty() && !state.selecting) {
-            TextButton(onClick = onEmptyTrash) { Text("Empty Trash", color = MaterialTheme.colorScheme.error) }
+            TextButton(onClick = onEmptyTrash, modifier = Modifier.chromePress()) { Text("Empty Trash", color = MaterialTheme.colorScheme.error) }
         }
         val grid = state.viewMode == ViewMode.GRID
-        IconButton(onClick = { onViewMode(if (grid) ViewMode.LIST else ViewMode.GRID) }) {
+        IconButton(onClick = { onViewMode(if (grid) ViewMode.LIST else ViewMode.GRID) }, modifier = Modifier.chromePress()) {
             Icon(
                 if (grid) Icons.Outlined.GridView else Icons.AutoMirrored.Outlined.ViewList,
                 contentDescription = if (grid) "Switch to list view" else "Switch to grid view", tint = primary,
@@ -516,8 +737,8 @@ private fun Toolbar(
         }
         var more by remember { mutableStateOf(false) }
         Box {
-            IconButton(onClick = { more = true }) { Icon(Icons.Filled.MoreHoriz, contentDescription = "Sort and select", tint = primary) }
-            DropdownMenu(more, onDismissRequest = { more = false }) {
+            IconButton(onClick = { more = true }, modifier = Modifier.chromePress()) { Icon(Icons.Filled.MoreHoriz, contentDescription = "Sort and select", tint = primary) }
+            GlassDropdownMenu(more, onDismissRequest = { more = false }) {
                 MenuHeading("Sort by")
                 SortOrder.entries.forEach { s -> CheckedItem(s.label, s == q.sort) { onSort(s) } }
                 HorizontalDivider(Modifier.padding(vertical = 4.dp))
@@ -527,7 +748,7 @@ private fun Toolbar(
                 HorizontalDivider(Modifier.padding(vertical = 4.dp))
                 DropdownMenuItem(
                     text = { Text("Select items") }, leadingIcon = { Icon(Icons.Outlined.CheckCircle, contentDescription = null) },
-                    onClick = { more = false; onSelect() },
+                    onClick = { more = false; onSelect() }, colors = glassMenuItemColors(),
                 )
             }
         }
@@ -545,15 +766,24 @@ private fun CheckedItem(label: String, checked: Boolean, onClick: () -> Unit) = 
     text = { Text(label) },
     trailingIcon = { if (checked) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary) },
     onClick = onClick,
+    colors = glassMenuItemColors(),
 )
 
 @Composable
-private fun Content(state: LibraryUiState, actions: ItemActions, onNewNotebook: () -> Unit, onShowAll: () -> Unit) {
+/**
+ * The grid or list. Under glass chrome it fills the screen behind the bars: [underBar] gives the
+ * top padding that clears them, and [motion] lets their glass follow the scrolling.
+ */
+private fun Content(
+    state: LibraryUiState, actions: ItemActions, underBar: (() -> Dp)?, motion: ContentMotion?,
+    onNewNotebook: () -> Unit, onShowAll: () -> Unit,
+) {
     val q = state.query
     val items = remember(state.index, q) { state.items }
+    if (motion != null) LaunchedEffect(items, state.viewMode) { delay(600); motion.settled++ }
     if (state.loading) return
     if (items.isEmpty()) {
-        val modifier = Modifier.fillMaxSize()
+        val modifier = Modifier.fillMaxSize().then(if (underBar != null) Modifier.padding(remember(underBar) { UnderBar(0.dp, 0.dp, 0.dp, underBar) }) else Modifier)
         Box(modifier, contentAlignment = Alignment.Center) {
             val filtered = q.filter != ItemFilter.ALL && q.copy(filter = ItemFilter.ALL).items(state.index).isNotEmpty()
             when {
@@ -580,23 +810,41 @@ private fun Content(state: LibraryUiState, actions: ItemActions, onNewNotebook: 
     }
     val showStar = q.section != Section.TRASH
     when (state.viewMode) {
-        ViewMode.GRID -> LazyVerticalGrid(
-            columns = GridCells.Adaptive(176.dp),
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 96.dp),
-            horizontalArrangement = Arrangement.spacedBy(20.dp),
-            verticalArrangement = Arrangement.spacedBy(26.dp),
-        ) {
-            items(items, key = { it.key }, contentType = { it is LibraryItem.FolderItem }) { item ->
-                ItemTile(item, state.selection?.contains(item.key), showStar, actions, Modifier.animateItem())
+        ViewMode.GRID -> {
+            val scroll = rememberLazyGridState()
+            if (motion != null) DisposableEffect(scroll) {
+                motion.probe = { scroll.firstVisibleItemIndex + scroll.firstVisibleItemScrollOffset }
+                onDispose { motion.probe = null }
+            }
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(176.dp),
+                modifier = Modifier.fillMaxSize(),
+                state = scroll,
+                contentPadding = if (underBar != null) remember(underBar) { UnderBar(12.dp, 12.dp, 96.dp, underBar) }
+                else PaddingValues(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 96.dp),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                verticalArrangement = Arrangement.spacedBy(26.dp),
+            ) {
+                items(items, key = { it.key }, contentType = { it is LibraryItem.FolderItem }) { item ->
+                    ItemTile(item, state.selection?.contains(item.key), showStar, actions, Modifier.animateItem())
+                }
             }
         }
-        ViewMode.LIST -> LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
-        ) {
-            items(items, key = { it.key }, contentType = { it is LibraryItem.FolderItem }) { item ->
-                ItemRow(item, state.selection?.contains(item.key), showStar, actions, Modifier.animateItem())
+        ViewMode.LIST -> {
+            val scroll = rememberLazyListState()
+            if (motion != null) DisposableEffect(scroll) {
+                motion.probe = { scroll.firstVisibleItemIndex + scroll.firstVisibleItemScrollOffset }
+                onDispose { motion.probe = null }
+            }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                state = scroll,
+                contentPadding = if (underBar != null) remember(underBar) { UnderBar(8.dp, 8.dp, 96.dp, underBar) }
+                else PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+            ) {
+                items(items, key = { it.key }, contentType = { it is LibraryItem.FolderItem }) { item ->
+                    ItemRow(item, state.selection?.contains(item.key), showStar, actions, Modifier.animateItem())
+                }
             }
         }
     }

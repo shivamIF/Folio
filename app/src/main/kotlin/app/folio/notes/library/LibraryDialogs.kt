@@ -29,10 +29,10 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.NotInterested
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -79,6 +79,8 @@ import app.folio.notes.ui.DefaultFolderColor
 import app.folio.notes.ui.FolderColors
 import app.folio.notes.ui.label
 import app.folio.notes.ui.vector
+import app.folio.notes.ui.glass.GlassAlertDialog
+import app.folio.notes.ui.glass.GlassSettingsPanel
 
 private fun Long.argbHex() = "%08X".format(this)
 private fun Color.toArgbLong(): Long = toArgb().toLong() and 0xFFFFFFFFL
@@ -123,7 +125,7 @@ fun FolderDialog(existing: Folder?, onDismiss: () -> Unit, onDone: (name: String
     val presets = FolderColors.map { it.second }
     var custom by remember { mutableStateOf(color !in presets) }
     val confirm = { onDone(name, color, icon) }
-    AlertDialog(
+    GlassAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (existing == null) "New folder" else "Customize folder") },
         text = {
@@ -222,7 +224,7 @@ fun MoveDialog(index: LibraryIndex, keys: Set<String>, currentFolderId: String?,
     var picked by remember { mutableStateOf(false) }
     var target by remember { mutableStateOf<String?>(null) }
     fun pick(id: String?) { picked = true; target = id }
-    AlertDialog(
+    GlassAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (keys.size == 1) "Move to…" else "Move ${keys.size} items to…") },
         text = {
@@ -264,7 +266,7 @@ fun NotebookDialog(
     var style by remember { mutableStateOf(existing?.cover?.style ?: CoverStyle.PLAIN) }
     var paper by remember { mutableStateOf(existing?.paper ?: defaults.paper) }
     val confirm = { onDone(title, Cover(color, style), paper) }
-    AlertDialog(
+    GlassAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (existing == null) "New notebook" else "Edit notebook") },
         text = {
@@ -303,7 +305,7 @@ fun NotebookDialog(
 
 @Composable
 fun ConfirmDialog(title: String, body: String, confirmLabel: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    AlertDialog(
+    GlassAlertDialog(
         onDismissRequest = onDismiss, title = { Text(title) }, text = { Text(body) },
         confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel, color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -316,13 +318,16 @@ fun SettingsDialog(current: NotebookDefaults, onDismiss: () -> Unit, onSave: (No
     var landscape by remember { mutableStateOf(current.landscape) }
     var paper by remember { mutableStateOf(current.paper) }
     var preview by remember { mutableStateOf(current.libraryPreview) }
-    AlertDialog(
+    var glassPanel by remember { mutableStateOf(false) }
+    GlassAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 val folio = androidx.compose.ui.platform.LocalContext.current.applicationContext as app.folio.notes.FolioApp
                 app.folio.notes.sync.AutoSyncRow(folio.sync)
+                androidx.compose.material3.HorizontalDivider()
+                GlassSettingsRow { glassPanel = true }
                 androidx.compose.material3.HorizontalDivider()
                 Text("Default page size for new notebooks", style = MaterialTheme.typography.labelLarge)
                 PageSizeChoice.entries.forEach { c ->
@@ -350,4 +355,20 @@ fun SettingsDialog(current: NotebookDefaults, onDismiss: () -> Unit, onSave: (No
         confirmButton = { TextButton(onClick = { onSave(NotebookDefaults(size, landscape, paper, preview)) }) { Text("Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+    if (glassPanel) GlassSettingsPanel(onDismiss = { glassPanel = false })
+}
+
+/** Settings row that opens Glass & toolbar (how glass looks and moves, and the editor toolbar). */
+@Composable
+private fun GlassSettingsRow(onOpen: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onOpen).padding(vertical = 4.dp).testTag("glass-settings"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Glass & toolbar…", style = MaterialTheme.typography.titleSmall)
+            Text("How glass looks and moves, and the editor toolbar", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
