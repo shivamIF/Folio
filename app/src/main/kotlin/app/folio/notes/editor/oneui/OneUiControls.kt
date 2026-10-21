@@ -82,7 +82,9 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import app.folio.notes.ui.glass.DockPosition
 import app.folio.notes.ui.glass.GlassRole
+import app.folio.notes.ui.glass.LocalDockEdge
 import app.folio.notes.ui.glass.LocalGlassSettings
 import app.folio.notes.ui.glass.glassSurface
 import kotlin.math.roundToInt
@@ -130,12 +132,18 @@ fun OneUiPopup(
     val density = LocalDensity.current
     val gapPx = with(density) { gap.roundToPx() }
     val marginPx = with(density) { 12.dp.roundToPx() }
-    val provider = remember(placement, gapPx, marginPx) { AnchoredPosition(placement, gapPx, marginPx) }
+    // From a toolbar dock at the bottom of the screen, popups open upwards (anchorBottomPx is then the dock's top).
+    val fromBottomDock = LocalDockEdge.current == DockPosition.BOTTOM && placement != PopupPlacement.ABOVE_CENTRED
+    val place = if (fromBottomDock) PopupPlacement.ABOVE_CENTRED else placement
+    val provider = remember(place, gapPx, marginPx) { AnchoredPosition(place, gapPx, marginPx) }
     val window = LocalWindowInfo.current.containerSize
-    // Height left under the anchor; when unknown, most of the window.
+    // Height left under the anchor (or above a bottom dock); when unknown, most of the window.
     val maxH = with(density) {
-        val top = (anchorBottomPx ?: (window.height / 6)) + gapPx
-        (window.height - top - marginPx).coerceAtLeast(160.dp.roundToPx()).toDp()
+        if (fromBottomDock) ((anchorBottomPx ?: window.height) - gapPx - marginPx).coerceAtLeast(160.dp.roundToPx()).toDp()
+        else {
+            val top = (anchorBottomPx ?: (window.height / 6)) + gapPx
+            (window.height - top - marginPx).coerceAtLeast(160.dp.roundToPx()).toDp()
+        }
     }
     val glass = LocalGlassSettings.current
     val appear = remember { Animatable(0f) }
@@ -147,7 +155,7 @@ fun OneUiPopup(
                     alpha = appear.value
                     val s = 0.94f + 0.06f * appear.value
                     scaleX = s; scaleY = s
-                    transformOrigin = TransformOrigin(0.5f, if (placement == PopupPlacement.ABOVE_CENTRED) 1f else 0f)
+                    transformOrigin = TransformOrigin(0.5f, if (place == PopupPlacement.ABOVE_CENTRED) 1f else 0f)
                 }
                 .padding(6.dp) // room for the shadow
                 .then(

@@ -97,7 +97,13 @@ import app.folio.notes.editor.oneui.MenuEntry
 import app.folio.notes.editor.oneui.OneUiDialog
 import app.folio.notes.editor.oneui.OneUiType
 import app.folio.notes.editor.oneui.ProvideOneUi
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
+import app.folio.notes.ui.glass.DockController
+import app.folio.notes.ui.glass.DockPosition
+import app.folio.notes.ui.glass.DockStyle
 import app.folio.notes.ui.glass.LocalGlassBackdrop
+import app.folio.notes.ui.glass.LocalGlassSettings
 import app.folio.notes.ui.glass.SurfaceBackdropSampler
 import app.folio.notes.ui.glass.rememberGlassBackdrop
 import app.folio.notes.export.PageExportSpec
@@ -255,6 +261,19 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
         recolorSelection = if (state.selection.isNotEmpty()) vm::recolorSelection else null,
     )
 
+    // Glass on: the toolbar is a macOS-style dock, floating over the page or as a bar (Settings › Glass & toolbar).
+    val glassUi = LocalGlassSettings.current
+    val dockFloating = glassUi.enabled && glassUi.dockStyle == DockStyle.FLOATING
+    val dockController = remember { DockController() }
+    val toolbar: @Composable (Boolean, Modifier) -> Unit = { floating, m ->
+        EditorToolbar(
+            tools, state.toolbar,
+            ToolbarFlags(state.canUndo, state.canRedo, state.spenToText, state.easyPad, state.sidebarOpen, state.selection.isNotEmpty()),
+            actions, display,
+            popupFor = { open, bottom -> ToolPopup(open, PopupHost(host.tools, host.update, host.display, host.close, host.eyedropper, host.eraseAll, host.removeAllTape, host.shrink, bottom, host.recolorSelection)) },
+            open = popup, floating = floating, controller = dockController, modifier = m,
+        )
+    }
     Box(Modifier.fillMaxSize().background(c.desk)) {
         Column(Modifier.fillMaxSize()) {
             if (!state.fullScreen) {
@@ -280,13 +299,7 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
                     },
                 )
             } else Spacer(Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars))
-            if (!state.reading) EditorToolbar(
-                tools, state.toolbar,
-                ToolbarFlags(state.canUndo, state.canRedo, state.spenToText, state.easyPad, state.sidebarOpen, state.selection.isNotEmpty()),
-                actions, display,
-                popupFor = { open, bottom -> ToolPopup(open, PopupHost(host.tools, host.update, host.display, host.close, host.eyedropper, host.eraseAll, host.removeAllTape, host.shrink, bottom, host.recolorSelection)) },
-                open = popup,
-            )
+            if (!state.reading && !dockFloating) toolbar(false, Modifier.zIndex(1f))
             Row(Modifier.fillMaxSize()) {
                 // Slides and fades without animating its width, so the canvas is resized once
                 // (PageViewport.resize keeps zoom and position) instead of on every frame.
@@ -381,7 +394,7 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
                                 v.setSelection(state.selectionPage, state.selection)
                                 state.jump?.let { v.jumpTo(it.seq, it.pageId) }
                             },
-                            modifier = Modifier.fillMaxSize().clipToBounds().testTag("canvas"),
+                            modifier = Modifier.fillMaxSize().clipToBounds().testTag("canvas").observePress(dockController::onWriting),
                         )
                         val editing = state.editingText
                         val cv = canvasRef
@@ -424,6 +437,14 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
                     if (state.eyedropper != null) EyedropperHint(vm::cancelEyedropper, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
                     SpenToTextBar(vm, state, Modifier.align(Alignment.TopCenter).padding(top = 8.dp))
                     EasyWritingPad(vm, state, canvasRef, Modifier.align(Alignment.BottomCenter))
+                    if (!state.reading && dockFloating) {
+                        val bottom = glassUi.dockPosition == DockPosition.BOTTOM
+                        toolbar(
+                            true,
+                            if (bottom) Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp)
+                            else Modifier.align(Alignment.TopCenter).padding(top = 10.dp),
+                        )
+                    }
                 }
             }
         }
@@ -648,4 +669,14 @@ private fun GlassPageBackdrop(canvas: InkCanvasView?, vararg keys: Any?) {
     val sampler = remember(canvas) { canvas?.let { SurfaceBackdropSampler(it, backdrop) } }
     androidx.compose.runtime.DisposableEffect(sampler) { onDispose { sampler?.release() } }
     LaunchedEffect(sampler, *keys) { sampler?.request() }
+}
+
+/** Calls [onPress] when a pointer goes down here, without taking the event from the page. */
+private fun Modifier.observePress(onPress: () -> Unit): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            val e = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+            if (e.type == androidx.compose.ui.input.pointer.PointerEventType.Press) onPress()
+        }
+    }
 }
