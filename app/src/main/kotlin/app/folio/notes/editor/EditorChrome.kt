@@ -213,7 +213,10 @@ fun EditorToolbar(
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.divider))
         return
     }
-    // Glass: the macOS-Dock toolbar. Popups open away from the edge it sits on.
+    // Glass: the macOS-Dock toolbar. Popups open away from the edge it sits on. The dock moves
+    // every frame while it magnifies, so its edge is kept in a plain holder (read when a popup
+    // opens), never in state: writing state here would recompose every button each frame.
+    val edgePx = remember { IntArray(1) }
     val bottomDock = floating && glass.dockPosition == DockPosition.BOTTOM
     val cell = glass.dockIconSize.dp
     CompositionLocalProvider(
@@ -224,10 +227,10 @@ fun EditorToolbar(
             position = if (bottomDock) DockPosition.BOTTOM else DockPosition.TOP,
             hold = open != null, fullWidth = !floating, controller = controller,
             modifier = modifier.testTag("toolbar").onGloballyPositioned {
-                bottomPx = if (bottomDock) it.localToWindow(Offset.Zero).y.toInt()
+                edgePx[0] = if (bottomDock) it.localToWindow(Offset.Zero).y.toInt()
                 else it.localToWindow(Offset(0f, it.size.height.toFloat())).y.toInt()
             },
-        ) { ToolbarItems(tools, config, flags, actions, display, popupFor, open, bottomPx, flat = true) }
+        ) { ToolbarItems(tools, config, flags, actions, display, popupFor, open, edgePx[0], flat = true) }
     }
 }
 
