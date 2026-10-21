@@ -96,7 +96,7 @@ fun InsertMenu(onDismiss: () -> Unit, onImage: () -> Unit, more: InsertActions? 
 }
 
 /** The sheets the ⋮ menu opens; they're anchored to the ⋮ button too. */
-enum class MoreSheet { NOTE_STYLE, PAGE_SETTINGS, MOVE_TO_FOLDER, DELETE }
+enum class MoreSheet { NOTE_STYLE, PAGE_SETTINGS, MOVE_TO_FOLDER, DELETE, GLASS }
 
 /**
  * The app bar's ⋮ menu (teardown §18, in Samsung Notes' order): Note style, Page settings ┄
@@ -112,6 +112,7 @@ fun MoreMenu(vm: EditorViewModel, state: EditorUiState, onDismiss: () -> Unit, o
             listOf(
                 MenuEntry("Note style", FIcon.NOTE_STYLE) { onSheet(MoreSheet.NOTE_STYLE) },
                 MenuEntry("Page settings", FIcon.PAGE_SETTINGS) { onSheet(MoreSheet.PAGE_SETTINGS) },
+                MenuEntry("Glass & toolbar", FIcon.CUSTOMISE) { onSheet(MoreSheet.GLASS) },
             ),
             listOf(
                 MenuEntry("Move to folder", FIcon.FOLDER, trailing = "›") { onSheet(MoreSheet.MOVE_TO_FOLDER) },
@@ -141,6 +142,7 @@ fun MoreSheetHost(sheet: MoreSheet?, vm: EditorViewModel, state: EditorUiState, 
         MoreSheet.NOTE_STYLE -> NoteStylePopup(meta.paper, meta.density, darkPages = LocalOneUi.current.dark && meta.darkAdjust, pageColor = meta.pageColor, onApply = vm::applyNoteStyle, onDismiss = onDismiss)
         MoreSheet.PAGE_SETTINGS -> PageSettingsPopup(meta.pageColor, meta.darkAdjust, LocalOneUi.current.dark && meta.darkAdjust, vm, onDismiss)
         MoreSheet.MOVE_TO_FOLDER -> MoveToFolderDialog(vm, meta.folderId, onDismiss)
+        MoreSheet.GLASS -> app.folio.notes.ui.glass.GlassSettingsPanel(onDismiss, preview = { DockPreview() })
         MoreSheet.DELETE -> OneUiDialog(
             onDismiss = onDismiss, title = "Move this note to Trash?",
             message = "You can restore it from Trash in the library.",

@@ -83,7 +83,12 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import app.folio.notes.ui.glass.DockPosition
+import app.folio.notes.ui.glass.GlassMotion
 import app.folio.notes.ui.glass.GlassRole
+import app.folio.notes.ui.glass.glassSpec
+import androidx.compose.animation.core.Spring
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import app.folio.notes.ui.glass.LocalDockEdge
 import app.folio.notes.ui.glass.LocalGlassSettings
 import app.folio.notes.ui.glass.glassSurface
@@ -250,8 +255,15 @@ fun StepSlider(
     onDragEnd: () -> Unit = {},
 ) {
     val c = LocalOneUi.current
+    val glass = LocalGlassSettings.current.enabled
     val haptics = LocalHapticFeedback.current
     val current by rememberUpdatedState(value)
+    // Glass: the thumb swells into a lens while held and stretches with drag speed.
+    val grow = remember { Animatable(1f) }
+    var stretch by remember { mutableFloatStateOf(1f) }
+    val scope = rememberCoroutineScope()
+    val springs = LocalGlassSettings.current
+    val glassSpec = glassSpec(GlassRole.CONTROL)
     val set = { v: Int ->
         val nv = v.coerceIn(range.first, range.last)
         if (nv != current) { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove); onValue(nv) }
@@ -266,7 +278,7 @@ fun StepSlider(
             return (range.first + f * (range.last - range.first)).roundToInt()
         }
         val frac = if (range.last > range.first) (value - range.first).toFloat() / (range.last - range.first) else 0f
-        val anim by animateFloatAsState(frac, tween(90), label = "thumb")
+        val anim by animateFloatAsState(frac, if (glass) GlassMotion.follow(springs) else tween(90), label = "thumb")
         Box(
             Modifier.weight(1f).height(40.dp)
                 .onSizeChanged { widthPx = it.width.toFloat() }
@@ -275,12 +287,21 @@ fun StepSlider(
                         val down = awaitFirstDown()
                         set(valueAt(down.position.x))
                         down.consume()
+                        if (glass) scope.launch { grow.animateTo(1.32f, GlassMotion.spring(springs, Spring.StiffnessMedium)) }
+                        var lastX = down.position.x; var lastT = down.uptimeMillis
                         while (true) {
                             val e = awaitPointerEvent()
                             val ch = e.changes.firstOrNull { it.id == down.id } ?: break
                             if (!ch.pressed) break
+                            if (glass) {
+                                val speed = kotlin.math.abs(ch.position.x - lastX) / (ch.uptimeMillis - lastT).coerceAtLeast(1)
+                                stretch = 1f + (speed / 5f).coerceAtMost(0.3f)
+                                lastX = ch.position.x; lastT = ch.uptimeMillis
+                            }
                             set(valueAt(ch.position.x)); ch.consume()
                         }
+                        stretch = 1f
+                        if (glass) scope.launch { grow.animateTo(1f, GlassMotion.spring(springs)) }
                         onDragEnd()
                     }
                 }
@@ -294,19 +315,32 @@ fun StepSlider(
         ) {
             Canvas(Modifier.fillMaxWidth().height(14.dp)) {
                 val r = size.height / 2
-                if (track != null) track(size) else drawRoundRect(c.sliderTrack, cornerRadius = CornerRadius(r))
+                if (track != null) track(size) else drawRoundRect(if (glass) glassSpec.separator.copy(alpha = 0.45f) else c.sliderTrack, cornerRadius = CornerRadius(r))
+                if (glass) drawGlassGroove(size, r, glassSpec.dark)
                 if (track == null) {
                     val span = size.width - 2 * thumbR
-                    for (i in 0 until 10) drawCircle(c.sliderDot, 1.5.dp.toPx(), Offset(thumbR + span * (i + 0.5f) / 10f, r))
+                    for (i in 0 until 10) drawCircle(if (glass) glassSpec.textTertiary else c.sliderDot, 1.5.dp.toPx(), Offset(thumbR + span * (i + 0.5f) / 10f, r))
                 }
             }
             val thumbX = with(LocalDensity.current) { (thumbR + (widthPx - 2 * thumbR) * anim - thumbR).toDp() }
-            Box(
+            if (!glass) Box(
                 Modifier.offset(x = thumbX).size(28.dp).shadow(2.dp, CircleShape).clip(CircleShape)
                     .background(thumbFill ?: c.thumb).border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(label(value), style = OneUiType.thumb, color = if (thumbFill != null && ColorMath.prefersDarkContent(thumbFill.toArgbLong())) Color.Black else c.thumbText)
+            } else Box(
+                Modifier.offset(x = thumbX).size(28.dp)
+                    .graphicsLayer {
+                        scaleX = grow.value * stretch; scaleY = grow.value / (1f + (stretch - 1f) * 0.6f)
+                        transformOrigin = TransformOrigin.Center
+                    }
+                    .glassSurface(CircleShape, GlassRole.CONTROL)
+                    .then(if (thumbFill != null) Modifier.clip(CircleShape).background(thumbFill.copy(alpha = thumbFill.alpha * (1.2f - 0.55f * (grow.value - 1f) / 0.32f).coerceIn(0.45f, 0.92f))) else Modifier),
+                contentAlignment = Alignment.Center,
+            ) {
+                val onFill = thumbFill != null && !ColorMath.prefersDarkContent(thumbFill.toArgbLong())
+                Text(label(value), style = OneUiType.thumb, color = if (onFill) Color.White else if (thumbFill != null) Color.Black else glassSpec.textPrimary)
             }
         }
         IconAction(FIcon.PLUS, "Increase $description", { set(value + 1) }, enabled = value < range.last, size = 36.dp, iconSize = 22.dp)
@@ -320,6 +354,14 @@ fun OpacitySlider(percent: Int, color: Color, onValue: (Int) -> Unit, modifier: 
         percent, range, onValue, "Opacity", modifier,
         track = { s -> drawCheckerTrack(s, color) },
         thumbFill = color.copy(alpha = (percent / 100f).coerceIn(0.15f, 1f)).compositeOver(Color(0xFF6E6E72)),
+    )
+}
+
+/** The glass groove: a soft inner shadow along the top and a bright lip along the bottom. */
+private fun DrawScope.drawGlassGroove(s: Size, r: Float, dark: Boolean) {
+    drawRoundRect(
+        Brush.verticalGradient(0f to Color.Black.copy(alpha = if (dark) 0.35f else 0.16f), 0.5f to Color.Transparent, 1f to Color.White.copy(alpha = if (dark) 0.10f else 0.55f)),
+        cornerRadius = CornerRadius(r), size = s,
     )
 }
 

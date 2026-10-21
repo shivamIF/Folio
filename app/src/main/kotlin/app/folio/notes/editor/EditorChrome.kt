@@ -231,6 +231,31 @@ fun EditorToolbar(
     }
 }
 
+/**
+ * A working sample of the toolbar dock for Settings › Glass & toolbar: hover it with the S Pen
+ * to feel the magnification. Its buttons do nothing.
+ */
+@Composable
+fun DockPreview(modifier: Modifier = Modifier) {
+    val glass = LocalGlassSettings.current
+    val cell = glass.dockIconSize.dp
+    val c = LocalOneUi.current
+    CompositionLocalProvider(LocalToolCell provides ToolCell(cell, cell, cell * 0.56f, cell * 0.8f)) {
+        GlassDock(DockPosition.TOP, modifier.padding(vertical = 8.dp)) {
+            ToolButton(FIcon.TEXT_MODE, "Text", false, {})
+            ToolButton(FIcon.of(ToolType.FOUNTAIN), "Fountain pen", true, {}, ink = c.accent)
+            ToolButton(FIcon.of(ToolType.HIGHLIGHTER, false), "Highlighter", false, {}, ink = Color(0xFFF2C230))
+            ToolButton(FIcon.ERASER, "Eraser", false, {})
+            ToolButton(FIcon.LASSO, "Selection", false, {})
+            ToolbarDivider()
+            ToolButton(FIcon.UNDO, "Undo", false, {})
+            ToolButton(FIcon.REDO, "Redo", false, {})
+            ToolButton(FIcon.TAPE, "Tape", false, {}, ink = Color(0xFF8DB3FF))
+            ToolButton(FIcon.IMAGE, "Insert picture", false, {})
+        }
+    }
+}
+
 /** Size of a toolbar cell: the One UI strip's 43 × 42 dp, or the dock's icon size. */
 data class ToolCell(val width: androidx.compose.ui.unit.Dp, val height: androidx.compose.ui.unit.Dp, val icon: androidx.compose.ui.unit.Dp, val selected: androidx.compose.ui.unit.Dp)
 
