@@ -223,10 +223,15 @@ Selection are fixed (always first, not listed).
 - **Insert** (+) [cap 70-insert]: `PDF`, `Voice recording` ┄ `Image`, `Camera`, `Document scan`,
   `Audio file`, `Drawing`, `Sticky note`, `Table`. Menu = rounded card, icon + text rows 44 dp, dotted group
   dividers.
-  - **Sticky note** [cap 71, 72]: a floating square memo (~440 dp) with a decorative tape strip on top,
-    **Minimise** and ⋮ (Background colour: warm yellow, mint, shell pink, light blue; Delete — confirmed
-    by a bottom dialog "Delete sticky note?"), a resize handle at the bottom edge; you write on it with the
-    pen; minimised it becomes a small icon at the page's top-left.
+  - **Sticky note** [cap 71, 72; re-checked 2026-10-21 in the scratch note]: a floating square memo (~440 dp)
+    with a decorative tilted tape strip at the top centre, **Minimise** (inward arrows) and ⋮ (Background colour:
+    warm yellow, mint, shell pink, light blue; Delete — confirmed by a bottom dialog "Delete sticky note?") at its
+    top-right, and a resize handle at the bottom edge; you write on it with the pen. In dark mode the note is
+    shown at about half brightness. **Minimise folds it into a ~30 dp rounded tab in the note's colour with a
+    folded bottom-right corner and a thin light outline, placed where the tape was (top centre)**; tapping the
+    tab unfolds it with a short page-curl animation (~300 ms). Minimising an *empty* note discards it (toast
+    "Nothing to save."). The tape is decoration there (`top_decoration_view`, not clickable; finger and pen taps
+    on it do nothing). **Folio:** the same, and (user request 2026-10-21) tapping the tape also collapses the note.
   - **Table** [cap 75]: dialog "Table properties" with Rows × Columns pickers (default 2 × 3), Cancel/Done.
   - **Drawing** [cap 76, 80, 81]: a full-screen sketch canvas (paper texture) with an art-brush tray
     (Water colour, Oil paint, Calligraphy brush, Pencil, Tilt pencil, Smudge, Airbrush, Marker, Crayon), a

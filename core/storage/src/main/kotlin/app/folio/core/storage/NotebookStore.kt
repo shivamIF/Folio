@@ -89,6 +89,18 @@ interface DocumentRepository {
     /** Moves a staged picture into an existing notebook's attachments; returns its attachment id. */
     fun addImage(notebookId: String, staged: StagedFile): String
 
+    /** Copies a recording or audio file (M4A/AAC, MP3, Ogg/Opus, WAV, AMR, 3GP; checked by content) into staging. */
+    fun stageAudio(source: java.io.InputStream, maxBytes: Long = MAX_AUDIO_BYTES): StagedFile
+
+    /** Moves a staged PDF or audio file into an existing notebook's attachments; returns its attachment id. */
+    fun addAttachment(notebookId: String, staged: StagedFile): String
+
+    /** The on-disk file of a notebook's audio attachment. */
+    fun audioFile(notebookId: String, attachmentId: String): File
+
+    /** Writes [pages] and lists them from [index] (clamped), as one change to the notebook (a PDF added to it). */
+    fun insertPages(notebookId: String, index: Int, pages: List<Page>): NotebookMeta
+
     /** Discards a staged file that failed validation. */
     fun discardStaged(staged: StagedFile)
 
@@ -118,12 +130,22 @@ internal fun isImage(h: ByteArray): Boolean {
 /** A file copied into staging, not yet part of any notebook. */
 class StagedFile internal constructor(val id: String, val file: File, val kind: AttachmentKind = AttachmentKind.PDF)
 
-enum class AttachmentKind(val ext: String) { PDF("pdf"), IMAGE("img") }
+enum class AttachmentKind(val ext: String) { PDF("pdf"), IMAGE("img"), AUDIO("aud") }
 
 class InvalidImportException(message: String) : Exception(message)
 
 const val MAX_PDF_BYTES = 300L * 1024 * 1024
 const val MAX_IMAGE_BYTES = 60L * 1024 * 1024
+const val MAX_AUDIO_BYTES = 200L * 1024 * 1024
+
+/** M4A/AAC/3GP (ISO-BMFF), MP3 (ID3 or a frame sync), Ogg, WAV, AMR, raw AAC (ADTS) or FLAC, by magic bytes. */
+internal fun isAudio(h: ByteArray): Boolean {
+    fun at(i: Int, vararg b: Int) = h.size >= i + b.size && b.indices.all { (h[i + it].toInt() and 0xFF) == b[it] }
+    val sync = h.size >= 2 && (h[0].toInt() and 0xFF) == 0xFF && (h[1].toInt() and 0xE0) == 0xE0 // MPEG / ADTS frame
+    return at(4, 0x66, 0x74, 0x79, 0x70) || at(0, 0x49, 0x44, 0x33) || sync || at(0, 0x4F, 0x67, 0x67, 0x53) ||
+        (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x41, 0x56, 0x45)) || at(0, 0x23, 0x21, 0x41, 0x4D, 0x52) ||
+        at(0, 0x66, 0x4C, 0x61, 0x43)
+}
 
 /**
  * File-system repository. Layout under [root]:
@@ -422,6 +444,35 @@ class FileNotebookStore(
             out.delete()
             throw e
         }
+    }
+
+    override fun stageAudio(source: java.io.InputStream, maxBytes: Long): StagedFile =
+        stage(source, maxBytes, AttachmentKind.AUDIO) { head ->
+            if (!isAudio(head)) throw InvalidImportException("Not a supported audio file (M4A, MP3, Ogg, WAV or AMR)")
+        }
+
+    override fun addAttachment(notebookId: String, staged: StagedFile): String = synchronized(lock) {
+        require(loadIndex().notebooks.any { it.id == notebookId }) { "unknown notebook" }
+        moveInto(staged, when (staged.kind) {
+            AttachmentKind.PDF -> attachmentFile(notebookId, staged.id)
+            AttachmentKind.IMAGE -> imageFile(notebookId, staged.id)
+            AttachmentKind.AUDIO -> audioFile(notebookId, staged.id)
+        })
+        staged.id
+    }
+
+    override fun audioFile(notebookId: String, attachmentId: String): File {
+        require(SAFE_ID.matches(attachmentId)) { "invalid id" }
+        return File(File(notebookDir(notebookId), "attachments"), "$attachmentId.aud")
+    }
+
+    override fun insertPages(notebookId: String, index: Int, pages: List<Page>): NotebookMeta = synchronized(lock) {
+        val meta = notebook(notebookId)
+        require(pages.none { it.id in meta.pageIds } && pages.map { it.id }.toSet().size == pages.size) { "pages must be new to this notebook" }
+        // Files first: a crash in between leaves unlisted files, never listed pages without one.
+        pages.forEach { writePage(notebookId, it) }
+        val ids = meta.pageIds.toMutableList().apply { addAll(index.coerceIn(0, size), pages.map { it.id }) }
+        putNotebook(meta.copy(pageIds = ids, modifiedAt = clock()))
     }
 
     override fun addImage(notebookId: String, staged: StagedFile): String = synchronized(lock) {

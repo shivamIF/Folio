@@ -49,6 +49,8 @@ data class PenProfile(
             ToolType.FINELINER -> PenProfile(minWidthFactor = 0.85f, pressureGamma = 1f, tiltWidthGain = 0f, opacity = 1f)
             ToolType.MARKER -> PenProfile(minWidthFactor = 0.7f, pressureGamma = 1.2f, tiltWidthGain = 0.3f, opacity = 1f)
             ToolType.AIRBRUSH -> PenProfile(minWidthFactor = 0.7f, pressureGamma = 1f, tiltWidthGain = 0f, opacity = 0.35f)
+            // Tape: a flat band of even width, opaque.
+            ToolType.TAPE -> PenProfile(minWidthFactor = 1f, pressureGamma = 1f, tiltWidthGain = 0f, opacity = 1f, pressureSensitive = false)
         }
     }
 }

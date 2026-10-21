@@ -22,6 +22,24 @@ class NotebookHistoryTest {
 
     private fun ids(pageId: String) = editors.getValue(pageId).currentStrokes.map { it.id }
 
+    @Test fun noteStyleChangesThePaperWithoutTouchingUndo() {
+        page("a")
+        write("a", testStroke("a1"))
+        val ed = editors.getValue("a")
+        val before = ed.revision
+        ed.setPaper(PaperTemplate.GRID)
+        assertEquals(PaperTemplate.GRID, ed.paper)
+        assertEquals(PaperTemplate.GRID, ed.snapshot().paper)
+        assertTrue(ed.revision > before, "a new paper must be saved")
+        val again = ed.revision
+        ed.setPaper(PaperTemplate.GRID)
+        assertEquals(again, ed.revision, "the same paper again changes nothing")
+        // Undo still reverts the ink, and leaves the paper.
+        assertEquals("a", history.undo(of))
+        assertEquals(emptyList(), ids("a"))
+        assertEquals(PaperTemplate.GRID, ed.paper)
+    }
+
     @Test fun undoFollowsTheOrderEditsWereMadeAcrossPages() {
         page("a"); page("b")
         write("a", testStroke("a1")); write("b", testStroke("b1")); write("a", testStroke("a2"))

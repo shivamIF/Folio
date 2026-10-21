@@ -55,7 +55,7 @@ class CodecTest {
         val text = DocumentCodec.encodePage(Page(strokes = listOf(s)))
         assertTrue("\"pts\":" in text && "\"x\":" !in text, text)
         assertEquals(s, DocumentCodec.decodePage(text).strokes.single())
-        assertTrue("\"schemaVersion\":$SCHEMA_VERSION" in text)
+        assertTrue("\"schemaVersion\":$BASE_SCHEMA" in text, text) // plain pages stay readable by schema-5 builds
     }
 
     @Test fun schema1PagesStillLoad() {
@@ -84,7 +84,7 @@ class CodecTest {
             Stroke(it.id, ToolType.FINELINER, it.color, it.width, it.x, it.y, it.pressure, it.tilt, it.orientation, it.t)
         }))
         val text = DocumentCodec.encodePage(edited)
-        assertTrue("\"schemaVersion\":$SCHEMA_VERSION" in text && SCHEMA_VERSION >= 4, text)
+        assertTrue("\"schemaVersion\":$BASE_SCHEMA" in text && BASE_SCHEMA >= 4, text)
         assertEquals(ToolType.FINELINER, DocumentCodec.decodePage(text).strokes.single().tool)
     }
 

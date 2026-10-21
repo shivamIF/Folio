@@ -25,6 +25,8 @@ data class LoadedPage(
     val background: Bitmap? = null,
     /** Index of [strokes] built off the main thread when the page was loaded, or null. */
     val index: StrokeIndex? = null,
+    /** Sticky notes, tables and recordings (schema 6). */
+    val objects: PageObjects = PageObjects.NONE,
 )
 
 /**
@@ -50,6 +52,7 @@ internal class PageSlot(val pageId: String, budget: TileBudget, onTilesChanged: 
     var strokes: List<Stroke> = emptyList()
     var texts: List<TextBox> = emptyList()
     var images: List<PageImage> = emptyList()
+    var objects: PageObjects = PageObjects.NONE
     var pdf: PdfBackground? = null
     var pdfBitmap: Bitmap? = null
     /** Spatial index of [strokes], rebuilt whenever the list changes. */

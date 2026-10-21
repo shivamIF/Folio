@@ -9,7 +9,12 @@ import android.os.Handler
 import android.os.Looper
 import app.folio.core.ink.StrokeGeometry
 import app.folio.core.ink.StrokeIndex
+import app.folio.core.model.PageAudio
 import app.folio.core.model.PageImage
+import app.folio.core.model.PageTable
+import app.folio.core.model.PaperDensity
+import app.folio.core.model.StickyNote
+import app.folio.core.model.ToolType
 import app.folio.core.model.PaperTemplate
 import app.folio.core.model.PdfBackground
 import app.folio.core.model.TextBox
@@ -60,13 +65,21 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
         val paper: PaperTemplate, val pageW: Float, val pageH: Float,
         val pdf: PdfBackground?, val pdfBitmap: Bitmap?,
         val texts: List<TextBox>, val images: List<PageImage>, val assets: PageAssets?,
+        val objects: PageObjects = PageObjects.NONE, val look: PageLook = PageLook.LIGHT,
     ) {
         val strokes: List<Stroke> get() = index.strokes
+        /** Bounds of tape and sticky notes: ink added under them needs a repaint, not an append. */
+        val overlays: List<Rect> by lazy {
+            val out = ArrayList<Rect>()
+            for (st in strokes) if (st.tool == ToolType.TAPE) out += st.bounds()
+            for (n in objects.stickies) out += n.bounds
+            out
+        }
     }
 
     class Tile(
         val key: Key, val bitmap: Bitmap, var strokes: List<Stroke>, var excluded: Set<String>, val gen: Int,
-        var texts: List<TextBox>, var images: List<PageImage>,
+        var texts: List<TextBox>, var images: List<PageImage>, var objects: PageObjects,
     ) {
         val scale = levelScale(key.level)
         val size = TILE_PX / scale
@@ -114,20 +127,21 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
     fun setContent(
         pageKey: Any?, index: StrokeIndex, excluded: Set<String>, paper: PaperTemplate, pageW: Float, pageH: Float,
         pdf: PdfBackground?, pdfBitmap: Bitmap?, texts: List<TextBox>, images: List<PageImage>, assets: PageAssets?,
+        objects: PageObjects = PageObjects.NONE, look: PageLook = PageLook.LIGHT,
     ) {
         val strokes = index.strokes
         val c = content
         val same = c != null && pageKey == this.pageKey && paper == c.paper && pageW == c.pageW && pageH == c.pageH &&
-            pdf == c.pdf && assets === c.assets
+            pdf == c.pdf && assets === c.assets && look == c.look
         if (!same) {
             gen++
             tiles.clear()
             this.pageKey = pageKey
         }
         if (c == null || !same || c.strokes !== strokes || c.excluded !== excluded || c.texts !== texts ||
-            c.images !== images || c.pdfBitmap !== pdfBitmap
+            c.images !== images || c.pdfBitmap !== pdfBitmap || c.objects != objects
         ) {
-            content = Content(gen, index, excluded, paper, pageW, pageH, pdf, pdfBitmap, texts, images, assets)
+            content = Content(gen, index, excluded, paper, pageW, pageH, pdf, pdfBitmap, texts, images, assets, objects, look)
         }
     }
     private var pageKey: Any? = null
@@ -247,8 +261,9 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
         // Paper first, in case no tile at any level covers this spot yet.
         canvas.save()
         canvas.translate(tx, ty); canvas.scale(scale, scale)
+        c.look.applyTo(renderer, c.pdf != null)
         renderer.drawPaper(canvas, c.paper, c.pageW, c.pageH, hasPdf = c.pdf != null)
-        (preview ?: c.pdfBitmap)?.let { renderer.drawPdfBackground(canvas, it, c.pageW, c.pageH) }
+        (if (c.look.dark && c.pdf == null) null else preview ?: c.pdfBitmap)?.let { renderer.drawPdfBackground(canvas, it, c.pageW, c.pageH) }
         canvas.restore()
         // Coarse to fine, so the best available tile ends up on top.
         val pageL = (d.left - tx) / scale; val pageT = (d.top - ty) / scale
@@ -324,7 +339,7 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
 
     /** Brings a cached tile up to date with [c]: paint appended strokes, patch changed areas, or re-render. */
     private fun sync(tile: Tile, c: Content) {
-        val sameElements = tile.texts === c.texts && tile.images === c.images
+        val sameElements = tile.texts === c.texts && tile.images === c.images && tile.objects == c.objects
         if (sameElements && tile.strokes === c.strokes && (tile.excluded === c.excluded || tile.excluded == c.excluded)) {
             tile.excluded = c.excluded
             return
@@ -333,7 +348,9 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
         val elementRects = if (sameElements && (tile.excluded === c.excluded || tile.excluded == c.excluded)) emptyList()
         else elementChanges(tile, c)
         val d = diff(tile.strokes, tile.excluded, c)
-        if (d is Diff.Append && elementRects.isEmpty()) {
+        val underOverlay = d is Diff.Append && c.overlays.isNotEmpty() && d.added.any { a -> a.tool != ToolType.TAPE && c.overlays.any { it.intersects(a.bounds()) } }
+        if (d is Diff.Append && elementRects.isEmpty() && !underOverlay) {
+            threadRenderer.get()!!.let { c.look.applyTo(it, c.pdf != null) }
             for (s in d.added) if (s.id !in c.excluded && tile.intersects(s.bounds())) {
                 threadRenderer.get()!!.drawStroke(tile.canvas, StrokeArt.of(s))
             }
@@ -360,7 +377,7 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
     }
 
     private fun adopt(tile: Tile, c: Content) {
-        tile.strokes = c.strokes; tile.excluded = c.excluded; tile.texts = c.texts; tile.images = c.images
+        tile.strokes = c.strokes; tile.excluded = c.excluded; tile.texts = c.texts; tile.images = c.images; tile.objects = c.objects
     }
 
     /** Bounds of text boxes and pictures that were added, removed, changed, or hidden/shown since [tile] was drawn. */
@@ -374,6 +391,9 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
         }
         compare(tile.texts, c.texts, TextBox::id, TextBox::bounds)
         compare(tile.images, c.images, PageImage::id, PageImage::bounds)
+        compare(tile.objects.stickies, c.objects.stickies, StickyNote::id) { it.bounds.inflate(it.width * 0.05f) }
+        compare(tile.objects.tables, c.objects.tables, PageTable::id, PageTable::bounds)
+        compare(tile.objects.audio, c.objects.audio, PageAudio::id, PageAudio::bounds)
         return out
     }
 
@@ -488,7 +508,7 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
     /** Worker thread: a brand-new tile; never touches cached tiles. */
     private fun render(key: Key, c: Content): Tile {
         val bmp = Bitmap.createBitmap(TILE_PX, TILE_PX, Bitmap.Config.ARGB_8888)
-        val tile = Tile(key, bmp, c.strokes, c.excluded, c.gen, c.texts, c.images)
+        val tile = Tile(key, bmp, c.strokes, c.excluded, c.gen, c.texts, c.images, c.objects)
         paint(tile.canvas, c, Rect(tile.left, tile.top, tile.left + tile.size, tile.top + tile.size), threadRenderer.get()!!, tile = tile)
         bmp.setHasAlpha(false)
         bmp.prepareToDraw() // starts the GPU upload now, not in the frame that first shows it
@@ -505,7 +525,8 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
         cv: Canvas, c: Content, area: Rect, rnd: PageRenderer,
         inkToo: Boolean = true, tile: Tile? = null, decode: Boolean = true,
     ): Boolean {
-        cv.drawColor(DESK)
+        cv.drawColor(c.look.desk)
+        c.look.applyTo(rnd, c.pdf != null)
         rnd.drawPaper(cv, c.paper, c.pageW, c.pageH, hasPdf = c.pdf != null)
         val pdf = c.pdf
         if (pdf != null) {
@@ -522,12 +543,19 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
             if (bmp == null) { if (!decode) complete = false; rnd.drawMissingImage(cv, img); continue }
             rnd.drawImage(cv, bmp, img)
         }
+        for (t in c.objects.tables) if (t.id !in c.excluded && t.bounds.intersects(area)) rnd.drawTable(cv, t)
+        // Tape goes over everything else, so it's drawn after the other ink and the text.
+        var tape: ArrayList<Stroke>? = null
         for (i in c.index.query(area)) {
             val s = c.strokes[i]
             if (s.id in c.excluded) continue
+            if (s.tool == ToolType.TAPE) { (tape ?: ArrayList<Stroke>().also { tape = it }) += s; continue }
             rnd.drawStroke(cv, StrokeArt.of(s))
         }
         for (t in c.texts) if (t.id !in c.excluded && t.bounds.intersects(area)) rnd.drawText(cv, t)
+        for (a in c.objects.audio) if (a.id !in c.excluded && a.bounds.intersects(area)) rnd.drawAudio(cv, a, a.id == c.objects.playing)
+        tape?.forEach { rnd.drawStroke(cv, StrokeArt.of(it)) }
+        for (n in c.objects.stickies) if (n.id !in c.excluded && n.bounds.inflate(n.width * 0.05f).intersects(area)) rnd.drawSticky(cv, n)
         return complete
     }
 
@@ -553,7 +581,6 @@ internal class TileCache(private val budget: TileBudget, private val onTilesChan
         /** Above this many strokes in an edited area, re-render the tile in the background instead of patching on the UI thread. */
         const val PATCH_LIMIT = 300
         const val WORKERS = 3
-        private const val DESK = 0xFFE8E6E1.toInt()
 
         /** Level k renders at 2^(k/2) pixels per page unit. */
         fun levelScale(k: Int): Float = Math.pow(2.0, k / 2.0).toFloat()
@@ -604,4 +631,36 @@ internal class TileBudget(private val maxTiles: Int = TileCache.MAX_TILES, val w
         victims.sortBy { it.second.lastUsed }
         for ((c, t) in victims.take(n - maxTiles)) c.drop(t.key)
     }
+}
+
+/** Sticky notes, tables and recordings of a page (schema 6), and which recording is playing. */
+data class PageObjects(
+    val stickies: List<StickyNote> = emptyList(),
+    val tables: List<PageTable> = emptyList(),
+    val audio: List<PageAudio> = emptyList(),
+    val playing: String? = null,
+) {
+    val isEmpty: Boolean get() = stickies.isEmpty() && tables.isEmpty() && audio.isEmpty()
+
+    companion object { val NONE = PageObjects() }
+}
+
+/** How pages are shown on screen: the editor theme and the notebook's page settings. */
+data class PageLook(
+    val dark: Boolean = false,
+    val pageColor: Long? = null,
+    val density: PaperDensity = PaperDensity.NORMAL,
+    val hideTape: Boolean = false,
+    val desk: Int = 0xFFE8E6E1.toInt(),
+) {
+    /** Sets [r] up to draw a page; a page with a PDF background is never darkened (its print is dark on white). */
+    fun applyTo(r: PageRenderer, hasPdf: Boolean) {
+        r.dark = dark && !hasPdf
+        r.pageColor = if (hasPdf) null else pageColor
+        r.density = density
+        r.hideTape = hideTape
+        r.drawControls = true
+    }
+
+    companion object { val LIGHT = PageLook() }
 }

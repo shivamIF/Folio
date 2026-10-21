@@ -29,13 +29,16 @@ import app.folio.core.ink.StrokeIndex
 import app.folio.core.ink.Shape
 import app.folio.core.ink.ShapeKind
 import app.folio.core.ink.ShapeRecognizer
+import app.folio.core.ink.InkShaping
 import app.folio.core.model.Argb
 import app.folio.core.model.PageImage
 import app.folio.core.model.PaperTemplate
 import app.folio.core.model.PdfBackground
 import app.folio.core.model.TextBox
 import app.folio.core.model.Stroke
+import app.folio.core.model.StrokeLook
 import app.folio.core.model.ToolType
+import app.folio.notes.editor.oneui.ColorMath
 import app.folio.notes.input.GestureAction
 import app.folio.notes.input.InputPolicy
 import app.folio.notes.input.PointerKind
@@ -108,7 +111,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     /** The page surface draws this held stroke (as a pending commit or from its page's list). */
     private fun shownOnPage(h: WetHeld) = h.stroke in h.slot.pendingCommits || h.slot.strokeIndex.indexOf(h.stroke.id) >= 0
 
-    private fun canUseWet() = wet?.ready == true && tool != ToolType.HIGHLIGHTER && !lassoMode && !textMode
+    private fun canUseWet() = wet?.ready == true && tool != ToolType.HIGHLIGHTER && !lassoMode && !textMode && !laserMode && !restyleMode
 
     /** Page→view transform and an art's bounds, in view pixels. */
     private fun viewBounds(art: StrokeArt, out: RectF): RectF {
@@ -149,7 +152,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         }
         wetTail = tail
         pageToView.getValues(wetMatrix)
-        w.show(WetFrame(wetMatrix.copyOf(), arts, clip, if (debugInput) perfLastInputNanos else 0L, active.width, active.height))
+        w.show(WetFrame(wetMatrix.copyOf(), arts, clip, if (debugInput) perfLastInputNanos else 0L, active.width, active.height, pageLook.dark && active.pdf == null))
     }
 
     /** Drops held strokes the page surface has shown for a few frames (by then on screen). */
@@ -219,6 +222,24 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
          * which one is in view ([current], under the reading line). Reported only on change.
          */
         fun onPagesInView(visible: List<String>, current: String) {}
+        /** Strokes replaced in place by id (Change style, tape peeled or covered); one undo step. */
+        fun onStrokesReplaced(pageId: String, after: List<Stroke>) {}
+        /** Pinch zoom changed: [percent] of fit-width. */
+        fun onZoomChanged(percent: Int) {}
+        /** Eyedropper: the colour under the pen. */
+        fun onColorPicked(color: Long) {}
+        /** Ink written on sticky note [stickyId] (in the note's own coordinates). */
+        fun onStickyStroke(pageId: String, stickyId: String, stroke: Stroke) {}
+        /** A tap on a page object (a recording, a table, a minimised sticky note); true if handled. */
+        fun onObjectTap(pageId: String, objectId: String, x: Float, y: Float): Boolean = false
+        /** A writing stroke began (S Pen to text doesn't read words while the pen is still writing). */
+        fun onPenDown() {}
+        /** A writing stroke was committed (S Pen to text waits for a pause after this). */
+        fun onPenLifted() {}
+        /** The tape strip on top of sticky note [stickyId] was tapped: collapse the note. */
+        fun onStickyTapeTap(pageId: String, stickyId: String) {}
+        /** The easy writing pad's window was moved or resized on the page. */
+        fun onPadWindowChanged(pageId: String, rect: app.folio.core.model.Rect) {}
     }
 
     var listener: Listener? = null
@@ -242,6 +263,42 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         set(value) { field = value; requestRender() }
     /** Text tool active: a tap places or edits a text box. */
     var textMode: Boolean = false
+    /** How new strokes look (line style, fixed width, round highlighter, tape pattern). */
+    var look: StrokeLook = StrokeLook.DEFAULT
+    /** Pen-up replaces the stroke with a straight line from its start to its end. */
+    var straighten: Boolean = false
+    /** Highlighter/tape: pen-up fits the width to the writing it covers. */
+    var adjustToText: Boolean = false
+    /** Every pen stroke that looks like a shape snaps to it on lift (no hold needed). */
+    var autoFixShapes: Boolean = false
+    /** Fingers can't zoom or pan sideways (vertical scrolling still works). */
+    var lockCanvas: Boolean = false
+    /** Lasso takes strokes it only crosses (off: only strokes wholly inside). */
+    var selectPartial: Boolean = true
+    /** The eraser only takes tape. */
+    var eraseTapeOnly: Boolean = false
+    /** Reading mode: the pen scrolls instead of writing (unless the laser is on). */
+    var readOnly: Boolean = false
+    /** Laser pointer: a glowing trail that fades, never saved. */
+    var laserMode: Boolean = false
+        set(value) { field = value; if (!value) laser.clear() }
+    var laserStyle: LaserStyle = LaserStyle.SOLID
+    var laserRainbow: Boolean = true
+    var laserColor: Long = 0xFFE8473F
+    /** Change style: sweeping restyles touched strokes to [restyleColor] and [restyleWidth]. */
+    var restyleMode: Boolean = false
+    var restyleColor: Long = 0xFF2E7DD7
+    var restyleWidth: Float = 3.5f
+    /** The next pen or finger tap picks a colour from the page (see [Listener.onColorPicked]). */
+    var eyedropperActive: Boolean = false
+    /** Theme and page settings of the notebook (dark pages, colour, line spacing, hidden tape). */
+    var pageLook: PageLook = PageLook.LIGHT
+        set(value) { if (field != value) { field = value; deskPaint.color = value.desk; requestRender() } }
+    /** "3/12" at each page's bottom-right corner. */
+    var showPageNumbers: Boolean = true
+    /** The easy writing pad's window, drawn on its page (null while the pad is closed). */
+    var padWindow: PadWindow? = null
+        set(value) { if (field != value) { field = value; requestRender() } }
     /** Elements hidden from the page while being edited elsewhere (the text box being typed). */
     var hiddenIds: Set<String> = emptySet()
         set(value) { if (field != value) { field = value; requestRender() } }
@@ -393,7 +450,14 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         val strokes = p.strokes
         val t0 = System.nanoTime()
         slot.source = p
-        slot.texts = p.texts; slot.images = p.images
+        if (slot.loaded && p.objects.stickies !== slot.objects.stickies) {
+            val before = slot.objects.stickies.associateBy { it.id }
+            p.objects.stickies.firstOrNull { n -> before[n.id]?.let { it.minimized != n.minimized } == true }?.let { n ->
+                fold = StickyFold(slot.pageId, n.copy(minimized = false), collapsing = n.minimized, start = SystemClock.uptimeMillis())
+            }
+        }
+        slot.texts = p.texts; slot.images = p.images; slot.objects = p.objects
+        if (slot === active && sweepCommitted && p.strokes !== slot.strokes) { sweepPreview.clear(); sweepCommitted = false }
         slot.pdf = p.pdf; slot.pdfBitmap = p.background
         slot.paper = p.paper
         slot.width = p.width; slot.height = p.height
@@ -578,7 +642,9 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private var lastPanY = 0f
 
     // ---- lasso / selection gesture state ----
-    private enum class SelGesture { NONE, LASSO, MOVE, RESIZE }
+    private enum class SelGesture { NONE, LASSO, MOVE, RESIZE, ROTATE }
+    /** The corner being dragged (0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left). */
+    private var resizeCorner = 2
     private var selGesture = SelGesture.NONE
     private val lassoPoints = ArrayList<Float>()
     /** Live (and just-committed) move/resize, drawn on the selected strokes. */
@@ -588,10 +654,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private var selBox: app.folio.core.model.Rect? = null
     private val selMatrix = Matrix()
     private val selPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE; strokeWidth = 2f; color = 0xFF3D5A80.toInt()
-        pathEffect = android.graphics.DashPathEffect(floatArrayOf(14f, 10f), 0f)
+        style = Paint.Style.STROKE; strokeWidth = 2f; color = SELECTION_BLUE
     }
-    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF3D5A80.toInt() }
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.WHITE }
+    private val handleRim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = 0x66000000 }
     private val lassoPath = Path()
 
     // ---- hover state ----
@@ -602,6 +668,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(d: ScaleGestureDetector): Boolean {
             viewport.zoomBy(d.scaleFactor, d.focusX, d.focusY)
+            listener?.onZoomChanged((viewport.zoom * 100f).toInt())
             syncMatrices()
             requestRender()
             return true
@@ -747,6 +814,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             MotionEvent.ACTION_DOWN -> { sideButtonGesture = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0; raw }
             else -> raw
         }
+        if (handlePadWindow(e, masked)) return true
         if (masked == MotionEvent.ACTION_DOWN) {
             scroller.forceFinished(true)
             tapDownX = e.x; tapDownY = e.y; tapDownTime = e.eventTime; tapMultiTouch = false
@@ -771,7 +839,8 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 if (action == GestureAction.NAVIGATE) startPan(e)
             }
             MotionEvent.ACTION_MOVE -> when (action) {
-                GestureAction.DRAW -> if (textMode) Unit else if (selGesture != SelGesture.NONE) moveSelectionGesture(e) else {
+                GestureAction.DRAW -> if (textMode) Unit else if (laserActive) laserMove(e) else if (sweepActive) sweepMove(e)
+                else if (selGesture != SelGesture.NONE) moveSelectionGesture(e) else {
                     predictor.record(e); appendSamples(e); updatePrediction()
                     e.findPointerIndex(activePointerId).takeIf { it >= 0 }?.let { i ->
                         if (snapped != null) adjustSnap(e.getX(i), e.getY(i)) else watchHold(e.getX(i), e.getY(i))
@@ -792,7 +861,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             // The system cancels the gesture when it decides the touch was a palm.
             MotionEvent.ACTION_CANCEL -> finishGesture(e, 0, canceled = true)
         }
-        if (action == GestureAction.NAVIGATE) scaleDetector.onTouchEvent(e)
+        if (action == GestureAction.NAVIGATE && !lockCanvas) scaleDetector.onTouchEvent(e)
         return true
     }
 
@@ -800,11 +869,34 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         awaitPendingWipe()
         val kind = kindOf(e, index)
         val barrel = sideButtonGesture || (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-        action = policy.classifyDown(kind, e.getTouchMajor(index), barrel, eraserSelected, e.pointerCount, e.eventTime)
+        action = policy.classifyDown(kind, e.getTouchMajor(index), barrel, eraserSelected, e.pointerCount, e.eventTime, readOnly = readOnly && !laserMode)
+        // Eyedropper: the first touch picks a colour and does nothing else.
+        if (eyedropperActive && action != GestureAction.IGNORE && e.pointerCount == 1) {
+            pickColorAt(e.getX(index), e.getY(index))
+            action = GestureAction.IGNORE
+            return
+        }
         if (policy.stylusSeen) policy.penOnly = penOnlyPreference
         activePointerId = e.getPointerId(index)
+        if (action == GestureAction.DRAW && laserMode) {
+            requestUnbufferedDispatch(e)
+            laserActive = true
+            laser.down(e.getX(index), e.getY(index))
+            hoverX = -1f
+            requestRender()
+            return
+        }
         if (action == GestureAction.DRAW || action == GestureAction.ERASE) routeToPage(e.getX(index), e.getY(index))
+        stickyTarget = null
         when (action) {
+            GestureAction.DRAW if restyleMode -> {
+                requestUnbufferedDispatch(e)
+                sweepActive = true
+                sweepPreview.clear(); sweepCommitted = false
+                val p = toPage(e.getX(index), e.getY(index))
+                lastSweep = floatArrayOf(p[0], p[1])
+                sweepTo(p[0], p[1])
+            }
             GestureAction.DRAW if textMode -> {
                 val p = toPage(e.getX(index), e.getY(index))
                 textDownX = p[0]; textDownY = p[1]; textDownVX = e.getX(index); textDownVY = e.getY(index)
@@ -816,6 +908,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             GestureAction.DRAW -> {
                 // Deliver every sample as soon as it arrives instead of once per frame.
                 requestUnbufferedDispatch(e)
+                val p0 = toPage(e.getX(index), e.getY(index))
+                stickyTarget = if (tool == ToolType.TAPE) null
+                else active.objects.stickies.lastOrNull { !it.minimized && it.bounds.contains(p0[0], p0[1]) }?.id
+                strokeDownTime = e.eventTime; strokeDownVX = e.getX(index); strokeDownVY = e.getY(index)
                 builder = StrokeBuilder(
                     tool, color, penWidth, stabilization, minDistance = StrokeBuilder.minDistanceAt(scale),
                     startedAt = System.currentTimeMillis(), pxPerUnit = scale,
@@ -828,6 +924,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 if (wetLive) pushWet(full = wetHeld.isEmpty())
                 holdX = e.getX(index); holdY = e.getY(index)
                 removeCallbacks(holdRunnable); postDelayed(holdRunnable, HOLD_TO_SNAP_MS)
+                listener?.onPenDown()
             }
             GestureAction.ERASE -> {
                 requestUnbufferedDispatch(e)
@@ -903,6 +1000,8 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                     listener?.onTextTap(active.pageId, textDownX, textDownY, textAt(textDownX, textDownY))
                 }
             }
+            GestureAction.DRAW if laserActive -> { laserActive = false; laser.up(); requestRender() }
+            GestureAction.DRAW if sweepActive -> finishSweep(canceled)
             GestureAction.DRAW if selGesture != SelGesture.NONE -> finishSelectionGesture(canceled)
             GestureAction.DRAW -> {
                 val b = builder
@@ -917,9 +1016,13 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                         val p = toPage(e.getX(idx), e.getY(idx))
                         b.finishAt(p[0], p[1], effort(e, idx, e.getPressure(idx)), e.getAxisValue(MotionEvent.AXIS_TILT, idx), e.getAxisValue(MotionEvent.AXIS_ORIENTATION, idx), e.eventTime)
                     }
-                    if (b.size > 0) {
+                    val idx0 = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
+                    val tapped = !canceled && b.size > 0 && isPenTap(e, idx0) && handlePenTap(b.build())
+                    if (tapped) abortInk()
+                    else if (b.size > 0) {
                         val shape = snapped
-                        val stroke = if (shape != null && !canceled) shape.toStroke(tool, color, penWidth, snapPressure, b.build().startedAt) else b.build()
+                        val raw = if (shape != null && !canceled) shape.toStroke(tool, color, penWidth, snapPressure, b.build().startedAt) else b.build()
+                        val stroke = finishedStroke(raw, snappedAlready = shape != null)
                         val art = artFor(stroke) // build its geometry now, before the next frame needs it
                         if (wetLive) {
                             // Keep it wet until the page surface shows it, so it never blinks out.
@@ -931,7 +1034,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                         }
                         pendingCommits += stroke
                         pendingSince[stroke.id] = SystemClock.uptimeMillis()
-                        listener?.onStrokeFinished(active.pageId, stroke)
+                        val sticky = stickyTarget?.let { id -> active.objects.stickies.firstOrNull { it.id == id } }
+                        if (sticky != null) listener?.onStickyStroke(active.pageId, sticky.id, stroke.translated(-sticky.x, -sticky.y))
+                        else listener?.onStrokeFinished(active.pageId, stroke)
+                        listener?.onPenLifted()
                     }
                 }
                 abortInk()
@@ -952,8 +1058,18 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             else -> Unit
         }
         perfReport(when { navigating -> "pan"; action == GestureAction.DRAW -> "ink"; action == GestureAction.ERASE -> "erase"; else -> "other" })
-        // Text tool: a quick finger tap places or edits text too (fingers otherwise only scroll).
-        if (textMode && action == GestureAction.NAVIGATE && !canceled && !tapMultiTouch && isQuickTap(e)) {
+        val fingerTap = action == GestureAction.NAVIGATE && !canceled && !tapMultiTouch && isQuickTap(e)
+        if (fingerTap && padWindow != null) {
+            // A finger tap puts the easy writing pad's window there.
+            slotAt(tapDownX, tapDownY)?.let { slot ->
+                val w = padWindow!!.rect
+                val px = (tapDownX - viewport.tx) / scale - slot.left; val py = (tapDownY - viewport.ty) / scale - slot.top
+                val l = px.coerceIn(0f, maxOf(0f, slot.width - w.width)); val t = py.coerceIn(0f, maxOf(0f, slot.height - w.height))
+                listener?.onPadWindowChanged(slot.pageId, app.folio.core.model.Rect(l, t, l + w.width, t + w.height))
+            }
+        } else if (fingerTap && !textMode && fingerTapOnPage(tapDownX, tapDownY)) {
+            // handled: a tape peeled or covered, or a page object opened
+        } else if (textMode && fingerTap) {
             slotAt(tapDownX, tapDownY)?.takeIf { it.loaded }?.let { slot ->
                 if (selection.isNotEmpty() && slot !== active) { selection = emptySet(); listener?.onLassoSelected(selectionPage ?: active.pageId, emptySet()) }
                 activate(slot)
@@ -993,13 +1109,21 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     }
 
     /** The topmost element (text above pictures) at a page point, or null. */
-    private fun elementAt(px: Float, py: Float): String? =
-        textAt(px, py) ?: images.lastOrNull { it.bounds.contains(px, py) }?.id
+    private fun elementAt(px: Float, py: Float): String? {
+        val o = active.objects
+        return o.stickies.lastOrNull { !it.minimized && it.bounds.contains(px, py) }?.id ?: textAt(px, py)
+            ?: o.audio.lastOrNull { it.bounds.contains(px, py) }?.id ?: o.tables.lastOrNull { it.bounds.contains(px, py) }?.id
+            ?: images.lastOrNull { it.bounds.contains(px, py) }?.id
+    }
 
     private fun selectedElementBounds(): app.folio.core.model.Rect? {
         var r: app.folio.core.model.Rect? = null
         for (t in texts) if (t.id in selection) r = r?.union(t.bounds) ?: t.bounds
         for (i in images) if (i.id in selection) r = r?.union(i.bounds) ?: i.bounds
+        val o = active.objects
+        for (n in o.stickies) if (n.id in selection) r = r?.union(n.bounds) ?: n.bounds
+        for (t in o.tables) if (t.id in selection) r = r?.union(t.bounds) ?: t.bounds
+        for (a in o.audio) if (a.id in selection) r = r?.union(a.bounds) ?: a.bounds
         return r
     }
 
@@ -1010,6 +1134,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             if (bmp != null) renderer.drawImage(canvas, bmp, img) else renderer.drawMissingImage(canvas, img)
         }
         for (t in texts) if (t.id in selection) renderer.drawText(canvas, t)
+        val o = active.objects
+        for (t in o.tables) if (t.id in selection) renderer.drawTable(canvas, t)
+        for (a in o.audio) if (a.id in selection) renderer.drawAudio(canvas, a)
+        for (n in o.stickies) if (n.id in selection) renderer.drawSticky(canvas, n)
     }
 
     // ---- big selections move as one picture ----
@@ -1110,7 +1238,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
     private fun eraserRadiusPage() = eraserSizeDp * resources.displayMetrics.density / scale
 
-    private fun erasable(s: Stroke) = !eraseHighlighterOnly || s.tool == ToolType.HIGHLIGHTER
+    private fun erasable(s: Stroke) = when {
+        s.tool == ToolType.TAPE && pageLook.hideTape -> false
+        eraseHighlighterOnly -> s.tool == ToolType.HIGHLIGHTER
+        eraseTapeOnly -> s.tool == ToolType.TAPE
+        else -> true
+    }
 
     /**
      * Fast path for the partial eraser: wipe pixels off the cached ink layer as the pen
@@ -1123,7 +1256,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
 
     private fun startWipeIfPossible() {
         wiping = false; wipePath.clear()
-        if (!eraserPartial || eraseHighlighterOnly) return
+        if (!eraserPartial || eraseHighlighterOnly || eraseTapeOnly || pageLook.hideTape) return
         wiping = true
     }
 
@@ -1269,7 +1402,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         for (i in 0 until e.pointerCount) { sx += e.getX(i); sy += e.getY(i) }
         val cx = sx / e.pointerCount; val cy = sy / e.pointerCount
         velocity?.addMovement(e)
-        viewport.panBy(cx - lastPanX, cy - lastPanY)
+        viewport.panBy(if (lockCanvas) 0f else cx - lastPanX, cy - lastPanY)
         lastPanX = cx; lastPanY = cy
         syncMatrices()
         requestRender()
@@ -1279,7 +1412,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private fun fling() {
         val vt = velocity ?: return
         vt.computeCurrentVelocity(1000)
-        val vx = vt.xVelocity.toInt(); val vy = vt.yVelocity.toInt()
+        val vx = if (lockCanvas) 0 else vt.xVelocity.toInt(); val vy = vt.yVelocity.toInt()
         if (kotlin.math.abs(vx) < 300 && kotlin.math.abs(vy) < 300) return
         scroller.fling(
             viewport.tx.toInt(), viewport.ty.toInt(), vx, vy,
@@ -1309,6 +1442,359 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         return true
     }
 
+    // ---------------------------------------------------------- laser pointer
+
+    /** Laser trails in view pixels; all fade together a moment after the last lift. Never saved. */
+    private class LaserTrails {
+        val trails = ArrayList<FloatArray>()
+        private var cur = ArrayList<Float>()
+        var liftedAt = 0L
+        var down = false
+        fun down(x: Float, y: Float) { cur = arrayListOf(x, y); down = true; trails += cur.toFloatArray() }
+        fun move(x: Float, y: Float) { cur += x; cur += y; trails[trails.lastIndex] = cur.toFloatArray() }
+        fun up() { down = false; liftedAt = SystemClock.uptimeMillis() }
+        fun clear() { trails.clear(); cur = ArrayList(); down = false }
+        fun isEmpty() = trails.isEmpty()
+    }
+    private val laser = LaserTrails()
+    private var laserActive = false
+    private val laserGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
+    private val laserCore = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
+    private val laserPath = Path()
+
+    private fun laserMove(e: MotionEvent) {
+        val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: return
+        for (h in 0 until e.historySize) laser.move(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h))
+        laser.move(e.getX(idx), e.getY(idx))
+        requestRender()
+    }
+
+    private fun drawLaser(canvas: Canvas) {
+        if (laser.isEmpty()) return
+        val d = resources.displayMetrics.density
+        val alpha = if (laser.down) 1f else {
+            val t = SystemClock.uptimeMillis() - laser.liftedAt - LASER_HOLD_MS
+            1f - (t / LASER_FADE_MS.toFloat()).coerceIn(0f, 1f)
+        }
+        if (alpha <= 0f) { laser.clear(); return }
+        val solid = (laserColor or 0xFF000000).toInt()
+        val rainbow = if (laserRainbow) android.graphics.LinearGradient(
+            0f, 0f, 260f * d, 160f * d, LASER_RAINBOW, null, android.graphics.Shader.TileMode.MIRROR,
+        ) else null
+        laserGlow.shader = rainbow; laserCore.shader = null
+        laserGlow.color = solid
+        laserGlow.maskFilter = android.graphics.BlurMaskFilter(7f * d, android.graphics.BlurMaskFilter.Blur.NORMAL)
+        when (laserStyle) {
+            LaserStyle.DOT -> {
+                val t = laser.trails.last()
+                if (t.size >= 2 && laser.down) {
+                    val x = t[t.size - 2]; val y = t[t.size - 1]
+                    laserGlow.style = Paint.Style.FILL; laserGlow.alpha = (110 * alpha).toInt()
+                    canvas.drawCircle(x, y, 14f * d, laserGlow)
+                    laserCore.style = Paint.Style.FILL; laserCore.shader = rainbow; laserCore.color = solid; laserCore.alpha = (255 * alpha).toInt()
+                    canvas.drawCircle(x, y, 5f * d, laserCore)
+                    laserGlow.style = Paint.Style.STROKE; laserCore.style = Paint.Style.STROKE
+                }
+                if (!laser.down) laser.clear()
+            }
+            else -> for (t in laser.trails) {
+                if (t.size < 2) continue
+                laserPath.rewind(); laserPath.moveTo(t[0], t[1])
+                var i = 2
+                while (i + 3 < t.size) { laserPath.quadTo(t[i], t[i + 1], (t[i] + t[i + 2]) / 2, (t[i + 1] + t[i + 3]) / 2); i += 2 }
+                laserPath.lineTo(t[t.size - 2], t[t.size - 1])
+                laserGlow.strokeWidth = 12f * d; laserGlow.alpha = ((if (laserStyle == LaserStyle.OUTLINED) 170 else 110) * alpha).toInt()
+                canvas.drawPath(laserPath, laserGlow)
+                laserCore.strokeWidth = (if (laserStyle == LaserStyle.OUTLINED) 2.4f else 3.4f) * d
+                if (laserStyle == LaserStyle.OUTLINED) { laserCore.shader = null; laserCore.color = android.graphics.Color.WHITE }
+                else { laserCore.shader = rainbow; laserCore.color = solid }
+                laserCore.alpha = (255 * alpha).toInt()
+                canvas.drawPath(laserPath, laserCore)
+            }
+        }
+        if (!laser.down) requestRender() // keep fading
+    }
+
+    // ---------------------------------------------------------- change style sweep
+
+    private var sweepActive = false
+    /** Strokes the change-style sweep has touched, restyled (drawn instead of the originals). */
+    private val sweepPreview = LinkedHashMap<String, Stroke>()
+    private var sweepCommitted = false
+    private var lastSweep: FloatArray? = null
+
+    private fun sweepMove(e: MotionEvent) {
+        val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: return
+        for (h in 0 until e.historySize) { val p = toPage(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h)); sweepTo(p[0], p[1]) }
+        val p = toPage(e.getX(idx), e.getY(idx)); sweepTo(p[0], p[1])
+        hoverX = e.getX(idx); hoverY = e.getY(idx); hoverErase = false
+        requestRender()
+    }
+
+    private fun sweepTo(x: Float, y: Float) {
+        val from = lastSweep ?: floatArrayOf(x, y)
+        val r = maxOf(restyleWidth / 2f, 6f * resources.displayMetrics.density / scale)
+        val near = index.query(minOf(from[0], x) - r, minOf(from[1], y) - r, maxOf(from[0], x) + r, maxOf(from[1], y) + r)
+        if (near.isNotEmpty()) {
+            val candidates = ArrayList<Stroke>(near.size)
+            for (i in near) { val st = strokes[i]; if (st.id !in sweepPreview && !(st.tool == ToolType.TAPE && pageLook.hideTape)) candidates += st }
+            for (id in StrokeGeometry.hitAlong(candidates, from[0], from[1], x, y, r)) {
+                val st = candidates.first { it.id == id }
+                // Pens take the colour and the width; highlighters and tape keep their own width.
+                sweepPreview[id] = if (st.tool == ToolType.HIGHLIGHTER || st.tool == ToolType.TAPE) st.restyled(restyleColor, st.width)
+                else st.restyled(restyleColor, restyleWidth)
+            }
+        }
+        lastSweep = floatArrayOf(x, y)
+    }
+
+    private fun finishSweep(canceled: Boolean) {
+        sweepActive = false
+        lastSweep = null
+        hoverX = -1f
+        if (canceled || sweepPreview.isEmpty()) { sweepPreview.clear(); return }
+        sweepCommitted = true // keep drawing the preview until the edited page comes back
+        listener?.onStrokesReplaced(active.pageId, sweepPreview.values.toList())
+    }
+
+    // ---------------------------------------------------------- pen-up shaping and taps
+
+    private var stickyTarget: String? = null
+    private var strokeDownTime = 0L
+    private var strokeDownVX = 0f
+    private var strokeDownVY = 0f
+
+    /** A pen tap: short and nearly still (a dot, not a stroke). */
+    private fun isPenTap(e: MotionEvent, idx: Int): Boolean {
+        val slop = 8f * resources.displayMetrics.density
+        return e.eventTime - strokeDownTime < 300 && kotlin.math.abs(e.getX(idx) - strokeDownVX) < slop && kotlin.math.abs(e.getY(idx) - strokeDownVY) < slop
+    }
+
+    /**
+     * A pen tap that isn't meant as a dot: with the tape tool, peels or covers the tape under it;
+     * on a recording, a table or a minimised sticky note, opens it. True if it was handled.
+     */
+    private fun handlePenTap(dot: Stroke): Boolean {
+        if (dot.size == 0) return false
+        val x = dot.x[0]; val y = dot.y[0]
+        stickyTapeAt(x, y)?.let { listener?.onStickyTapeTap(active.pageId, it); return true }
+        if (tool == ToolType.TAPE && togglePeelAt(x, y)) return true
+        return objectAt(x, y)?.let { listener?.onObjectTap(active.pageId, it, x, y) } == true
+    }
+
+    /** A finger tap on the page (not in text mode): tape peels, objects open. */
+    private fun fingerTapOnPage(vx: Float, vy: Float): Boolean {
+        val slot = slotAt(vx, vy)?.takeIf { it.loaded } ?: return false
+        if (slot !== active) {
+            if (selection.isNotEmpty()) { val pg = selectionPage ?: active.pageId; selection = emptySet(); listener?.onLassoSelected(pg, emptySet()) }
+            activate(slot)
+        }
+        val p = toPage(vx, vy)
+        stickyTapeAt(p[0], p[1])?.let { listener?.onStickyTapeTap(active.pageId, it); return true }
+        if (togglePeelAt(p[0], p[1])) return true
+        val id = objectAt(p[0], p[1]) ?: return false
+        return listener?.onObjectTap(active.pageId, id, p[0], p[1]) == true
+    }
+
+    private fun togglePeelAt(x: Float, y: Float): Boolean {
+        if (pageLook.hideTape) return false
+        val slack = 4f / scale
+        val tape = index.query(x - slack, y - slack, x + slack, y + slack).map { strokes[it] }
+            .lastOrNull { it.tool == ToolType.TAPE && StrokeGeometry.hits(it, x, y, slack) } ?: return false
+        listener?.onStrokesReplaced(active.pageId, listOf(tape.withLook(tape.look.copy(peeled = !tape.look.peeled))))
+        performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+        return true
+    }
+
+    /**
+     * The open sticky note whose tape strip (the band across its top edge, see
+     * [PageRenderer.drawSticky]) is under a page point. The target is at least 28 dp tall.
+     */
+    private fun stickyTapeAt(x: Float, y: Float): String? {
+        val minH = 28f * resources.displayMetrics.density / scale
+        return active.objects.stickies.lastOrNull { n ->
+            !n.minimized && (StickyGeometry.tapeTarget(n, minH).contains(x, y) || StickyGeometry.minimise(n).inflate(4f / scale).contains(x, y))
+        }?.id
+    }
+
+    // ---- easy writing pad window ----
+
+    private enum class PadDrag { MOVE, RESIZE }
+    private var padDrag: PadDrag? = null
+    private var padDragFrom = FloatArray(2)
+    private var padDragStart: app.folio.core.model.Rect? = null
+    private var padDragPage: PageSlot? = null
+    private val padPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = SELECTION_BLUE }
+    private val padFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = SELECTION_BLUE }
+
+    private fun drawPadWindow(canvas: Canvas, r: app.folio.core.model.Rect) {
+        val d = resources.displayMetrics.density
+        padPaint.strokeWidth = 2.5f * d / scale
+        canvas.drawRect(r.left, r.top, r.right, r.bottom, padPaint)
+        val t = 14f * d / scale
+        canvas.drawPath(Path().apply { moveTo(r.right - 3 * d / scale, r.bottom - t); lineTo(r.right - 3 * d / scale, r.bottom - 3 * d / scale); lineTo(r.right - t, r.bottom - 3 * d / scale); close() }, padFill)
+    }
+
+    /**
+     * Touches on the pad window: drag its corner to resize (pen or finger), drag inside it with a
+     * finger to move it. Everything else is handled as usual. True if the touch was the window's.
+     */
+    private fun handlePadWindow(e: MotionEvent, masked: Int): Boolean {
+        val win = padWindow ?: return false
+        if (masked == MotionEvent.ACTION_DOWN) {
+            val slot = slots[win.pageId]?.takeIf { it.loaded } ?: return false
+            val px = (e.x - viewport.tx) / scale - slot.left; val py = (e.y - viewport.ty) / scale - slot.top
+            val r = win.rect
+            val grab = 24f * resources.displayMetrics.density / scale
+            val finger = e.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER
+            padDrag = when {
+                kotlin.math.hypot(px - r.right, py - r.bottom) <= grab -> PadDrag.RESIZE
+                finger && r.contains(px, py) -> PadDrag.MOVE
+                else -> null
+            }
+            if (padDrag == null) return false
+            padDragFrom[0] = px; padDragFrom[1] = py; padDragStart = r; padDragPage = slot
+            return true
+        }
+        val drag = padDrag ?: return false
+        val slot = padDragPage ?: return false
+        val start = padDragStart ?: return false
+        val px = (e.x - viewport.tx) / scale - slot.left; val py = (e.y - viewport.ty) / scale - slot.top
+        val r = when (drag) {
+            PadDrag.RESIZE -> PadMoves.resize(start, px, py, start.width / start.height, slot.width, slot.height)
+            PadDrag.MOVE -> {
+                val dx = (px - padDragFrom[0]).coerceIn(-start.left, slot.width - start.right)
+                val dy = (py - padDragFrom[1]).coerceIn(-start.top, slot.height - start.bottom)
+                app.folio.core.model.Rect(start.left + dx, start.top + dy, start.right + dx, start.bottom + dy)
+            }
+        }
+        padWindow = PadWindow(win.pageId, r)
+        if (masked == MotionEvent.ACTION_UP || masked == MotionEvent.ACTION_CANCEL) {
+            padDrag = null
+            listener?.onPadWindowChanged(win.pageId, r)
+        }
+        return true
+    }
+
+    /** A sticky note folding into its tab or unfolding from it (about 300 ms). */
+    private class StickyFold(val pageId: String, val note: app.folio.core.model.StickyNote, val collapsing: Boolean, val start: Long)
+    private var fold: StickyFold? = null
+
+    /** The id of a note still unfolding on [slot] (kept off its tiles until it's fully open). */
+    private fun unfolding(slot: PageSlot): String? = fold?.takeIf { !it.collapsing && it.pageId == slot.pageId }?.note?.id
+
+    /** The note drawn scaled between its full size and its tab; the tiles show the end state. */
+    private fun drawFold(canvas: Canvas, f: StickyFold) {
+        val t = ((SystemClock.uptimeMillis() - f.start) / FOLD_MS.toFloat()).coerceIn(0f, 1f)
+        if (t >= 1f) {
+            val wasUnfolding = !f.collapsing
+            fold = null
+            if (wasUnfolding) requestRender() // the tiles show the open note again
+            return
+        }
+        val e = t * t * (3f - 2f * t)
+        val k = if (f.collapsing) e else 1f - e // 0 = open note, 1 = tab
+        val n = f.note
+        val tab = StickyGeometry.tab(n)
+        val l = n.x + (tab.left - n.x) * k; val tp = n.y + (tab.top - n.y) * k
+        val r = n.x + n.width + (tab.right - n.x - n.width) * k; val b = n.y + n.height + (tab.bottom - n.y - n.height) * k
+        canvas.save()
+        canvas.translate(l, tp)
+        canvas.scale((r - l) / n.width, (b - tp) / n.height)
+        canvas.translate(-n.x, -n.y)
+        renderer.drawSticky(canvas, n)
+        canvas.restore()
+        requestRender()
+    }
+
+    /** A recording, table or minimised sticky note under a page point (topmost first). */
+    private fun objectAt(x: Float, y: Float): String? {
+        val o = active.objects
+        o.stickies.lastOrNull { it.minimized && StickyGeometry.tab(it).inflate(6f / scale).contains(x, y) }?.let { return it.id }
+        o.audio.lastOrNull { it.bounds.contains(x, y) }?.let { return it.id }
+        o.tables.lastOrNull { it.bounds.contains(x, y) }?.let { return it.id }
+        return null
+    }
+
+    /** The finished stroke after the pen's options: auto-fixed shape, straightened, fitted to text, styled. */
+    private fun finishedStroke(raw: Stroke, snappedAlready: Boolean): Stroke {
+        var s = raw
+        if (autoFixShapes && !snappedAlready && tool != ToolType.HIGHLIGHTER && tool != ToolType.TAPE && s.size >= 3) {
+            ShapeRecognizer.recognize(s.x, s.y)?.let { shape ->
+                s = shape.toStroke(tool, color, penWidth, s.pressure.average().toFloat().coerceIn(0.15f, 1f), s.startedAt)
+            }
+        }
+        if (straighten && s.size >= 2) s = InkShaping.straight(s)
+        if (adjustToText && (tool == ToolType.HIGHLIGHTER || tool == ToolType.TAPE)) {
+            val nearby = InkShaping.covered(s, strokes, index, texts)
+            if (nearby != null) s = InkShaping.fitTo(s, nearby)
+        }
+        if (!look.isDefault) s = s.withLook(look)
+        return s
+    }
+
+    // ---------------------------------------------------------- eyedropper
+
+    /** Picks the colour under a view point: the topmost ink, text or picture there, else the paper. */
+    private fun pickColorAt(vx: Float, vy: Float) {
+        eyedropperActive = false
+        val slot = slotAt(vx, vy)?.takeIf { it.loaded } ?: return
+        val px = (vx - viewport.tx) / scale - slot.left; val py = (vy - viewport.ty) / scale - slot.top
+        val slack = 6f * resources.displayMetrics.density / scale
+        val hit = slot.strokeIndex.query(px - slack, py - slack, px + slack, py + slack).map { slot.strokes[it] }
+            .lastOrNull { StrokeGeometry.hits(it, px, py, slack) }
+        val color = hit?.color?.let { it or 0xFF000000 }
+            ?: slot.texts.lastOrNull { it.bounds.contains(px, py) }?.color
+            ?: slot.images.lastOrNull { it.bounds.contains(px, py) }?.let { img ->
+                assets?.image(img.attachmentId, decode = true)?.let { bmp ->
+                    val bx = ((px - img.x) / img.width * bmp.width).toInt().coerceIn(0, bmp.width - 1)
+                    val by = ((py - img.y) / img.height * bmp.height).toInt().coerceIn(0, bmp.height - 1)
+                    (bmp.getPixel(bx, by).toLong() and 0xFFFFFFFFL) or 0xFF000000
+                }
+            }
+            ?: slot.objects.stickies.lastOrNull { it.bounds.contains(px, py) }?.color
+            ?: pageLook.pageColor ?: 0xFFFFFFFF
+        performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+        listener?.onColorPicked(color)
+    }
+
+    /** [px] view pixels at the bottom are covered (the keyboard): the page can scroll that much further. */
+    fun setBottomInset(px: Float) {
+        if (viewport.bottomInset == px) return
+        viewport.bottomInset = px
+        viewport.clamp()
+        syncMatrices()
+        requestRender()
+    }
+
+    /**
+     * Scrolls the least needed for rows [top]..[bottom] of page [pageId] (page units) to show
+     * above the covered bottom, with a small margin (the text box being typed).
+     */
+    fun revealRows(pageId: String, top: Float, bottom: Float) {
+        val (_, oy) = pageOrigin(pageId) ?: return
+        val margin = 16f * resources.displayMetrics.density
+        val visibleBottom = height - viewport.bottomInset - margin
+        val vt = oy + top * scale; val vb = oy + bottom * scale
+        val dy = when {
+            vb > visibleBottom -> maxOf(visibleBottom - vb, margin - vt) // never push its top off the view
+            vt < margin -> margin - vt
+            else -> 0f
+        }
+        if (dy == 0f) return
+        viewport.panBy(0f, dy)
+        syncMatrices()
+        requestRender()
+    }
+
+    /** Fit the page width to the view (the zoom pill's button). */
+    fun fitToWidth() {
+        viewport.fitWidth()
+        syncMatrices()
+        listener?.onZoomChanged(100)
+        requestRender()
+    }
+
     // ---------------------------------------------------------- lasso select
 
     private fun handleRadiusPx() = 22f * resources.displayMetrics.density
@@ -1319,8 +1805,15 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         val sb = app.folio.core.ink.Lasso.bounds(strokes.filter { it.id in selection })
         val eb = selectedElementBounds()
         val b = when { sb == null -> eb; eb == null -> sb; else -> sb.union(eb) } ?: return null
-        val t = selTransform
-        return app.folio.core.model.Rect(t.mapX(b.left), t.mapY(b.top), t.mapX(b.right), t.mapY(b.bottom))
+        return selTransform.mapRect(b)
+    }
+
+    /** The selection box in view pixels (for the floating menu above it), or null. */
+    fun selectionViewRect(): RectF? {
+        val b = currentSelectionBox() ?: return null
+        val r = RectF(b.left, b.top, b.right, b.bottom)
+        pageToView.mapRect(r)
+        return r
     }
 
     private fun beginSelectionGesture(vx: Float, vy: Float) {
@@ -1328,8 +1821,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         selDownX = px; selDownY = py
         val box = currentSelectionBox()
         val pad = handleRadiusPx() / scale
+        val corners = box?.let { listOf(it.left to it.top, it.right to it.top, it.right to it.bottom, it.left to it.bottom) }
+        val corner = corners?.indexOfFirst { (cx, cy) -> kotlin.math.hypot(px - cx, py - cy) <= pad * 1.4f } ?: -1
+        val rotHandle = box?.let { ((it.left + it.right) / 2) to (it.top - ROTATE_STEM_DP * resources.displayMetrics.density / scale) }
         selGesture = when {
-            box != null && kotlin.math.hypot(px - box.right, py - box.bottom) <= pad * 1.5f -> SelGesture.RESIZE
+            rotHandle != null && kotlin.math.hypot(px - rotHandle.first, py - rotHandle.second) <= pad * 1.4f -> SelGesture.ROTATE
+            corner >= 0 -> { resizeCorner = corner; SelGesture.RESIZE }
             box != null && box.inflate(pad / 2f).contains(px, py) -> SelGesture.MOVE
             else -> SelGesture.LASSO
         }
@@ -1360,7 +1857,18 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             SelGesture.RESIZE -> {
                 val box = selBox ?: return
                 val p = toPage(e.getX(idx), e.getY(idx))
-                selTransform = SelectionTransform.resize(box, p[0], p[1])
+                // Anchored at the opposite corner; uniform scale.
+                val ax = if (resizeCorner == 0 || resizeCorner == 3) box.right else box.left
+                val ay = if (resizeCorner == 0 || resizeCorner == 1) box.bottom else box.top
+                val sx = kotlin.math.abs(p[0] - ax) / box.width.coerceAtLeast(1f)
+                val sy = kotlin.math.abs(p[1] - ay) / box.height.coerceAtLeast(1f)
+                val sc = maxOf(sx, sy).coerceIn(SelectionTransform.MIN_SCALE, SelectionTransform.MAX_SCALE)
+                selTransform = SelectionTransform(scale = sc, anchorX = ax, anchorY = ay)
+            }
+            SelGesture.ROTATE -> {
+                val box = selBox ?: return
+                val p = toPage(e.getX(idx), e.getY(idx))
+                selTransform = SelectionTransform.rotate(box, selDownX, selDownY, p[0], p[1])
             }
             SelGesture.NONE -> Unit
         }
@@ -1376,20 +1884,29 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 val polygon = if (lassoRectangle && lassoPoints.size >= 4) {
                     app.folio.core.ink.Lasso.rectangle(lassoPoints[0], lassoPoints[1], lassoPoints[lassoPoints.size - 2], lassoPoints[lassoPoints.size - 1])
                 } else lassoPoints.toFloatArray()
-                val ids = LinkedHashSet(app.folio.core.ink.Lasso.select(strokes, polygon))
-                // Text boxes and pictures whose centre is inside the loop.
-                for (t in texts) if (app.folio.core.ink.Lasso.contains(polygon, t.x + t.width / 2, t.y + t.height / 2)) ids += t.id
-                for (i in images) if (app.folio.core.ink.Lasso.contains(polygon, i.x + i.width / 2, i.y + i.height / 2)) ids += i.id
+                val visible = if (pageLook.hideTape) strokes.filter { it.tool != ToolType.TAPE } else strokes
+                val ids = LinkedHashSet(app.folio.core.ink.Lasso.select(visible, polygon, partial = selectPartial))
+                // Text boxes, pictures and other objects: their centre inside the loop (or the whole box when partial is off).
+                fun takes(r: app.folio.core.model.Rect) = if (selectPartial) app.folio.core.ink.Lasso.contains(polygon, (r.left + r.right) / 2, (r.top + r.bottom) / 2)
+                else app.folio.core.ink.Lasso.containsRect(polygon, r)
+                for (t in texts) if (takes(t.bounds)) ids += t.id
+                for (i in images) if (takes(i.bounds)) ids += i.id
+                for (n in active.objects.stickies) if (takes(n.bounds)) ids += n.id
+                for (t in active.objects.tables) if (takes(t.bounds)) ids += t.id
+                for (a in active.objects.audio) if (takes(a.bounds)) ids += a.id
                 // A tap (no real loop) selects the text box or picture under the pen.
                 val loop = app.folio.core.ink.Lasso.polygonBounds(polygon)
                 if (ids.isEmpty() && maxOf(loop.width, loop.height) * scale < 24f * resources.displayMetrics.density) {
-                    elementAt(lassoPoints.getOrElse(0) { 0f }, lassoPoints.getOrElse(1) { 0f })?.let { ids += it }
+                    val tx = lassoPoints.getOrElse(0) { 0f }; val ty = lassoPoints.getOrElse(1) { 0f }
+                    val taped = stickyTapeAt(tx, ty)
+                    if (taped != null) { lassoPoints.clear(); listener?.onStickyTapeTap(active.pageId, taped); return }
+                    elementAt(tx, ty)?.let { ids += it }
                 }
                 lassoPoints.clear()
                 selectionPage = active.pageId
                 listener?.onLassoSelected(active.pageId, ids)
             }
-            SelGesture.MOVE, SelGesture.RESIZE -> {
+            SelGesture.MOVE, SelGesture.RESIZE, SelGesture.ROTATE -> {
                 val t = selTransform
                 // Keep drawing the transform until the edited strokes come back through setPage.
                 if (!t.isIdentity && selection.isNotEmpty()) listener?.onSelectionTransformed(active.pageId, selection, t)
@@ -1400,7 +1917,8 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     }
 
     private fun transformMatrix(t: SelectionTransform): Matrix = selMatrix.apply {
-        setTranslate(-t.anchorX, -t.anchorY)
+        setRotate(t.rotation, t.pivotX, t.pivotY)
+        postTranslate(-t.anchorX, -t.anchorY)
         postScale(t.scale, t.scale)
         postTranslate(t.anchorX + t.dx, t.anchorY + t.dy)
     }
@@ -1408,7 +1926,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private fun drawSelectionOverlay(canvas: Canvas) {
         val px = 1f / scale
         selPaint.strokeWidth = 2f * px
-        selPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(14f * px, 10f * px), 0f)
+        selPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f * px, 7f * px), 0f)
         if (selGesture == SelGesture.LASSO && lassoRectangle && lassoPoints.size >= 4) {
             val n = lassoPoints.size
             canvas.drawRect(
@@ -1423,9 +1941,32 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             canvas.drawPath(lassoPath, selPaint)
         }
         val box = currentSelectionBox() ?: return
+        // A thin blue box, white round handles at the corners and a rotate handle on a stem above.
+        selPaint.pathEffect = null
+        selPaint.strokeWidth = 1.6f * px
         canvas.drawRect(box.left, box.top, box.right, box.bottom, selPaint)
-        canvas.drawCircle(box.right, box.bottom, handleRadiusPx() * 0.45f * px, handlePaint)
+        if (selGesture == SelGesture.LASSO) return
+        val d = resources.displayMetrics.density
+        val hr = 7f * d * px
+        handleRim.strokeWidth = 1f * px
+        for ((x, y) in listOf(box.left to box.top, box.right to box.top, box.right to box.bottom, box.left to box.bottom)) {
+            canvas.drawCircle(x, y, hr, handlePaint); canvas.drawCircle(x, y, hr, handleRim)
+        }
+        val cx = (box.left + box.right) / 2; val stemTop = box.top - ROTATE_STEM_DP * d * px
+        canvas.drawLine(cx, box.top, cx, stemTop + 11f * d * px, selPaint)
+        canvas.drawCircle(cx, stemTop, 11f * d * px, handlePaint); canvas.drawCircle(cx, stemTop, 11f * d * px, handleRim)
+        // A small curved arrow inside the rotate handle.
+        val r = 5.5f * d * px
+        rotateArc.set(cx - r, stemTop - r, cx + r, stemTop + r)
+        rotatePaint.strokeWidth = 1.6f * d * px
+        canvas.drawArc(rotateArc, -60f, 280f, false, rotatePaint)
+        val a = Math.toRadians(-60.0)
+        val tipX = cx + r * kotlin.math.cos(a).toFloat(); val tipY = stemTop + r * kotlin.math.sin(a).toFloat()
+        canvas.drawLine(tipX, tipY, tipX - 3.2f * d * px, tipY - 0.4f * d * px, rotatePaint)
+        canvas.drawLine(tipX, tipY, tipX + 0.6f * d * px, tipY - 3.2f * d * px, rotatePaint)
     }
+    private val rotateArc = RectF()
+    private val rotatePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = SELECTION_BLUE; strokeCap = Paint.Cap.ROUND }
 
     // ---------------------------------------------------------------- drawing
 
@@ -1466,16 +2007,17 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 val moving = slot === active && !selTransform.isIdentity && selection.isNotEmpty()
                 val frozen = (slot === active && wiping) || slot.wipeAwaitingEcho
                 slot.tiles.preview = previewOf(slot.pageId)
-                slot.tiles.setContent(slot.pageId, slot.strokeIndex, excludedFromLayer(slot, moving), slot.paper, slot.width, slot.height, slot.pdf, slot.pdfBitmap, slot.texts, slot.images, assets)
+                slot.tiles.setContent(slot.pageId, slot.strokeIndex, excludedFromLayer(slot, moving), slot.paper, slot.width, slot.height, slot.pdf, slot.pdfBitmap, slot.texts, slot.images, assets, slot.objects, pageLook)
                 if (perfSkip?.contains("ink") != true) {
                     slot.tiles.draw(canvas, sc, pl, pt, width.toFloat(), height.toFloat(), baseScale(slot), frozen)
                 }
                 if (i == cur) order.add(0, slot.tiles) else order += slot.tiles
             }
             if (slot != null) drawOverlays(canvas, slot, pl, pt)
+            if (showPageNumbers && s.count > 1) drawPageNumber(canvas, i, s.count, pl + s.pageWidth(i) * sc, pt + s.pageHeight(i) * sc)
         }
         for (i in window) if (i !in vis) slots[s.ids[i]]?.takeIf { it.loaded }?.let { slot ->
-            slot.tiles.setContent(slot.pageId, slot.strokeIndex, excludedFromLayer(slot, false), slot.paper, slot.width, slot.height, slot.pdf, slot.pdfBitmap, slot.texts, slot.images, assets)
+            slot.tiles.setContent(slot.pageId, slot.strokeIndex, excludedFromLayer(slot, false), slot.paper, slot.width, slot.height, slot.pdf, slot.pdfBitmap, slot.texts, slot.images, assets, slot.objects, pageLook)
             slot.tiles.preview = previewOf(slot.pageId)
             slot.tiles.prefetch(sc, baseScale(slot))
             order += slot.tiles
@@ -1483,6 +2025,17 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         budget.order = order
         budget.trim()
         drawCursor(canvas)
+        drawLaser(canvas)
+    }
+
+    private val pageNumberPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.RIGHT }
+
+    /** "3/12" in small grey text at the page's bottom-right corner (inside the page). */
+    private fun drawPageNumber(canvas: Canvas, i: Int, n: Int, right: Float, bottom: Float) {
+        val d = resources.displayMetrics.density
+        pageNumberPaint.textSize = 12f * d
+        pageNumberPaint.color = if (pageLook.dark) 0xFF77777C.toInt() else 0xFF9A9AA0.toInt()
+        canvas.drawText("${i + 1}/$n", right - 12f * d, bottom - 10f * d, pageNumberPaint)
     }
 
     /** Scale at which a whole page is visible: its tiles' base level. */
@@ -1493,10 +2046,13 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         val isActive = slot === active
         val moving = isActive && !selTransform.isIdentity && selection.isNotEmpty()
         val live = isActive && !wetLive && builder != null
-        if (slot.partialPieces.isEmpty() && slot.pendingCommits.isEmpty() && !live && !(isActive && (moving || selection.isNotEmpty() || selGesture != SelGesture.NONE))) return
+        val folding = fold?.takeIf { it.pageId == slot.pageId }
+        val pad = padWindow?.takeIf { it.pageId == slot.pageId }
+        if (pad == null && folding == null && slot.partialPieces.isEmpty() && slot.pendingCommits.isEmpty() && !live && !(isActive && (moving || selection.isNotEmpty() || selGesture != SelGesture.NONE || sweepPreview.isNotEmpty()))) return
         canvas.save()
         canvas.translate(pl, pt); canvas.scale(scale, scale)
         canvas.clipRect(0f, 0f, slot.width, slot.height)
+        pageLook.applyTo(renderer, slot.pdf != null)
         // Wiped tiles already show what's left; otherwise draw the remaining pieces.
         val frozen = (isActive && wiping) || slot.wipeAwaitingEcho
         if (!frozen) for (pieces in slot.partialPieces.values) for (p in pieces) renderer.drawStroke(canvas, artFor(p))
@@ -1512,6 +2068,9 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             }
             canvas.restore()
         }
+        if (folding != null) drawFold(canvas, folding)
+        if (pad != null) drawPadWindow(canvas, pad.rect)
+        if (isActive) for (st in sweepPreview.values) renderer.drawStroke(canvas, artFor(st))
         if (isActive) drawSelectionOverlay(canvas)
         for (st in slot.pendingCommits) renderer.drawStroke(canvas, artFor(st))
         if (live) builder?.let { drawLive(canvas, it) }
@@ -1524,8 +2083,9 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         canvas.save()
         canvas.translate(pl, pt); canvas.scale(scale, scale)
         canvas.clipRect(0f, 0f, w, h)
+        pageLook.applyTo(renderer, false)
         renderer.drawPaper(canvas, paperOf(s.ids[i]), w, h)
-        previewOf(s.ids[i])?.let { renderer.drawPdfBackground(canvas, it, w, h) }
+        if (!pageLook.dark) previewOf(s.ids[i])?.let { renderer.drawPdfBackground(canvas, it, w, h) }
         canvas.restore()
     }
 
@@ -1538,9 +2098,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
      */
     private fun excludedFromLayer(slot: PageSlot, moving: Boolean): Set<String> {
         val e = when {
-            slot.erasedPending.isEmpty() && slot.partialPieces.isEmpty() && !moving && hiddenIds.isEmpty() -> emptySet()
+            slot.erasedPending.isEmpty() && slot.partialPieces.isEmpty() && !moving && hiddenIds.isEmpty() &&
+                (slot !== active || sweepPreview.isEmpty()) && unfolding(slot) == null -> emptySet()
             else -> buildSet {
                 addAll(slot.erasedPending); addAll(slot.partialPieces.keys); addAll(hiddenIds)
+                unfolding(slot)?.let { add(it) }
+                if (slot === active) addAll(sweepPreview.keys)
                 if (moving) addAll(selection)
             }
         }
@@ -1673,7 +2236,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 ps[s.size + k] = s.pressure[last]; ts[s.size + k] = s.tilt[last]; os[s.size + k] = s.orientation[last]
             }
         }
-        return LiveSamples(xs, ys, n, s.size, StrokeArt.live(tool, color, penWidth, xs, ys, ps, ts, os, n))
+        return LiveSamples(xs, ys, n, s.size, StrokeArt.live(tool, color, penWidth, xs, ys, ps, ts, os, n, look))
     }
 
     private fun drawCursor(canvas: Canvas) {
@@ -1703,6 +2266,17 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 (ev.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS && (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0)
 
         private const val TAG = "FolioInput"
+        private const val SELECTION_BLUE = 0xFF3E91FF.toInt()
+        /** A sticky note folds into its tab (or opens) over this long. */
+        private const val FOLD_MS = 300L
+        /** Rotate handle: this far above the selection box (dp). */
+        private const val ROTATE_STEM_DP = 30f
+        /** The laser trail stays this long after the last lift, then fades over [LASER_FADE_MS]. */
+        private const val LASER_HOLD_MS = 600L
+        private const val LASER_FADE_MS = 400L
+        private val LASER_RAINBOW = intArrayOf(
+            0xFFFF4D4D.toInt(), 0xFFFFA63D.toInt(), 0xFFFFE24D.toInt(), 0xFF5BD66B.toInt(), 0xFF3DD6D0.toInt(), 0xFF4D8BFF.toInt(), 0xFFA35BFF.toInt(), 0xFFFF5BC8.toInt(),
+        )
         private const val NO_PRESSURE_EFFORT = 0.6f
         /** Pen held this still (dp) for this long (ms) at the end of a stroke snaps it to a shape. */
         private const val HOLD_SLOP_DP = 4f

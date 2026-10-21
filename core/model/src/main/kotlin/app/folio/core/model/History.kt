@@ -6,6 +6,9 @@ class PageContent(
     val strokes: MutableList<Stroke>,
     val texts: MutableList<TextBox> = ArrayList(),
     val images: MutableList<PageImage> = ArrayList(),
+    val stickies: MutableList<StickyNote> = ArrayList(),
+    val tables: MutableList<PageTable> = ArrayList(),
+    val audio: MutableList<PageAudio> = ArrayList(),
 )
 
 sealed interface PageEdit {
@@ -36,6 +39,78 @@ sealed interface PageEdit {
         init { require(before != null || after != null) }
         override fun apply(content: PageContent) = put(content.images, before, after, index, PageImage::id)
         override fun revert(content: PageContent) = put(content.images, after, before, index, PageImage::id)
+    }
+
+    /** Same as [PutText], for sticky notes (their ink included: writing on a note replaces it). */
+    class PutSticky(val before: StickyNote?, val after: StickyNote?, val index: Int = Int.MAX_VALUE) : PageEdit {
+        init { require(before != null || after != null) }
+        override fun apply(content: PageContent) = put(content.stickies, before, after, index, StickyNote::id)
+        override fun revert(content: PageContent) = put(content.stickies, after, before, index, StickyNote::id)
+    }
+
+    /** Same as [PutText], for tables. */
+    class PutTable(val before: PageTable?, val after: PageTable?, val index: Int = Int.MAX_VALUE) : PageEdit {
+        init { require(before != null || after != null) }
+        override fun apply(content: PageContent) = put(content.tables, before, after, index, PageTable::id)
+        override fun revert(content: PageContent) = put(content.tables, after, before, index, PageTable::id)
+    }
+
+    /** Same as [PutText], for recordings and audio files. */
+    class PutAudio(val before: PageAudio?, val after: PageAudio?, val index: Int = Int.MAX_VALUE) : PageEdit {
+        init { require(before != null || after != null) }
+        override fun apply(content: PageContent) = put(content.audio, before, after, index, PageAudio::id)
+        override fun revert(content: PageContent) = put(content.audio, after, before, index, PageAudio::id)
+    }
+
+    /**
+     * Moves strokes in the z-order (Move forwards / backwards): [order] is the page's full stroke
+     * id order after the move; undo restores [previous].
+     */
+    class Reorder(private val previous: List<String>, private val order: List<String>) : PageEdit {
+        override fun apply(strokes: MutableList<Stroke>) = arrange(strokes, order)
+        override fun revert(strokes: MutableList<Stroke>) = arrange(strokes, previous)
+        private fun arrange(strokes: MutableList<Stroke>, ids: List<String>) {
+            val byId = strokes.associateBy { it.id }
+            val out = ArrayList<Stroke>(strokes.size)
+            for (id in ids) byId[id]?.let { out += it }
+            if (out.size != strokes.size) { // ids that aren't in [ids] keep their place on top
+                val placed = out.mapTo(HashSet()) { it.id }
+                strokes.filterTo(out) { it.id !in placed }
+            }
+            strokes.clear(); strokes.addAll(out)
+        }
+
+        companion object {
+            /** Brings [ids] one step forwards ([forward]) or backwards past the nearest other stroke they overlap. */
+            fun step(current: List<Stroke>, ids: Set<String>, forward: Boolean): Reorder? {
+                val before = current.map { it.id }
+                val sel = current.filter { it.id in ids }
+                if (sel.isEmpty()) return null
+                val bounds = sel.map { it.bounds() }.reduce(Rect::union)
+                val first = current.indexOfFirst { it.id in ids }
+                val last = current.indexOfLast { it.id in ids }
+                // The next other stroke in the selection's area above (or below) it: the selection moves past it.
+                val pivotPos = if (forward) (last + 1 until current.size).firstOrNull { current[it].id !in ids && current[it].bounds().intersects(bounds) }
+                else (first - 1 downTo 0).firstOrNull { current[it].id !in ids && current[it].bounds().intersects(bounds) }
+                val rest = ArrayList<Stroke>(current.size)
+                var pivotInRest = -1
+                for (i in current.indices) {
+                    if (current[i].id in ids) continue
+                    if (i == pivotPos) pivotInRest = rest.size
+                    rest += current[i]
+                }
+                val at = when {
+                    pivotInRest < 0 && forward -> rest.size
+                    pivotInRest < 0 -> 0
+                    forward -> pivotInRest + 1
+                    else -> pivotInRest
+                }
+                val out = rest
+                out.addAll(at, sel)
+                val after = out.map { it.id }
+                return if (after == before) null else Reorder(before, after)
+            }
+        }
     }
 
     class AddStroke(val stroke: Stroke) : PageEdit {
@@ -152,7 +227,10 @@ private fun <T> put(list: MutableList<T>, old: T?, new: T?, index: Int, id: (T) 
 
 class PageEditor(page: Page, private val maxHistory: Int = 500) {
     private val strokes = page.strokes.toMutableList()
-    private val content = PageContent(strokes, page.texts.toMutableList(), page.images.toMutableList())
+    private val content = PageContent(
+        strokes, page.texts.toMutableList(), page.images.toMutableList(),
+        page.stickies.toMutableList(), page.tables.toMutableList(), page.audio.toMutableList(),
+    )
     private val undoStack = ArrayDeque<PageEdit>()
     private val redoStack = ArrayDeque<PageEdit>()
     private var base = page
@@ -164,6 +242,11 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
     val currentStrokes: List<Stroke> get() = strokes
     val currentTexts: List<TextBox> get() = content.texts
     val currentImages: List<PageImage> get() = content.images
+    val currentStickies: List<StickyNote> get() = content.stickies
+    val currentTables: List<PageTable> get() = content.tables
+    val currentAudio: List<PageAudio> get() = content.audio
+    /** The page's paper. Changed by Note style for the whole notebook: a setting, not an undoable edit. */
+    val paper: PaperTemplate get() = base.paper
     val canUndo get() = undoStack.isNotEmpty()
     val canRedo get() = redoStack.isNotEmpty()
     /** The edit [undo] would revert next, or null. */
@@ -195,7 +278,16 @@ class PageEditor(page: Page, private val maxHistory: Int = 500) {
         return true
     }
 
-    fun snapshot(): Page = base.copy(strokes = strokes.toList(), texts = content.texts.toList(), images = content.images.toList())
+    fun setPaper(paper: PaperTemplate) {
+        if (base.paper == paper) return
+        base = base.copy(paper = paper)
+        revision++
+    }
+
+    fun snapshot(): Page = base.copy(
+        strokes = strokes.toList(), texts = content.texts.toList(), images = content.images.toList(),
+        stickies = content.stickies.toList(), tables = content.tables.toList(), audio = content.audio.toList(),
+    )
 }
 
 /**

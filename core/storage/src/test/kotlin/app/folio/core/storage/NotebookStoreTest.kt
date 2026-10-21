@@ -488,4 +488,39 @@ class NotebookStoreTest {
         assertNotNull(store.lastRecovery)
         assertEquals(Page(id = "missing"), store.loadPage(nb.id, "missing"))
     }
+
+    @Test fun audioIsCheckedByContentAndAttached() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("Lecture", null, Cover(), PaperTemplate.RULED)
+        assertFailsWith<InvalidImportException> { store.stageAudio("not audio at all".toByteArray().inputStream()) }
+        // An M4A starts with an ISO-BMFF "ftyp" box.
+        val m4a = byteArrayOf(0, 0, 0, 0x20) + "ftypM4A ".toByteArray() + ByteArray(64)
+        val st = store.stageAudio(m4a.inputStream())
+        val id = store.addAttachment(nb.id, st)
+        assertTrue(store.audioFile(nb.id, id).readBytes().contentEquals(m4a))
+        assertTrue(store.audioFile(nb.id, id).name.endsWith(".aud"))
+        // Other audio containers by their magic bytes.
+        for (head in listOf("ID3".toByteArray(), "OggS".toByteArray(), "#!AMR".toByteArray(), "fLaC".toByteArray(),
+            "RIFF\u0000\u0000\u0000\u0000WAVE".toByteArray(), byteArrayOf(0xFF.toByte(), 0xFB.toByte()))) {
+            store.discardStaged(store.stageAudio((head + ByteArray(32)).inputStream()))
+        }
+    }
+
+    @Test fun pagesAreInsertedTogether() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("Book", null, Cover(), PaperTemplate.RULED)
+        val added = List(3) { Page() }
+        val meta = store.insertPages(nb.id, 1, added)
+        assertEquals(listOf(nb.pageIds.first()) + added.map { it.id }, meta.pageIds)
+        added.forEach { assertEquals(it.id, store.loadPage(nb.id, it.id).id) }
+        assertFailsWith<IllegalArgumentException> { store.insertPages(nb.id, 0, listOf(added[0])) }
+    }
+
+    @Test fun aPdfCanJoinAnExistingNotebook() {
+        val store = FileNotebookStore(root)
+        val nb = store.createNotebook("Notes", null, Cover(), PaperTemplate.RULED)
+        val st = store.stagePdf(pdfBytes().inputStream())
+        val id = store.addAttachment(nb.id, st)
+        assertTrue(store.attachmentFile(nb.id, id).exists())
+    }
 }

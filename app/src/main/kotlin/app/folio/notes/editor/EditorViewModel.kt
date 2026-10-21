@@ -15,6 +15,7 @@ import app.folio.core.model.PageHeader
 import app.folio.core.model.PageOps
 import app.folio.core.model.PaperTemplate
 import app.folio.core.model.Stroke
+import app.folio.core.model.TextBox
 import app.folio.notes.input.PageStack
 import app.folio.notes.FolioApp
 import app.folio.notes.export.PageExportSpec
@@ -51,6 +52,8 @@ sealed interface PageEvent {
     class Notice(val message: String, val undo: (() -> Unit)? = null) : PageEvent
     /** An exported page is ready for the share sheet. */
     class Share(val uri: android.net.Uri, val mime: String, val fileName: String) : PageEvent
+    /** The notebook was written as a PDF for the print dialog. */
+    class Print(val file: java.io.File, val title: String) : PageEvent
 }
 
 data class EditorUiState(
@@ -81,7 +84,39 @@ data class EditorUiState(
     val sidebarOpen: Boolean = false,
     /** A single page is being exported. */
     val pageExporting: Boolean = false,
+    /** Reading mode: toolbar hidden, the pen scrolls instead of writing. */
+    val reading: Boolean = false,
+    /** Reading mode's laser pointer switch. */
+    val readingLaser: Boolean = false,
+    /** Full screen: system bars and the app bar hidden. */
+    val fullScreen: Boolean = false,
+    /** The toolbar's arrangement (Customise toolbar). */
+    val toolbar: ToolbarConfig = ToolbarConfig(),
+    /** Eyedropper waiting for a tap: the colour goes to this tool (and quick slot, when set). */
+    val eyedropper: Pair<EditorTool, Int?>? = null,
+    /** Something was cut or copied (Paste is offered). */
+    val canPaste: Boolean = false,
+    /** S Pen to text is on: handwriting turns into typed text after a pause. */
+    val spenToText: Boolean = false,
+    /** The easy writing pad is open. */
+    val easyPad: Boolean = false,
+    /** A table cell being typed. */
+    val editingCell: CellEdit? = null,
+    /** S Pen to text: status shown on its bar (model download, recognising), or null. */
+    val spenStatus: String? = null,
+    /** S Pen to text's language tag. */
+    val spenLanguage: String = "en-US",
+    /** The text box S Pen to text made last (its bar's Space, Backspace and Enter edit it). */
+    val spenBox: Pair<String, String>? = null,
+    /** The easy writing pad's window on the page, while the pad is open. */
+    val padWindow: PadWindow? = null,
 )
+
+/** Table cell ([row], [col]) of table [tableId] on [pageId] being typed; [text] is the draft. */
+data class CellEdit(val pageId: String, val tableId: String, val row: Int, val col: Int, val text: String)
+
+/** Recordings are played by the screen (it owns the media player). */
+fun interface ObjectTapHandler { fun audio(pageId: String, audio: app.folio.core.model.PageAudio) }
 
 /**
  * Owns the notebook being edited. Edits run on the main thread against each page's
@@ -127,7 +162,7 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
     private var debounceJob: Job? = null
     private var retryAttempt = 0
 
-    private val _state = MutableStateFlow(EditorUiState(tools = prefs.load(), sidebarOpen = prefs.sidebarOpen))
+    private val _state = MutableStateFlow(EditorUiState(tools = prefs.load(), sidebarOpen = prefs.sidebarOpen, toolbar = prefs.toolbar, spenLanguage = prefs.spenLanguage))
     val state: StateFlow<EditorUiState> = _state.asStateFlow()
 
     private val _events = Channel<PageEvent>(Channel.BUFFERED)
@@ -192,7 +227,7 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
 
     /** Paper of a page (for its placeholder while it loads). */
     fun paperOf(pageId: String): PaperTemplate =
-        savedPages[pageId]?.paper ?: headers[pageId]?.paper ?: _state.value.meta?.paper ?: PaperTemplate.RULED
+        editors[pageId]?.paper ?: savedPages[pageId]?.paper ?: headers[pageId]?.paper ?: _state.value.meta?.paper ?: PaperTemplate.RULED
 
     private fun pageSize(pageId: String): Pair<Float, Float> {
         savedPages[pageId]?.let { return it.width to it.height }
@@ -334,8 +369,9 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
     private fun loadedPage(pageId: String, ed: PageEditor, index: StrokeIndex? = null): LoadedPage {
         val info = savedPages[pageId] ?: Page(id = pageId)
         return LoadedPage(
-            pageId, info.width, info.height, info.paper, info.pdf,
+            pageId, info.width, info.height, ed.paper, info.pdf,
             ed.currentStrokes.toList(), ed.currentTexts.toList(), ed.currentImages.toList(), backgrounds[pageId], index,
+            PageObjects(ed.currentStickies.toList(), ed.currentTables.toList(), ed.currentAudio.toList(), playingAudio),
         )
     }
 
@@ -372,7 +408,10 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         (currentPageId ?: meta.pageIds.getOrNull(_state.value.pageIndex))?.let { addPage(it, before = false) }
     }
 
-    fun onStrokeFinished(pageId: String, stroke: Stroke) = edit(pageId, PageEdit.AddStroke(stroke))
+    fun onStrokeFinished(pageId: String, stroke: Stroke) {
+        edit(pageId, PageEdit.AddStroke(stroke))
+        spenCollect(pageId, stroke)
+    }
 
     fun onStrokesErased(pageId: String, ids: Set<String>) {
         val ed = editors[pageId] ?: return
@@ -467,7 +506,7 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
                 val cx = (area.left + area.right) / 2f; val cy = (area.top + area.bottom) / 2f
                 val img = app.folio.core.model.PageImage(attachmentId = id, x = cx - iw / 2f, y = cy - ih / 2f, width = iw, height = ih)
                 edit(pageId, PageEdit.PutImage(null, img))
-                _state.update { it.copy(selection = setOf(img.id), selectionPage = pageId, tools = it.tools.copy(lasso = true, eraser = false, text = false)) }
+                _state.update { it.copy(selection = setOf(img.id), selectionPage = pageId, tools = it.tools.activate(EditorTool.SELECTION)) }
             } catch (e: Exception) {
                 _state.update { it.copy(error = "Couldn't add the picture: ${e.message ?: e.javaClass.simpleName}") }
             }
@@ -518,8 +557,19 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         val edits = ArrayList<PageEdit>()
         val before = ed.currentStrokes.filter { it.id in ids }
         if (before.isNotEmpty()) edits += PageEdit.ReplaceStrokes(before, before.map(t::apply))
-        for (x in ed.currentTexts) if (x.id in ids) edits += PageEdit.PutText(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx, t.dy))
-        for (x in ed.currentImages) if (x.id in ids) edits += PageEdit.PutImage(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx, t.dy))
+        // Boxes don't turn: a rotation moves them so their middle follows the selection.
+        fun moved(r: app.folio.core.model.Rect): Pair<Float, Float> {
+            if (t.rotation == 0f) return 0f to 0f
+            val (cx, cy) = t.map((r.left + r.right) / 2, (r.top + r.bottom) / 2)
+            val sx = t.anchorX + ((r.left + r.right) / 2 - t.anchorX) * t.scale + t.dx
+            val sy = t.anchorY + ((r.top + r.bottom) / 2 - t.anchorY) * t.scale + t.dy
+            return (cx - sx) to (cy - sy)
+        }
+        for (x in ed.currentTexts) if (x.id in ids) { val (mx, my) = moved(x.bounds); edits += PageEdit.PutText(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx + mx, t.dy + my)) }
+        for (x in ed.currentImages) if (x.id in ids) { val (mx, my) = moved(x.bounds); edits += PageEdit.PutImage(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx + mx, t.dy + my)) }
+        for (x in ed.currentStickies) if (x.id in ids) { val (mx, my) = moved(x.bounds); edits += PageEdit.PutSticky(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx + mx, t.dy + my)) }
+        for (x in ed.currentTables) if (x.id in ids) { val (mx, my) = moved(x.bounds); edits += PageEdit.PutTable(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx + mx, t.dy + my)) }
+        for (x in ed.currentAudio) if (x.id in ids) { val (mx, my) = moved(x.bounds); edits += PageEdit.PutAudio(x, x.transformed(t.scale, t.anchorX, t.anchorY, t.dx + mx, t.dy + my)) }
         commit(pageId, edits)
     }
 
@@ -535,6 +585,12 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
             .forEach { edits += PageEdit.PutText(it.value, null, it.index) }
         ed.currentImages.withIndex().filter { it.value.id in ids }.sortedByDescending { it.index }
             .forEach { edits += PageEdit.PutImage(it.value, null, it.index) }
+        ed.currentStickies.withIndex().filter { it.value.id in ids }.sortedByDescending { it.index }
+            .forEach { edits += PageEdit.PutSticky(it.value, null, it.index) }
+        ed.currentTables.withIndex().filter { it.value.id in ids }.sortedByDescending { it.index }
+            .forEach { edits += PageEdit.PutTable(it.value, null, it.index) }
+        ed.currentAudio.withIndex().filter { it.value.id in ids }.sortedByDescending { it.index }
+            .forEach { edits += PageEdit.PutAudio(it.value, null, it.index) }
         commit(pageId, edits)
     }
 
@@ -731,6 +787,7 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
     }
 
     override fun onCleared() {
+        recognizer?.close()
         if (folio.sync.liveEditor === live) folio.sync.liveEditor = null
         thumbnails.release()
         assets.release()
@@ -776,6 +833,13 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
             thumbsDue.clear()
             bumpThumbs(due)
         }
+    }
+
+    /** The pages' look changed (dark mode, page colour, ruling): every thumbnail is drawn again. */
+    fun setPageLook(look: PageLook) {
+        if (thumbnails.look == look) return
+        thumbnails.look = look
+        bumpThumbs(_state.value.meta?.pageIds?.toSet().orEmpty())
     }
 
     private fun bumpThumbs(ids: Set<String>) {
@@ -920,7 +984,7 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.update { it.copy(error = "The page couldn't be exported: ${e.message ?: e.javaClass.simpleName}") }
+                _state.update { it.copy(error = "The export failed: ${e.message ?: e.javaClass.simpleName}") }
             } finally {
                 _state.update { it.copy(pageExporting = false) }
             }
@@ -967,7 +1031,692 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
         updateWindow()
     }
 
+    // ---- Samsung Notes-style editor: modes, toolbar, tools (SAMSUNG_EDITOR_PLAN T3–T6) ----
+
+    /** Which recording is playing (drawn as playing on its chip). */
+    private var playingAudio: String? = null
+
+    fun setReading(on: Boolean) {
+        commitText()
+        _state.update { it.copy(reading = on, readingLaser = false, selection = if (on) emptySet() else it.selection, selectionPage = if (on) null else it.selectionPage) }
+    }
+    fun toggleReadingLaser() = _state.update { it.copy(readingLaser = !it.readingLaser) }
+    fun setFullScreen(on: Boolean) = _state.update { it.copy(fullScreen = on) }
+
+    fun updateToolbar(config: ToolbarConfig) {
+        val c = config.normalized()
+        prefs.toolbar = c
+        _state.update { it.copy(toolbar = c) }
+    }
+
+    /** Renames the notebook (the title in the app bar). */
+    fun rename(title: String) {
+        val t = title.trim().take(120)
+        val meta = _state.value.meta ?: return
+        if (t.isEmpty() || t == meta.title) return
+        updateMeta { it.copy(title = t) }
+    }
+
+    /** Changes notebook settings (title, bookmarks, page colour, dark adjust, paper density) and saves them. */
+    fun updateMeta(change: (NotebookMeta) -> NotebookMeta) {
+        val meta = _state.value.meta ?: return
+        val updated = change(meta).copy(modifiedAt = System.currentTimeMillis())
+        _state.update { it.copy(meta = updated) }
+        viewModelScope.launch {
+            try {
+                withContext(folio.ioWriter) { repo.updateNotebook(updated) }
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "Couldn't save the note's settings: ${e.message}") }
+            }
+        }
+    }
+
+    // ---- More menu (SAMSUNG_EDITOR_PLAN T10) ----
+
+    fun toggleFavorite() {
+        val fav = !(_state.value.meta?.favorite ?: return)
+        updateMeta { it.copy(favorite = fav) }
+        _events.trySend(PageEvent.Notice(if (fav) "Added to favourites" else "Removed from favourites"))
+    }
+
+    /** Live folders for Move to folder, each with its depth in the tree, in tree order. */
+    suspend fun folderTree(): List<Pair<app.folio.core.model.Folder, Int>> = withContext(Dispatchers.IO) {
+        val idx = repo.library()
+        val live = idx.folders.filter { it.deletedAt == null }
+        val byParent = live.groupBy { it.parentId }
+        val out = ArrayList<Pair<app.folio.core.model.Folder, Int>>()
+        fun walk(parent: String?, depth: Int) {
+            for (f in byParent[parent].orEmpty().sortedBy { it.name.lowercase() }) { out += f to depth; walk(f.id, depth + 1) }
+        }
+        walk(null, 0)
+        out
+    }
+
+    /** Moves the notebook into [folderId] (null = Documents, the top level). */
+    fun moveToFolder(folderId: String?, folderName: String) {
+        if (_state.value.meta?.folderId == folderId) return
+        viewModelScope.launch {
+            try {
+                withContext(folio.ioWriter) { repo.moveItems(listOf(notebookId), emptyList(), folderId) }
+                _state.update { s -> s.copy(meta = s.meta?.copy(folderId = folderId)) }
+                _events.trySend(PageEvent.Notice("Moved to $folderName"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "Couldn't move the note: ${e.message}") }
+            }
+        }
+    }
+
+    /** Saves everything, moves the notebook to Trash (restorable from the library), then [onDone] closes the editor. */
+    fun moveToTrash(onDone: () -> Unit) {
+        viewModelScope.launch {
+            try {
+                commitText()
+                flushNow()
+                withContext(folio.ioWriter) { repo.trashNotebook(notebookId) }
+                onDone()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "Couldn't move the note to Trash: ${e.message}") }
+            }
+        }
+    }
+
+    /** The whole notebook as a PDF, for the share sheet. */
+    fun shareNotebook(): Unit = pageExport { meta ->
+        val name = app.folio.notes.pdf.NotebookPdfExporter.fileName(meta.title)
+        val uri = withContext(Dispatchers.IO) {
+            PageExporter.shareFile(getApplication(), name) { app.folio.notes.pdf.NotebookPdfExporter.write(repo, meta, it) }
+        }
+        _events.trySend(PageEvent.Share(uri, "application/pdf", name))
+    }
+
+    /** The whole notebook as a PDF, handed to the system print dialog. */
+    fun printNotebook(): Unit = pageExport { meta ->
+        val name = app.folio.notes.pdf.NotebookPdfExporter.fileName(meta.title)
+        val file = withContext(Dispatchers.IO) {
+            val dir = java.io.File(getApplication<android.app.Application>().cacheDir, "print").apply { mkdirs() }
+            dir.listFiles()?.forEach { it.delete() }
+            java.io.File(dir, name).also { f -> f.outputStream().use { app.folio.notes.pdf.NotebookPdfExporter.write(repo, meta, it) } }
+        }
+        _events.trySend(PageEvent.Print(file, meta.title))
+    }
+
+    /**
+     * Note style: every page takes [paper] (PDF pages keep their PDF) and the notebook's ruling
+     * takes [density]; new pages follow. A setting of the note, so it isn't undone with Undo.
+     */
+    fun applyNoteStyle(paper: PaperTemplate, density: app.folio.core.model.PaperDensity) {
+        val meta = _state.value.meta ?: return
+        updateMeta { it.copy(paper = paper, density = density) }
+        viewModelScope.launch {
+            for (id in meta.pageIds) {
+                val ed = editors[id]
+                if (ed != null) {
+                    if (savedPages[id]?.pdf == null && ed.paper != paper) { ed.setPaper(paper); changed(id, ed) }
+                    continue
+                }
+                try {
+                    val restyled = withContext(folio.ioWriter) {
+                        val page = repo.loadPage(notebookId, id)
+                        if (page.pdf != null || page.paper == paper) false else { repo.savePage(notebookId, page.copy(paper = paper)); true }
+                    }
+                    if (!restyled) continue
+                    headers[id]?.let { h -> headers[id] = h.copy(paper = paper) }
+                    // Loaded while this page was being rewritten: it read the old paper.
+                    editors[id]?.let { e -> e.setPaper(paper); changed(id, e) }
+                    thumbChanged(id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    _state.update { it.copy(error = "Couldn't change the paper of every page: ${e.message}") }
+                    return@launch
+                }
+            }
+        }
+    }
+
+    // ---- eyedropper ----
+
+    /** The next tap on the page picks a colour for [tool] (and quick slot [slot]). */
+    fun startEyedropper(tool: EditorTool, slot: Int?) = _state.update { it.copy(eyedropper = tool to slot) }
+    fun cancelEyedropper() = _state.update { it.copy(eyedropper = null) }
+
+    fun onColorPicked(color: Long) {
+        val (tool, slot) = _state.value.eyedropper ?: (_state.value.tools.colorTool to null)
+        _state.update { it.copy(eyedropper = null) }
+        updateTools { t -> (if (slot != null) t.withQuickColor(slot, color) else t).withColorFor(tool, color) }
+        if (_state.value.selection.isNotEmpty()) recolorSelection(color)
+    }
+
+    // ---- change style, tape ----
+
+    /** Strokes restyled in place (Change style sweep, tape peeled or covered): one undo step. */
+    fun onStrokesReplaced(pageId: String, after: List<Stroke>) {
+        val ed = editors[pageId] ?: return
+        val ids = after.associateBy { it.id }
+        val before = ed.currentStrokes.filter { it.id in ids }
+        if (before.isEmpty()) return
+        edit(pageId, PageEdit.ReplaceStrokes(before, before.mapNotNull { ids[it.id] }))
+    }
+
+    /** The page in view's id. */
+    private fun currentId(): String? = currentPageId ?: _state.value.meta?.pageIds?.getOrNull(_state.value.pageIndex)
+
+    /** Eraser popup: every stroke on the page in view (not text or pictures), one undo step. */
+    fun eraseAllHandwriting() {
+        val id = currentId() ?: return
+        val ed = editors[id] ?: return
+        val t = _state.value.tools
+        val ids = ed.currentStrokes.filter {
+            when {
+                t.eraseHighlighterOnly -> it.tool == app.folio.core.model.ToolType.HIGHLIGHTER
+                t.eraseTapeOnly -> it.tool == app.folio.core.model.ToolType.TAPE
+                else -> true
+            }
+        }.mapTo(HashSet()) { it.id }
+        if (ids.isEmpty()) return
+        edit(id, PageEdit.RemoveStrokes.of(ed.currentStrokes, ids))
+        _events.trySend(PageEvent.Notice("Handwriting erased") { undo() })
+    }
+
+    /** Tape popup: all tape on the page in view, one undo step. */
+    fun removeAllTape() {
+        val id = currentId() ?: return
+        val ed = editors[id] ?: return
+        val ids = ed.currentStrokes.filter { it.tool == app.folio.core.model.ToolType.TAPE }.mapTo(HashSet()) { it.id }
+        if (ids.isEmpty()) return
+        edit(id, PageEdit.RemoveStrokes.of(ed.currentStrokes, ids))
+    }
+
+    // ---- sticky notes and other page objects ----
+
+    /** Ink written on a sticky note joins the note (its own coordinates); one undo step. */
+    fun onStickyStroke(pageId: String, stickyId: String, stroke: Stroke) {
+        val ed = editors[pageId] ?: return
+        val i = ed.currentStickies.indexOfFirst { it.id == stickyId }
+        if (i < 0) { edit(pageId, PageEdit.AddStroke(stroke)); return }
+        val n = ed.currentStickies[i]
+        edit(pageId, PageEdit.PutSticky(n, n.copy(strokes = n.strokes + stroke), i))
+    }
+
+    /** The tape on top of a sticky note was tapped: the note collapses to its tab (one undo step). */
+    fun collapseSticky(pageId: String, stickyId: String) {
+        val ed = editors[pageId] ?: return
+        val i = ed.currentStickies.indexOfFirst { it.id == stickyId }
+        if (i < 0) return
+        val n = ed.currentStickies[i]
+        if (stickyId in _state.value.selection) clearSelection()
+        if (n.strokes.isEmpty()) {
+            // Nothing written on it: it's removed rather than kept as an empty tab (Undo brings it back).
+            val e = PageEdit.PutSticky(n, null, i)
+            edit(pageId, e)
+            _events.trySend(PageEvent.Notice("Empty sticky note removed") { if (editors[pageId]?.lastEdit === e) undo() })
+            return
+        }
+        if (!n.minimized) edit(pageId, PageEdit.PutSticky(n, n.copy(minimized = true), i))
+    }
+
+    /** A tap on a page object: play/pause a recording, edit a table, open a minimised note. */
+    fun onObjectTap(pageId: String, objectId: String, x: Float, y: Float): Boolean {
+        val ed = editors[pageId] ?: return false
+        ed.currentStickies.withIndex().firstOrNull { it.value.id == objectId }?.let { (i, n) ->
+            if (n.minimized) edit(pageId, PageEdit.PutSticky(n, n.copy(minimized = false), i))
+            return true
+        }
+        ed.currentAudio.firstOrNull { it.id == objectId }?.let { a -> objectTapHandler?.audio(pageId, a); return true }
+        ed.currentTables.firstOrNull { it.id == objectId }?.let { t ->
+            val col = ((x - t.x) / (t.width / t.cols)).toInt().coerceIn(0, t.cols - 1)
+            val row = ((y - t.y) / (t.height / t.rows)).toInt().coerceIn(0, t.rows - 1)
+            _state.update { it.copy(editingCell = CellEdit(pageId, t.id, row, col, t.cell(row, col))) }
+            return true
+        }
+        return false
+    }
+
+    /** Set by the screen: plays recordings. */
+    var objectTapHandler: ObjectTapHandler? = null
+
+    // ---- S Pen to text (T9) ----
+
+    private var recognizer: HandwritingRecognizer? = null
+    /** Strokes written since the last recognition, on [spenPage]. */
+    private val spenGroup = ArrayList<String>()
+    private var spenPage: String? = null
+    /** The pause timer; only it is cancelled by more writing, never a recognition under way. */
+    private var spenTimer: Job? = null
+    /** Groups are read one at a time, in order, so the next words can join the box the last ones became. */
+    private val spenLock = Mutex()
+    /** The recogniser's model is downloaded and loaded. */
+    private var modelReady = false
+
+    fun toggleSpenToText() {
+        val on = !_state.value.spenToText
+        if (!on) { recognizeNow(); spenRun = null; _state.update { it.copy(spenToText = false, spenStatus = null, spenBox = null) }; return }
+        _state.update { it.copy(spenToText = true) }
+        ensureModel()
+    }
+
+    fun setSpenLanguage(tag: String) {
+        if (tag == _state.value.spenLanguage) return
+        prefs.spenLanguage = tag
+        recognizer?.close(); recognizer = null
+        _state.update { it.copy(spenLanguage = tag) }
+        if (_state.value.spenToText) ensureModel()
+    }
+
+    /** Loads the recogniser, downloading its language model the first time (needs a connection once). */
+    private fun ensureModel() {
+        val tag = _state.value.spenLanguage
+        modelReady = false
+        _state.update { it.copy(spenStatus = "Preparing handwriting recognition…") }
+        viewModelScope.launch {
+            try {
+                val r = recognizer?.takeIf { it.languageTag == tag } ?: HandwritingRecognizer(tag).also { recognizer = it }
+                if (!r.supported) { _state.update { it.copy(spenStatus = "Handwriting in this language isn't available") }; return@launch }
+                val ready = withContext(Dispatchers.IO) { r.isDownloaded() }
+                if (!ready) {
+                    _state.update { it.copy(spenStatus = "Downloading the handwriting model (once)…") }
+                    withContext(Dispatchers.IO) { r.download() }
+                }
+                modelReady = true
+                _state.update { it.copy(spenStatus = null) }
+                // Words written while the model was on its way are read now.
+                if (spenGroup.isNotEmpty()) recognizeNow()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(spenStatus = "Couldn't get the handwriting model. Check the connection and try again.") }
+            }
+        }
+    }
+
+    /** A pen stroke was added while S Pen to text is on: it joins the words being written. */
+    private fun spenCollect(pageId: String, stroke: Stroke) {
+        if (!_state.value.spenToText || !SpenText.recognisable(stroke)) return
+        if (spenPage != pageId) { recognizeNow(); spenPage = pageId }
+        spenGroup += stroke.id
+    }
+
+    /** Recognises the words written so far, right away. */
+    private fun recognizeNow() {
+        spenTimer?.cancel(); spenTimer = null
+        startRecognition()
+    }
+
+    private fun startRecognition() {
+        val pageId = spenPage ?: return
+        // Not ready yet: the words wait (they're read when the model arrives).
+        if (!modelReady || spenGroup.isEmpty()) return
+        val ids = spenGroup.toSet()
+        spenGroup.clear()
+        viewModelScope.launch { spenLock.withLock { recognizeGroup(pageId, ids) } }
+    }
+
+    private suspend fun recognizeGroup(pageId: String, ids: Set<String>) {
+        val ed = editors[pageId] ?: return
+        val strokes = ed.currentStrokes.filter { it.id in ids }
+        if (strokes.isEmpty()) return
+        val r = recognizer ?: return
+        val written = SpenText.bounds(strokes) ?: return
+        // Writing that carries on the line of the box just made joins it (as one undo step).
+        val run = spenRun?.takeIf { it.pageId == pageId && _state.value.spenBox == pageId to it.boxId }
+        val prev = run?.let { carriesOn(ed.currentTexts, it, written) }
+        val joiner = if (run != null && prev != null && !prev.text.endsWith(" ")) SpenText.joiner(run.ink, written, prev.fontSize) else ""
+        val pre = prev?.let { it.text + joiner }
+            ?: _state.value.spenBox?.let { (p, id) -> editors[p]?.currentTexts?.firstOrNull { it.id == id }?.text }.orEmpty()
+        _state.update { it.copy(spenStatus = it.spenStatus ?: "Recognising…") }
+        val text = try {
+            withContext(Dispatchers.Default) { r.recognize(strokes, pre) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        _state.update { if (it.spenStatus == "Recognising…") it.copy(spenStatus = null) else it }
+        if (text == null) {
+            if (_state.value.spenStatus == null) _events.trySend(PageEvent.Notice("Couldn't read that handwriting"))
+            return
+        }
+        // The page may have changed meanwhile: only the strokes still there are replaced.
+        val current = editors[pageId] ?: return
+        val still = current.currentStrokes.filter { it.id in ids }
+        if (still.isEmpty()) return
+        val ink = SpenText.bounds(still) ?: return
+        val pageW = savedPages[pageId]?.width ?: NotebookMeta.PAGE_WIDTH
+        val removal = PageEdit.RemoveStrokes.of(current.currentStrokes, still.mapTo(HashSet()) { it.id })
+        val prevNow = run?.let { carriesOn(current.currentTexts, it, ink) }
+        val laid = if (prevNow != null) {
+            val i = current.currentTexts.indexOfFirst { it.id == prevNow.id }
+            val grown = SpenText.appended(prevNow, joiner + text.trimStart(), ink, pageW)
+            val h = PageRenderer().layout(grown.text, grown.width, grown.fontSize, grown.color).height.toFloat()
+            grown.copy(height = maxOf(h, prevNow.fontSize * 1.3f)).also { commit(pageId, listOf(removal, PageEdit.PutText(prevNow, it, i))) }
+        } else {
+            val box = SpenText.boxFor(text, ink, pageW, still.first().color or 0xFF000000)
+            box.copy(height = maxOf(PageRenderer().layout(box.text, box.width, box.fontSize, box.color).height.toFloat(), box.height))
+                .also { commit(pageId, listOf(removal, PageEdit.PutText(null, it))) }
+        }
+        spenRun = SpenRun(pageId, laid.id, ink, laid.x, laid.y)
+        _state.update { it.copy(spenBox = pageId to laid.id) }
+    }
+
+    /** Where the last S Pen to text words went: their box (where it was put) and the handwriting they were read from. */
+    private class SpenRun(val pageId: String, val boxId: String, val ink: app.folio.core.model.Rect, val x: Float, val y: Float)
+    private var spenRun: SpenRun? = null
+
+    /** The run's box, if it's still where it was put, its line isn't ended and [ink] carries on that line. */
+    private fun carriesOn(texts: List<TextBox>, run: SpenRun, ink: app.folio.core.model.Rect): TextBox? =
+        texts.firstOrNull { it.id == run.boxId }
+            ?.takeIf { it.x == run.x && it.y == run.y && !it.text.endsWith("\n") && SpenText.continues(run.ink, ink, it.fontSize) }
+
+    /** The S Pen to text bar: Space, Backspace and Enter edit the newest box (one undo step each). */
+    fun spenKey(key: String) {
+        val (pageId, id) = _state.value.spenBox ?: return
+        val ed = editors[pageId] ?: return
+        val i = ed.currentTexts.indexOfFirst { it.id == id }
+        if (i < 0) return
+        val b = ed.currentTexts[i]
+        val text = when (key) { " " -> b.text + " "; "\n" -> b.text + "\n"; "\b" -> b.text.dropLast(1); else -> b.text + key }
+        if (text.isEmpty()) { edit(pageId, PageEdit.PutText(b, null, i)); _state.update { it.copy(spenBox = null) }; return }
+        val h = PageRenderer().layout(text, b.width, b.fontSize, b.color).height.toFloat()
+        edit(pageId, PageEdit.PutText(b, b.copy(text = text, height = maxOf(h, b.fontSize)), i))
+    }
+
+    /** The bar's Keyboard: type into the newest box. */
+    fun spenKeyboard() {
+        val (pageId, id) = _state.value.spenBox ?: return
+        val ed = editors[pageId] ?: return
+        val i = ed.currentTexts.indexOfFirst { it.id == id }
+        if (i >= 0) _state.update { it.copy(editingText = TextEdit(pageId, ed.currentTexts[i], ed.currentTexts[i], i)) }
+    }
+    fun toggleEasyPad() = _state.update { it.copy(easyPad = !it.easyPad, padWindow = null) }
+
+    private var padAspect = 4f
+
+    /** Opens the pad's window at the left margin near the top of the visible part of [pageId]. */
+    fun placePad(pageId: String, visible: app.folio.core.model.Rect, aspect: Float) {
+        padAspect = aspect
+        val (w, h) = pageSize(pageId)
+        _state.update { it.copy(padWindow = PadWindow(pageId, PadMoves.initial(w, h, visible, aspect))) }
+    }
+
+    /** The pad changed shape (rotation, its height dragged): the window keeps its width and takes the new shape. */
+    fun reshapePad(aspect: Float) {
+        padAspect = aspect
+        val win = _state.value.padWindow ?: return
+        val r = win.rect
+        val h = r.width / aspect
+        _state.update { it.copy(padWindow = win.copy(rect = app.folio.core.model.Rect(r.left, r.top, r.right, r.top + h))) }
+    }
+
+    fun movePad(step: PadStep) {
+        val win = _state.value.padWindow ?: return
+        val (w, h) = pageSize(win.pageId)
+        val r = when (step) {
+            PadStep.NEXT -> PadMoves.next(win.rect, w, h)
+            PadStep.PREVIOUS -> PadMoves.previous(win.rect, w, h)
+            PadStep.ENTER -> PadMoves.enter(win.rect, w, h)
+        }
+        _state.update { it.copy(padWindow = win.copy(rect = r)) }
+    }
+
+    /** The window was dragged or resized on the page. */
+    fun setPadWindow(pageId: String, rect: app.folio.core.model.Rect) = _state.update { it.copy(padWindow = PadWindow(pageId, rect)) }
+
+    /** Ink written in the pad: it goes onto the page, and the window moves on when it passed the end marker. */
+    fun onPadStroke(pageId: String, stroke: Stroke) {
+        onStrokeFinished(pageId, stroke)
+        onPenLifted()
+        val win = _state.value.padWindow ?: return
+        if (win.pageId != pageId || stroke.size == 0) return
+        val (w, h) = pageSize(pageId)
+        val right = stroke.x.max()
+        val moved = PadMoves.advance(win.rect, right, w, h)
+        if (moved != win.rect) _state.update { it.copy(padWindow = win.copy(rect = moved)) }
+    }
+
+    /** A writing stroke began: S Pen to text waits for the pen to lift again before reading. */
+    fun onPenDown() { spenTimer?.cancel(); spenTimer = null }
+
+    /** A writing stroke was committed (S Pen to text restarts its pause timer). */
+    fun onPenLifted() {
+        penLiftListener?.invoke()
+        if (!_state.value.spenToText || spenGroup.isEmpty()) return
+        spenTimer?.cancel()
+        spenTimer = viewModelScope.launch { delay(SpenText.PAUSE_MS); spenTimer = null; startRecognition() }
+    }
+    var penLiftListener: (() -> Unit)? = null
+
+    // ---- Insert menu (SAMSUNG_EDITOR_PLAN T8) ----
+
+    /** Adds the pages of a PDF after the page in view (each page shows one PDF page) and scrolls to the first. */
+    fun insertPdf(uri: android.net.Uri) = pageOp {
+        commitText()
+        val ctx = getApplication<android.app.Application>()
+        val at = (_state.value.meta?.pageIds?.indexOf(currentId()) ?: -1) + 1
+        val (added, updated) = withContext(folio.ioWriter) {
+            val staged = (ctx.contentResolver.openInputStream(uri) ?: throw java.io.IOException("can't open the PDF")).use { repo.stagePdf(it) }
+            try {
+                val pages = PdfFile(staged.file).use { pdf ->
+                    val n = pdf.pageCount
+                    if (n !in 1..PdfFile.MAX_PAGES) throw java.io.IOException("the PDF has $n pages; up to ${PdfFile.MAX_PAGES} are supported")
+                    (0 until n).map { i ->
+                        val (w, h) = pdf.pageSize(i)
+                        Page(
+                            width = (w / app.folio.notes.pdf.NotebookPdfExporter.POINTS_PER_UNIT).coerceIn(100f, 10_000f),
+                            height = (h / app.folio.notes.pdf.NotebookPdfExporter.POINTS_PER_UNIT).coerceIn(100f, 10_000f),
+                            paper = PaperTemplate.BLANK, pdf = PdfBackground(staged.id, i),
+                        )
+                    }
+                }
+                repo.addAttachment(notebookId, staged)
+                pages to repo.insertPages(notebookId, at, pages)
+            } catch (e: Exception) {
+                repo.discardStaged(staged); throw e
+            }
+        }
+        added.forEach { adopt(it) }
+        applyMeta(updated)
+        added.firstOrNull()?.let { first -> openPage(updated.pageIds.indexOf(first.id)) }
+        _events.trySend(PageEvent.Notice("${added.size} PDF page${if (added.size == 1) "" else "s"} added"))
+    }
+
+    /** A sticky note in the middle of [area] on [pageId], selected so it can be moved or written on. */
+    fun insertSticky(pageId: String, area: app.folio.core.model.Rect) {
+        commitText()
+        val size = minOf(area.width, area.height) * 0.42f
+        val s = minOf(maxOf(size, 220f), 460f)
+        val note = app.folio.core.model.StickyNote(
+            x = (area.left + area.right) / 2 - s / 2, y = (area.top + area.bottom) / 2 - s / 2, width = s, height = s, color = STICKY_COLORS[0],
+        )
+        edit(pageId, PageEdit.PutSticky(null, note))
+        _state.update { it.copy(selection = setOf(note.id), selectionPage = pageId, tools = it.tools.activate(EditorTool.SELECTION)) }
+    }
+
+    /** Changes a selected sticky note (colour, minimised); one undo step. */
+    fun updateSticky(change: (app.folio.core.model.StickyNote) -> app.folio.core.model.StickyNote) {
+        val (pageId, ed) = selectionEditor() ?: return
+        val i = ed.currentStickies.indexOfFirst { it.id in _state.value.selection }
+        if (i < 0) return
+        val n = ed.currentStickies[i]
+        val after = change(n)
+        if (after != n) edit(pageId, PageEdit.PutSticky(n, after, i))
+        if (after.minimized) clearSelection()
+    }
+
+    /** The one sticky note selected (alone), for its colour and minimise actions. */
+    fun selectedSticky(): app.folio.core.model.StickyNote? {
+        val sel = _state.value.selection
+        if (sel.size != 1) return null
+        return selectionEditor()?.second?.currentStickies?.firstOrNull { it.id in sel }
+    }
+
+    /** A [rows] × [cols] table across the middle of [area]. */
+    fun insertTable(pageId: String, area: app.folio.core.model.Rect, rows: Int, cols: Int) {
+        commitText()
+        val w = minOf(area.width * 0.8f, 760f)
+        val h = rows * 64f
+        val t = app.folio.core.model.PageTable(
+            x = (area.left + area.right) / 2 - w / 2, y = (area.top + area.bottom) / 2 - h / 2, width = w, height = h,
+            rows = rows.coerceIn(1, app.folio.core.model.PageTable.MAX), cols = cols.coerceIn(1, app.folio.core.model.PageTable.MAX),
+            color = _state.value.tools.colorOf(EditorTool.PEN),
+        )
+        edit(pageId, PageEdit.PutTable(null, t))
+        _state.update { it.copy(editingCell = CellEdit(pageId, t.id, 0, 0, "")) }
+    }
+
+    fun updateCellText(text: String) = _state.update { s -> s.copy(editingCell = s.editingCell?.copy(text = text)) }
+
+    /** Saves the cell being typed (one undo step) and, with [next], moves on to the next cell. */
+    fun commitCell(next: Boolean = false) {
+        val e = _state.value.editingCell ?: return
+        _state.update { it.copy(editingCell = null) }
+        val ed = editors[e.pageId] ?: return
+        val i = ed.currentTables.indexOfFirst { it.id == e.tableId }
+        if (i < 0) return
+        val t = ed.currentTables[i]
+        if (t.cell(e.row, e.col) != e.text) edit(e.pageId, PageEdit.PutTable(t, t.withCell(e.row, e.col, e.text), i))
+        if (next) {
+            val k = e.row * t.cols + e.col + 1
+            if (k < t.rows * t.cols) _state.update { it.copy(editingCell = CellEdit(e.pageId, t.id, k / t.cols, k % t.cols, t.cell(k / t.cols, k % t.cols))) }
+        }
+    }
+
+    /** Table being typed in, for placing the field over its cell. */
+    fun tableOf(pageId: String, tableId: String): app.folio.core.model.PageTable? = editors[pageId]?.currentTables?.firstOrNull { it.id == tableId }
+
+    /** Copies a recording or audio file into the notebook and puts its chip near the top-left of [area]. */
+    fun insertAudio(uri: android.net.Uri, pageId: String, area: app.folio.core.model.Rect, title: String, durationMs: Long, deleteSource: Boolean = false) {
+        commitText()
+        val ctx = getApplication<android.app.Application>()
+        viewModelScope.launch {
+            try {
+                val (id, duration) = withContext(folio.ioWriter) {
+                    val staged = (ctx.contentResolver.openInputStream(uri) ?: throw java.io.IOException("can't open the audio")).use { repo.stageAudio(it) }
+                    val d = if (durationMs > 0) durationMs else runCatching {
+                        android.media.MediaMetadataRetriever().use { r -> r.setDataSource(staged.file.path); r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L }
+                    }.getOrDefault(0L)
+                    repo.addAttachment(notebookId, staged) to d
+                }
+                if (deleteSource) uri.path?.let { java.io.File(it).delete() }
+                val a = app.folio.core.model.PageAudio(
+                    attachmentId = id, x = (area.left + 24f).coerceAtMost(area.right - app.folio.core.model.PageAudio.CHIP_WIDTH),
+                    y = area.top + 24f, title = title.take(80), durationMs = duration,
+                )
+                edit(pageId, PageEdit.PutAudio(null, a))
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "Couldn't add the audio: ${e.message ?: e.javaClass.simpleName}") }
+            }
+        }
+    }
+
+    fun audioFile(attachmentId: String): java.io.File = repo.audioFile(notebookId, attachmentId)
+
+    /** The recording now playing (its chip shows a pause sign), or null. */
+    fun setPlaying(id: String?) {
+        if (playingAudio == id) return
+        playingAudio = id
+        shown.clear()
+        for ((pid, ed) in editors) if (pid in window) publish(pid, ed)
+    }
+
+    // ---- selection menu: cut, copy, paste, order, change style ----
+
+    /** What Cut/Copy took, in page units of the page it came from. */
+    private var clipboard: Clip? = null
+    private class Clip(
+        val strokes: List<Stroke>, val texts: List<app.folio.core.model.TextBox>, val images: List<app.folio.core.model.PageImage>,
+        val stickies: List<app.folio.core.model.StickyNote>, val tables: List<app.folio.core.model.PageTable>,
+        val audio: List<app.folio.core.model.PageAudio>,
+    )
+
+    fun copySelection() {
+        val (_, ed) = selectionEditor() ?: return
+        val ids = _state.value.selection
+        clipboard = Clip(
+            ed.currentStrokes.filter { it.id in ids }, ed.currentTexts.filter { it.id in ids }, ed.currentImages.filter { it.id in ids },
+            ed.currentStickies.filter { it.id in ids }, ed.currentTables.filter { it.id in ids }, ed.currentAudio.filter { it.id in ids },
+        )
+        _state.update { it.copy(canPaste = true) }
+        _events.trySend(PageEvent.Notice("Copied"))
+    }
+
+    fun cutSelection() { copySelection(); deleteSelection() }
+
+    /** Pastes onto the page in view: where it was if that's on screen, offset a little, and selects it. */
+    fun paste() {
+        val clip = clipboard ?: return
+        val pageId = _state.value.selectionPage ?: currentId() ?: return
+        val d = DUPLICATE_OFFSET
+        val strokes = clip.strokes.map { it.transformed(1f, 0f, 0f, d, d, newId = true) }
+        val texts = clip.texts.map { it.transformed(1f, 0f, 0f, d, d, newId = true) }
+        val images = clip.images.map { it.transformed(1f, 0f, 0f, d, d, newId = true) }
+        val stickies = clip.stickies.map { it.transformed(1f, 0f, 0f, d, d, newId = true) }
+        val tables = clip.tables.map { it.transformed(1f, 0f, 0f, d, d, newId = true) }
+        val audio = clip.audio.map { it.transformed(1f, 0f, 0f, d, d, newId = true) }
+        val edits = ArrayList<PageEdit>()
+        if (strokes.isNotEmpty()) edits += PageEdit.AddStrokes(strokes)
+        texts.forEach { edits += PageEdit.PutText(null, it) }
+        images.forEach { edits += PageEdit.PutImage(null, it) }
+        stickies.forEach { edits += PageEdit.PutSticky(null, it) }
+        tables.forEach { edits += PageEdit.PutTable(null, it) }
+        audio.forEach { edits += PageEdit.PutAudio(null, it) }
+        if (edits.isEmpty()) return
+        commit(pageId, edits)
+        // The next paste lands a little further on.
+        clipboard = Clip(strokes, texts, images, stickies, tables, audio)
+        val ids = LinkedHashSet<String>()
+        strokes.mapTo(ids) { it.id }; texts.mapTo(ids) { it.id }; images.mapTo(ids) { it.id }
+        stickies.mapTo(ids) { it.id }; tables.mapTo(ids) { it.id }; audio.mapTo(ids) { it.id }
+        _state.update { it.copy(selection = ids, selectionPage = pageId, tools = it.tools.activate(EditorTool.SELECTION)) }
+    }
+
+    /** Move forwards / backwards in the stacking order, past the next stroke the selection overlaps. */
+    fun reorderSelection(forward: Boolean) {
+        val (pageId, ed) = selectionEditor() ?: return
+        PageEdit.Reorder.step(ed.currentStrokes, _state.value.selection, forward)?.let { edit(pageId, it) }
+    }
+
+    /** The selection menu's Change style: the change-style colour and width on every selected stroke. */
+    fun restyleSelection() {
+        val (pageId, ed) = selectionEditor() ?: return
+        val t = _state.value.tools
+        val color = t.colorOf(EditorTool.CHANGE_STYLE)
+        val src = selectedStrokes()
+        if (src.isEmpty()) return
+        val after = src.map { if (it.tool == app.folio.core.model.ToolType.HIGHLIGHTER || it.tool == app.folio.core.model.ToolType.TAPE) it.restyled(color, it.width) else it.restyled(color, t.restyleWidth) }
+        edit(pageId, PageEdit.ReplaceStrokes(src, after))
+    }
+
+    /**
+     * Clean up handwriting: each selected stroke (or, with nothing selected, every pen stroke on
+     * the page in view) that is close to a line or a shape becomes that clean line or shape.
+     * One undo step.
+     */
+    fun cleanUpHandwriting() {
+        val sel = _state.value.selection
+        val pageId = if (sel.isNotEmpty()) _state.value.selectionPage else currentId()
+        val ed = pageId?.let { editors[it] } ?: return
+        val src = ed.currentStrokes.filter {
+            (sel.isEmpty() || it.id in sel) && it.tool != app.folio.core.model.ToolType.HIGHLIGHTER && it.tool != app.folio.core.model.ToolType.TAPE && it.size >= 3
+        }
+        val before = ArrayList<Stroke>(); val after = ArrayList<Stroke>()
+        for (st in src) {
+            val shape = app.folio.core.ink.ShapeRecognizer.recognize(st.x, st.y) ?: continue
+            val clean = shape.toStroke(st.tool, st.color, st.width, st.pressure.average().toFloat().coerceIn(0.15f, 1f), st.startedAt)
+            before += st
+            after += Stroke(st.id, clean.tool, clean.color, clean.width, clean.x, clean.y, clean.pressure, clean.tilt, clean.orientation, clean.t, clean.startedAt, st.look)
+        }
+        if (before.isEmpty()) { _events.trySend(PageEvent.Notice("Nothing to clean up: no lines or shapes found")); return }
+        edit(pageId, PageEdit.ReplaceStrokes(before, after))
+        _events.trySend(PageEvent.Notice("${before.size} stroke${if (before.size == 1) "" else "s"} cleaned up") { undo() })
+    }
+
     companion object {
+        /** Sticky note colours: warm yellow, mint, shell pink, light blue (Folio's own values). */
+        val STICKY_COLORS = listOf(0xFFFFE9A8, 0xFFC9F0DA, 0xFFFFD6DC, 0xFFCFE5FF)
         const val SAVE_DEBOUNCE_MS = 800L
         const val DUPLICATE_OFFSET = 24f
         /** A page's thumbnail refreshes once writing pauses this long. */

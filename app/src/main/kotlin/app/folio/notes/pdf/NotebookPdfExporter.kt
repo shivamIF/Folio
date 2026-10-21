@@ -27,7 +27,8 @@ object NotebookPdfExporter {
     /** Writes [pageIds] (all pages by default, in notebook order) as one PDF. */
     fun write(repo: DocumentRepository, meta: NotebookMeta, out: OutputStream, pageIds: List<String> = meta.pageIds) {
         val doc = PdfDocument()
-        val renderer = PageRenderer(forPdf = true)
+        // Exports draw light, in the note's page colour and ruling.
+        val renderer = PageRenderer(forPdf = true).apply { pageColor = meta.pageColor; density = meta.density }
         val sources = HashMap<String, PdfFile>()
         val pictures = HashMap<String, android.graphics.Bitmap?>()
         try {
@@ -38,6 +39,7 @@ object NotebookPdfExporter {
                 val pdfPage = doc.startPage(PdfDocument.PageInfo.Builder(wPt, hPt, i + 1).create())
                 val c = pdfPage.canvas
                 c.scale(POINTS_PER_UNIT, POINTS_PER_UNIT)
+                renderer.pageColor = if (page.pdf != null) null else meta.pageColor
                 renderer.drawPaper(c, page.paper, page.width, page.height, hasPdf = page.pdf != null)
                 page.pdf?.let { bg ->
                     val src = sources.getOrPut(bg.attachmentId) { PdfFile(repo.attachmentFile(meta.id, bg.attachmentId)) }

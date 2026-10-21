@@ -14,6 +14,9 @@ work = "2.10.0"
 ink = "1.0.0"
 # Front-buffered (low-latency) wet ink.
 graphicsCore = "1.0.4"
+# Google ML Kit (on-device): Insert > Document scan, and S Pen to text (approved by the user 2026-10-20).
+mlkitDocScanner = "16.0.0"
+mlkitDigitalInk = "19.0.0"
 
 [libraries]
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -35,6 +38,8 @@ graphics-core = { module = "androidx.graphics:graphics-core", version.ref = "gra
 ink-brush = { module = "androidx.ink:ink-brush", version.ref = "ink" }
 ink-strokes = { module = "androidx.ink:ink-strokes", version.ref = "ink" }
 ink-rendering = { module = "androidx.ink:ink-rendering", version.ref = "ink" }
+mlkit-document-scanner = { module = "com.google.android.gms:play-services-mlkit-document-scanner", version.ref = "mlkitDocScanner" }
+mlkit-digital-ink = { module = "com.google.mlkit:digital-ink-recognition", version.ref = "mlkitDigitalInk" }
 work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
 

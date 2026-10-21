@@ -22,11 +22,14 @@ object DocumentCodec {
         encodeDefaults = true
     }
 
-    // Always write the current version: a page loaded from an older schema may now hold
-    // content (text boxes, new tools) that an older app must refuse rather than misread.
-    fun encodePage(page: Page): String = json.encodeToString(Page.serializer(), page.copy(schemaVersion = SCHEMA_VERSION))
+    // Write the lowest version the page's content needs (ADR-11): a page with tape or a sticky
+    // note is refused by older builds instead of misread, while every other page still opens
+    // in schema-5 builds installed from sibling branches.
+    fun encodePage(page: Page): String = json.encodeToString(Page.serializer(), page.copy(schemaVersion = page.requiredSchema()))
+
+    /** The library's new fields are optional, so it is always written as [BASE_SCHEMA]. */
     fun encodeLibrary(index: LibraryIndex): String =
-        json.encodeToString(LibraryIndex.serializer(), index.copy(schemaVersion = SCHEMA_VERSION))
+        json.encodeToString(LibraryIndex.serializer(), index.copy(schemaVersion = BASE_SCHEMA))
 
     fun decodePage(text: String): Page = decode(text) { json.decodeFromString(Page.serializer(), it) }
     fun decodeLibrary(text: String): LibraryIndex = decode(text) { json.decodeFromString(LibraryIndex.serializer(), it) }

@@ -170,7 +170,7 @@ internal class CreateDocumentAs : ActivityResultContract<Pair<String, String>, U
         if (resultCode == Activity.RESULT_OK) intent?.data else null
 }
 
-/** Opens the share sheet for an exported page. */
+/** Opens the share sheet for an exported page or notebook. */
 internal fun sharePage(context: Context, e: PageEvent.Share) {
     val send = Intent(Intent.ACTION_SEND).apply {
         type = e.mime
@@ -179,5 +179,5 @@ internal fun sharePage(context: Context, e: PageEvent.Share) {
         clipData = ClipData.newRawUri(e.fileName, e.uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    context.startActivity(Intent.createChooser(send, "Share page"))
+    context.startActivity(Intent.createChooser(send, "Share"))
 }

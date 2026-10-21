@@ -34,7 +34,7 @@ object PageExporter {
         when (spec.format) {
             PageExportFormat.PDF -> NotebookPdfExporter.write(repo, meta, out, listOf(pageId))
             PageExportFormat.PNG, PageExportFormat.JPEG -> {
-                val bmp = render(repo, meta.id, repo.loadPage(meta.id, pageId), spec.dpi)
+                val bmp = render(repo, meta, repo.loadPage(meta.id, pageId), spec.dpi)
                 try {
                     val (format, quality) = if (spec.format == PageExportFormat.PNG) Bitmap.CompressFormat.PNG to 100
                     else Bitmap.CompressFormat.JPEG to PageExportSpec.JPEG_QUALITY
@@ -47,14 +47,15 @@ object PageExporter {
     }
 
     /** The page as a bitmap at [dpi] (see [PageExportSpec.rasterSize]). */
-    fun render(repo: DocumentRepository, notebookId: String, page: Page, dpi: Int): Bitmap {
+    fun render(repo: DocumentRepository, meta: NotebookMeta, page: Page, dpi: Int): Bitmap {
+        val notebookId = meta.id
         val (w, h) = PageExportSpec.rasterSize(page.width, page.height, dpi)
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val pictures = HashMap<String, Bitmap?>()
         try {
             val c = Canvas(bmp)
             c.scale(w / page.width, h / page.height)
-            val r = PageRenderer()
+            val r = PageRenderer().apply { pageColor = if (page.pdf != null) null else meta.pageColor; density = meta.density }
             r.drawPaper(c, page.paper, page.width, page.height, hasPdf = page.pdf != null)
             page.pdf?.let { bg ->
                 PdfFile(repo.attachmentFile(notebookId, bg.attachmentId)).use { pdf ->

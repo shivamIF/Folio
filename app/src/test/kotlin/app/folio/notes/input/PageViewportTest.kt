@@ -30,6 +30,26 @@ class PageViewportTest {
         assertEquals(l, v.toView(0f, 0f).first, 0.01f, "fully zoomed-out page can't be dragged off centre")
     }
 
+    @Test fun aKeyboardLetsThePageEndScrollAboveIt() {
+        val v = portrait() // fit width: scale 1.2, the page is 1697 px tall in an 1800 px view, centred
+        val centred = (1800f + 1414f * 1.2f) / 2f
+        v.panBy(0f, -10_000f)
+        assertEquals(centred, v.toView(0f, 1414f).second, 0.5f, "without a keyboard it can't move")
+        v.bottomInset = 800f
+        v.panBy(0f, -10_000f)
+        assertEquals(1000f, v.toView(0f, 1414f).second, 0.5f) // the end rises to the keyboard's top
+        v.bottomInset = 0f
+        v.clamp()
+        assertEquals(centred, v.toView(0f, 1414f).second, 0.5f, "the keyboard gone, the page settles back")
+        // A taller column of pages: its end can rise above the keyboard too.
+        val tall = PageViewport().apply { resize(1200f, 1800f); setPage(1000f, 3000f) }
+        tall.panBy(0f, -100_000f)
+        val end = tall.toView(0f, 3000f).second
+        tall.bottomInset = 800f
+        tall.panBy(0f, -100_000f)
+        assertEquals(end - 800f, tall.toView(0f, 3000f).second, 0.5f)
+    }
+
     @Test fun zoomIsCapped() {
         val v = portrait()
         repeat(20) { v.zoomBy(2f, 600f, 900f) }

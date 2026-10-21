@@ -67,6 +67,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.motion.prediction)
     implementation(libs.graphics.core)
+    // Google ML Kit, on-device: document scanner (Insert) and handwriting recognition (S Pen to text).
+    implementation(libs.mlkit.document.scanner)
+    implementation(libs.mlkit.digital.ink)
 
     // Brush Lab (src/debug) compares Folio's engine with AndroidX Ink. Never in release builds.
     debugImplementation(libs.ink.brush)

@@ -18,7 +18,7 @@ import java.io.File
  * The notebook store as one side of a sync ([SyncEngine]).
  *
  * Keys: `f/folders.json` (all folders), `n/<notebook>/meta.json` (one notebook's details),
- * `n/<notebook>/p/<page>.json` (a page file, as on disk), `n/<notebook>/a/<id>.pdf|.img`
+ * `n/<notebook>/p/<page>.json` (a page file, as on disk), `n/<notebook>/a/<id>.pdf|.img|.aud`
  * (attachments). The local layout is unchanged; folders and details are cut out of, and
  * merged back into, library.json.
  *
@@ -243,6 +243,6 @@ class StoreSync(
     companion object {
         const val FOLDERS = "f/folders.json"
         private val SAFE = Regex("[A-Za-z0-9-]{1,64}")
-        private val ATTACHMENT = Regex("[A-Za-z0-9-]{1,64}\\.(pdf|img)")
+        private val ATTACHMENT = Regex("[A-Za-z0-9-]{1,64}\\.(pdf|img|aud)")
     }
 }

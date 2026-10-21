@@ -16,5 +16,12 @@
             android:label="Folio Ink Bench"
             android:taskAffinity="app.folio.notes.lab"
             android:theme="@style/Theme.Folio" />
+        <!-- Editor controls (One UI-style kit) in dark and light, side by side. -->
+        <activity
+            android:name=".lab.OneUiGalleryActivity"
+            android:exported="true"
+            android:label="Folio Editor Controls"
+            android:taskAffinity="app.folio.notes.lab"
+            android:theme="@style/Theme.Folio" />
     </application>
 </manifest>

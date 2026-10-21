@@ -21,6 +21,8 @@ internal class WetFrame(
     val pageToView: FloatArray, val arts: List<StrokeArt>, val clip: RectF?, val inputNanos: Long,
     /** The page's size: ink is clipped to it, as on the page surface (a stroke stays on its page). */
     val pageW: Float, val pageH: Float,
+    /** The page is shown dark (ink lightened the same way the page surface does). */
+    val dark: Boolean = false,
 )
 
 /**
@@ -95,6 +97,7 @@ internal class WetInkLayer(context: Context) : SurfaceView(context) {
             m.setValues(param.pageToView)
             canvas.concat(m)
             canvas.clipRect(0f, 0f, param.pageW, param.pageH)
+            pageRenderer.dark = param.dark
             for (art in param.arts) pageRenderer.drawStroke(canvas, art)
             canvas.restore()
             lastInputNanos = param.inputNanos

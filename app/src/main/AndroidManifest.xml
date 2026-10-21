@@ -5,6 +5,8 @@
     <!-- Google Drive sync (opt-in). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Insert > Voice recording (asked for when first used). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:name=".FolioApp"

@@ -15,28 +15,38 @@ object PageOps {
      * Attachments (PDF background, picture files) are shared, as both pages live in the same notebook.
      */
     fun duplicate(page: Page): Page = page.copy(
-        schemaVersion = SCHEMA_VERSION,
+        schemaVersion = page.requiredSchema(),
         id = newId(),
         strokes = page.strokes.map { it.transformed(1f, 0f, 0f, 0f, 0f, newId = true) },
         texts = page.texts.map { it.copy(id = newId()) },
         images = page.images.map { it.copy(id = newId()) },
+        stickies = page.stickies.map { it.transformed(1f, 0f, 0f, 0f, 0f, newId = true) },
+        tables = page.tables.map { it.copy(id = newId()) },
+        audio = page.audio.map { it.copy(id = newId()) },
     )
 
-    fun hasContent(strokes: List<Stroke>, texts: List<TextBox>, images: List<PageImage>): Boolean =
-        strokes.isNotEmpty() || texts.isNotEmpty() || images.isNotEmpty()
+    fun hasContent(strokes: List<Stroke>, texts: List<TextBox>, images: List<PageImage>, others: Int = 0): Boolean =
+        strokes.isNotEmpty() || texts.isNotEmpty() || images.isNotEmpty() || others > 0
 
-    fun hasContent(page: Page): Boolean = hasContent(page.strokes, page.texts, page.images)
+    fun hasContent(page: Page): Boolean =
+        hasContent(page.strokes, page.texts, page.images, page.stickies.size + page.tables.size + page.audio.size)
 
     /**
-     * One undoable edit that removes every stroke, text box and picture; the paper and PDF
-     * background stay. Null when there is nothing to erase.
+     * One undoable edit that removes every stroke, text box and picture (and sticky note, table
+     * and recording); the paper and PDF background stay. Null when there is nothing to erase.
      */
-    fun erase(strokes: List<Stroke>, texts: List<TextBox>, images: List<PageImage>): PageEdit? {
+    fun erase(
+        strokes: List<Stroke>, texts: List<TextBox>, images: List<PageImage>,
+        stickies: List<StickyNote> = emptyList(), tables: List<PageTable> = emptyList(), audio: List<PageAudio> = emptyList(),
+    ): PageEdit? {
         val edits = ArrayList<PageEdit>()
         if (strokes.isNotEmpty()) edits += PageEdit.RemoveStrokes.of(strokes, strokes.mapTo(HashSet()) { it.id })
         // Highest index first, so undo (which runs in reverse) puts each back in its place.
         for (i in texts.indices.reversed()) edits += PageEdit.PutText(texts[i], null, i)
         for (i in images.indices.reversed()) edits += PageEdit.PutImage(images[i], null, i)
+        for (i in stickies.indices.reversed()) edits += PageEdit.PutSticky(stickies[i], null, i)
+        for (i in tables.indices.reversed()) edits += PageEdit.PutTable(tables[i], null, i)
+        for (i in audio.indices.reversed()) edits += PageEdit.PutAudio(audio[i], null, i)
         return when (edits.size) {
             0 -> null
             1 -> edits[0]

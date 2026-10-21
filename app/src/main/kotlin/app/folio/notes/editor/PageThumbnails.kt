@@ -24,6 +24,7 @@ import kotlin.math.roundToInt
  *   writing never re-renders other pages.
  * - On disk as PNGs in the cache directory, keyed by the page file's stamp, so reopening
  *   a notebook doesn't re-render unchanged pages. Everything here can be regenerated.
+ * - Drawn in the page [look] (dark mode, page colour, ruling), which is part of every key.
  */
 internal class PageThumbnails(cacheRoot: File, notebookId: String, private val assets: PageAssets) {
 
@@ -31,7 +32,14 @@ internal class PageThumbnails(cacheRoot: File, notebookId: String, private val a
     class Thumb(
         val bitmap: Bitmap, val version: Long,
         val pageWidth: Float, val pageHeight: Float, val paper: PaperTemplate, val hasContent: Boolean,
+        val lookKey: String = "",
     )
+
+    /** How pages are drawn, as on screen. Changing it drops what's in memory (the caller asks for fresh versions). */
+    @Volatile var look: PageLook = PageLook.LIGHT
+        set(value) { if (field != value) { field = value; memory.evictAll() } }
+
+    private fun PageLook.key() = "${if (dark) "d" else "l"}${pageColor?.let { java.lang.Long.toHexString(it) } ?: "n"}${density.name.first()}${if (hideTape) "h" else ""}"
 
     /** How to get one page: its saved-file stamp (null while it has unsaved edits) and its content. */
     interface Source {
@@ -49,7 +57,7 @@ internal class PageThumbnails(cacheRoot: File, notebookId: String, private val a
     private val renderer by lazy { PageRenderer() }
 
     /** The cached thumbnail at exactly [version], or null. */
-    fun peek(pageId: String, version: Long): Thumb? = memory.get(pageId)?.takeIf { it.version == version }
+    fun peek(pageId: String, version: Long): Thumb? = memory.get(pageId)?.takeIf { it.version == version && it.lookKey == look.key() }
 
     /** Any cached thumbnail of the page (possibly older than its content): shown while a fresh one renders. */
     fun peekAny(pageId: String): Thumb? = memory.get(pageId)
@@ -64,7 +72,8 @@ internal class PageThumbnails(cacheRoot: File, notebookId: String, private val a
             peek(pageId, version)?.takeIf { it.bitmap.width == widthPx }?.let { return@withContext it }
             runCatching {
                 val stamp = source.stamp()
-                val thumb = stamp?.let { fromDisk(pageId, it, widthPx, version) } ?: render(source.page(), widthPx, version).also { t ->
+                val look = look
+                val thumb = stamp?.let { fromDisk(pageId, it, widthPx, version, look) } ?: render(source.page(), widthPx, version, look).also { t ->
                     if (stamp != null) save(pageId, stamp, t)
                 }
                 memory.put(pageId, thumb)
@@ -73,25 +82,27 @@ internal class PageThumbnails(cacheRoot: File, notebookId: String, private val a
         }
     }
 
-    private fun render(page: Page, widthPx: Int, version: Long): Thumb {
+    private fun render(page: Page, widthPx: Int, version: Long, look: PageLook): Thumb {
         val scale = widthPx / page.width
         val heightPx = (page.height * scale).roundToInt().coerceIn(1, widthPx * 4)
         val bmp = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         c.scale(scale, scale)
+        look.applyTo(renderer, hasPdf = page.pdf != null)
+        renderer.drawControls = false
         renderer.drawPaper(c, page.paper, page.width, page.height, hasPdf = page.pdf != null)
         // The PDF page is rendered straight into the bitmap at thumbnail size (over the paper).
         page.pdf?.let { assets.renderPdf(bmp, it, page.width, page.height, scale, 0f, 0f, null) }
         renderer.drawContent(c, page) { id -> assets.image(id, decode = true) }
-        return Thumb(bmp, version, page.width, page.height, page.paper, PageOps.hasContent(page))
+        return Thumb(bmp, version, page.width, page.height, page.paper, PageOps.hasContent(page), look.key())
     }
 
-    // ---- disk: <pageId>_<stamp>_<width>_<w>x<h>_<paper>_<content>.png ----
+    // ---- disk: <pageId>_<stamp>_<width>_<look>_<w>x<h>_<paper>_<content>.png ----
 
-    private fun prefix(pageId: String, stamp: String, widthPx: Int) = "${pageId}_${stamp}_${widthPx}_"
+    private fun prefix(pageId: String, stamp: String, widthPx: Int, lookKey: String) = "${pageId}_${stamp}_${widthPx}_${lookKey}_"
 
-    private fun fromDisk(pageId: String, stamp: String, widthPx: Int, version: Long): Thumb? {
-        val p = prefix(pageId, stamp, widthPx)
+    private fun fromDisk(pageId: String, stamp: String, widthPx: Int, version: Long, look: PageLook): Thumb? {
+        val p = prefix(pageId, stamp, widthPx, look.key())
         val f = dir.listFiles { f -> f.name.startsWith(p) && f.name.endsWith(".png") }?.firstOrNull() ?: return null
         val parts = f.name.removePrefix(p).removeSuffix(".png").split('_')
         if (parts.size != 3) return null
@@ -99,14 +110,15 @@ internal class PageThumbnails(cacheRoot: File, notebookId: String, private val a
         val paper = runCatching { PaperTemplate.valueOf(parts[1]) }.getOrNull() ?: return null
         if (size.size != 2) return null
         val bmp = BitmapFactory.decodeFile(f.path) ?: return null
-        return Thumb(bmp, version, size[0], size[1], paper, parts[2] == "1")
+        return Thumb(bmp, version, size[0], size[1], paper, parts[2] == "1", look.key())
     }
 
     private fun save(pageId: String, stamp: String, t: Thumb) {
         runCatching {
             dir.mkdirs()
+            // One look per page on disk: switching dark mode back and forth re-renders, which is rare.
             dir.listFiles { f -> f.name.startsWith(pageId + "_") }?.forEach { it.delete() }
-            val name = prefix(pageId, stamp, t.bitmap.width) + "${t.pageWidth}x${t.pageHeight}_${t.paper.name}_${if (t.hasContent) 1 else 0}.png"
+            val name = prefix(pageId, stamp, t.bitmap.width, t.lookKey) + "${t.pageWidth}x${t.pageHeight}_${t.paper.name}_${if (t.hasContent) 1 else 0}.png"
             val tmp = File(dir, "$name.tmp")
             tmp.outputStream().use { t.bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             if (!tmp.renameTo(File(dir, name))) tmp.delete()

@@ -1,5 +1,6 @@
 package app.folio.core.model
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.descriptors.PrimitiveKind
@@ -10,8 +11,17 @@ import kotlinx.serialization.json.JsonNames
 import kotlinx.serialization.ExperimentalSerializationApi
 import java.util.UUID
 
-/** Current on-disk schema version of every persisted model object. Bump together with a migration. */
-const val SCHEMA_VERSION = 5
+/**
+ * Newest on-disk schema this build reads. Bump together with a migration.
+ *
+ * Files are written with the lowest schema their content needs ([Page.requiredSchema]), not
+ * always this one, so pages and libraries without schema-6 features still open in schema-5
+ * builds (ADR-11).
+ */
+const val SCHEMA_VERSION = 6
+
+/** The schema written for content that uses nothing newer. */
+const val BASE_SCHEMA = 5
 
 fun newId(): String = UUID.randomUUID().toString()
 
@@ -120,6 +130,19 @@ data class NotebookMeta(
     val deletedAt: Long? = null,
     /** Created by importing a PDF (the library shows its first page instead of a cover). */
     val fromPdf: Boolean = false,
+    /**
+     * Bookmarked pages (ids), from the editor's page sorter. [bookmarks], [pageColor],
+     * [darkAdjust] and [density] were added without a schema bump, like [Folder.icon]: they
+     * are optional with defaults, so a schema-5 build still reads the library (it ignores
+     * them, and drops them if it rewrites the notebook's entry).
+     */
+    val bookmarks: List<String> = emptyList(),
+    /** Page background colour (Page settings); null = the paper's own white. */
+    val pageColor: Argb? = null,
+    /** "Adjust colour in Dark mode": dark pages with lightened ink while the app is dark. */
+    val darkAdjust: Boolean = true,
+    /** Line spacing of ruled, grid and dotted paper (Note style). */
+    val density: PaperDensity = PaperDensity.NORMAL,
 ) {
     companion object {
         /** Page units; roughly A4 at 120 units per inch. */
@@ -130,7 +153,7 @@ data class NotebookMeta(
 
 @Serializable
 data class LibraryIndex(
-    val schemaVersion: Int = SCHEMA_VERSION,
+    val schemaVersion: Int = BASE_SCHEMA,
     val folders: List<Folder> = emptyList(),
     val notebooks: List<NotebookMeta> = emptyList(),
 ) {
@@ -159,8 +182,20 @@ data class LibraryIndex(
     }
 }
 
+/** Line spacing of ruled, grid and dotted paper. Unknown names (from newer builds) read as [NORMAL]. */
+@Serializable(with = PaperDensitySerializer::class)
+enum class PaperDensity(val factor: Float) { NORMAL(1f), NARROW(0.75f), WIDE(1.35f) }
+
+internal object PaperDensitySerializer : KSerializer<PaperDensity> {
+    override val descriptor = PrimitiveSerialDescriptor("app.folio.PaperDensity", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: PaperDensity) = encoder.encodeString(value.name)
+    override fun deserialize(decoder: Decoder): PaperDensity =
+        decoder.decodeString().let { n -> PaperDensity.entries.firstOrNull { it.name == n } } ?: PaperDensity.NORMAL
+}
+
 /**
- * Persisted by name. FINELINER and MARKER arrived in schema 4, AIRBRUSH in schema 5.
+ * Persisted by name. FINELINER and MARKER arrived in schema 4, AIRBRUSH in schema 5, TAPE in
+ * schema 6 (a page holding tape is written as schema 6, so older builds refuse it cleanly).
  *
  * Calligraphy, crayon and watercolour existed only in test builds and were withdrawn; strokes
  * saved with them load as the nearest remaining tool (the [JsonNames] aliases).
@@ -169,7 +204,7 @@ data class LibraryIndex(
 @Serializable
 enum class ToolType {
     @JsonNames("CALLIGRAPHY") FOUNTAIN, BALLPOINT, @JsonNames("CRAYON") PENCIL, BRUSH,
-    @JsonNames("WATERCOLOR") HIGHLIGHTER, FINELINER, MARKER, AIRBRUSH;
+    @JsonNames("WATERCOLOR") HIGHLIGHTER, FINELINER, MARKER, AIRBRUSH, TAPE;
 
     /**
      * Furthest the drawn ink can reach from the centreline, in nominal widths (a tilted pencil
@@ -180,11 +215,47 @@ enum class ToolType {
         PENCIL -> 1.6f
         AIRBRUSH -> 1.0f
         BRUSH -> 0.85f
-        MARKER, HIGHLIGHTER -> 0.71f
+        MARKER, HIGHLIGHTER, TAPE -> 0.71f
         FOUNTAIN, BALLPOINT, FINELINER -> 0.5f
     }
 
     val isHighlighter get() = this == HIGHLIGHTER
+}
+
+/** How a line is drawn along its path (pen popup's line pills). */
+@Serializable(with = LineStyleSerializer::class)
+enum class LineStyle { SOLID, DASHED, DOTTED }
+
+internal object LineStyleSerializer : KSerializer<LineStyle> {
+    override val descriptor = PrimitiveSerialDescriptor("app.folio.LineStyle", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: LineStyle) = encoder.encodeString(value.name)
+    override fun deserialize(decoder: Decoder): LineStyle =
+        decoder.decodeString().let { n -> LineStyle.entries.firstOrNull { it.name == n } } ?: LineStyle.SOLID
+}
+
+/**
+ * A stroke's look beyond tool, colour and width (schema 6). [DEFAULT] is how every stroke
+ * before schema 6 looks, and is never written to disk.
+ *
+ * - [line]: dashed or dotted lines (pens);
+ * - [fixedWidth]: ignore pressure (the "Fixed thickness" pill);
+ * - [roundTip]: the highlighter's round tip instead of its chisel;
+ * - [pattern]: tape pattern, 0 = plain colour, 1–9 = Folio's procedural patterns;
+ * - [peeled]: tape tapped open, so what's under it shows through.
+ */
+data class StrokeLook(
+    val line: LineStyle = LineStyle.SOLID,
+    val fixedWidth: Boolean = false,
+    val roundTip: Boolean = false,
+    val pattern: Int = 0,
+    val peeled: Boolean = false,
+) {
+    val isDefault: Boolean get() = this == DEFAULT
+
+    companion object {
+        val DEFAULT = StrokeLook()
+        const val PATTERNS = 9
+    }
 }
 
 /**
@@ -212,6 +283,8 @@ class Stroke(
     val orientation: FloatArray,
     val t: IntArray,
     val startedAt: Long = 0,
+    /** Line style, fixed width, tip, tape pattern and state (schema 6). */
+    val look: StrokeLook = StrokeLook.DEFAULT,
 ) {
     init {
         val n = x.size
@@ -254,23 +327,53 @@ class Stroke(
     fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false): Stroke = Stroke(
         if (newId) newId() else id, tool, color, width * scale,
         FloatArray(size) { ax + (x[it] - ax) * scale + dx }, FloatArray(size) { ay + (y[it] - ay) * scale + dy },
-        pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt,
+        pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt, look,
     )
 
+    /**
+     * Rotated by [degrees] (clockwise on the page, y down) around ([cx], [cy]). Orientation
+     * (the pen's azimuth) turns with it, so a tilted pencil keeps its shading direction.
+     */
+    fun rotated(degrees: Float, cx: Float, cy: Float): Stroke {
+        if (degrees == 0f) return this
+        val a = Math.toRadians(degrees.toDouble())
+        val c = kotlin.math.cos(a).toFloat(); val s = kotlin.math.sin(a).toFloat()
+        val rad = a.toFloat()
+        return Stroke(
+            id, tool, color, width,
+            FloatArray(size) { cx + (x[it] - cx) * c - (y[it] - cy) * s }, FloatArray(size) { cy + (x[it] - cx) * s + (y[it] - cy) * c },
+            pressure.copyOf(), tilt.copyOf(), FloatArray(size) { orientation[it] + rad }, t.copyOf(), startedAt, look,
+        )
+    }
+
     fun recolored(newColor: Argb): Stroke = Stroke(
-        id, tool, newColor, width, x.copyOf(), y.copyOf(), pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt,
+        id, tool, newColor, width, x.copyOf(), y.copyOf(), pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt, look,
+    )
+
+    /** Same path in a new colour and width (Change style). A highlighter keeps its translucency. */
+    fun restyled(newColor: Argb, newWidth: Float): Stroke = Stroke(
+        id, tool, if (tool == ToolType.HIGHLIGHTER) (newColor and 0xFFFFFF) or (color and 0xFF000000) else newColor, newWidth,
+        x.copyOf(), y.copyOf(), pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt, look,
+    )
+
+    fun withLook(newLook: StrokeLook): Stroke = Stroke(
+        id, tool, color, width, x.copyOf(), y.copyOf(), pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt, newLook,
     )
 
     fun translated(dx: Float, dy: Float): Stroke = Stroke(
         id, tool, color, width,
         FloatArray(size) { x[it] + dx }, FloatArray(size) { y[it] + dy },
-        pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt,
+        pressure.copyOf(), tilt.copyOf(), orientation.copyOf(), t.copyOf(), startedAt, look,
     )
+
+    /** True if this stroke needs schema 6 to be stored faithfully. */
+    val needsSchema6: Boolean get() = tool == ToolType.TAPE || !look.isDefault
 
     override fun equals(other: Any?): Boolean = other is Stroke && id == other.id && tool == other.tool &&
         color == other.color && width == other.width && x.contentEquals(other.x) && y.contentEquals(other.y) &&
         pressure.contentEquals(other.pressure) && tilt.contentEquals(other.tilt) &&
-        orientation.contentEquals(other.orientation) && t.contentEquals(other.t) && startedAt == other.startedAt
+        orientation.contentEquals(other.orientation) && t.contentEquals(other.t) && startedAt == other.startedAt &&
+        look == other.look
 
     override fun hashCode(): Int = id.hashCode()
     override fun toString(): String = "Stroke($id, $tool, n=$size)"
@@ -334,14 +437,93 @@ data class PageImage(
 }
 
 /**
+ * A sticky note on the page (schema 6): a coloured square you write on. Its ink lives with it,
+ * in the note's own coordinates (0,0 = its top-left corner), so moving the note moves the ink.
+ * Minimised, it shows as a small tab at the page's top-left.
+ */
+@Serializable
+data class StickyNote(
+    val id: String = newId(),
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val color: Argb = 0xFFFFE9A8,
+    val minimized: Boolean = false,
+    val strokes: List<Stroke> = emptyList(),
+) {
+    val bounds: Rect get() = Rect(x, y, x + width, y + height)
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false) = copy(
+        id = if (newId) newId() else id,
+        x = ax + (x - ax) * scale + dx, y = ay + (y - ay) * scale + dy, width = width * scale, height = height * scale,
+        strokes = strokes.map { it.transformed(scale, 0f, 0f, 0f, 0f, newId) },
+    )
+}
+
+/** A table (schema 6): [rows] × [cols] cells of text, row by row in [cells]. */
+@Serializable
+data class PageTable(
+    val id: String = newId(),
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val rows: Int,
+    val cols: Int,
+    val cells: List<String> = List(rows * cols) { "" },
+    val fontSize: Float = 22f,
+    val color: Argb = 0xFF1B1B1F,
+) {
+    init { require(rows in 1..MAX && cols in 1..MAX) { "table size out of range" } }
+    val bounds: Rect get() = Rect(x, y, x + width, y + height)
+    fun cell(r: Int, c: Int): String = cells.getOrElse(r * cols + c) { "" }
+    fun withCell(r: Int, c: Int, text: String): PageTable =
+        copy(cells = List(rows * cols) { if (it == r * cols + c) text else cells.getOrElse(it) { "" } })
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false) = copy(
+        id = if (newId) newId() else id,
+        x = ax + (x - ax) * scale + dx, y = ay + (y - ay) * scale + dy,
+        width = width * scale, height = height * scale, fontSize = fontSize * scale,
+    )
+
+    companion object { const val MAX = 20 }
+}
+
+/** A voice recording or audio file placed on the page (schema 6); the file is attachment [attachmentId]. */
+@Serializable
+data class PageAudio(
+    val id: String = newId(),
+    val attachmentId: String,
+    val x: Float,
+    val y: Float,
+    val title: String,
+    val durationMs: Long = 0,
+) {
+    val width: Float get() = CHIP_WIDTH
+    val height: Float get() = CHIP_HEIGHT
+    val bounds: Rect get() = Rect(x, y, x + CHIP_WIDTH, y + CHIP_HEIGHT)
+    fun transformed(scale: Float, ax: Float, ay: Float, dx: Float, dy: Float, newId: Boolean = false) = copy(
+        id = if (newId) newId() else id, x = ax + (x - ax) * scale + dx, y = ay + (y - ay) * scale + dy,
+    )
+
+    companion object {
+        const val CHIP_WIDTH = 300f
+        const val CHIP_HEIGHT = 64f
+    }
+}
+
+/**
  * Schema history: 1 = stroke channels as number arrays; 2 = packed points;
  * 3 = text boxes and images (an older app refuses these pages instead of dropping them);
- * 4 = fine-liner and marker tools (an older app would reject the unknown tool names).
- * Pages are stamped with the current version whenever they are encoded.
+ * 4 = fine-liner and marker tools (an older app would reject the unknown tool names);
+ * 5 = airbrush; 6 = tape, stroke looks (dashes, fixed width, round highlighter, tape patterns),
+ * sticky notes, tables and audio.
+ *
+ * A page is stamped with the lowest version its content needs ([requiredSchema], at least
+ * [BASE_SCHEMA]) whenever it is encoded.
  */
 @Serializable
 data class Page(
-    val schemaVersion: Int = SCHEMA_VERSION,
+    val schemaVersion: Int = BASE_SCHEMA,
     val id: String = newId(),
     val width: Float = NotebookMeta.PAGE_WIDTH,
     val height: Float = NotebookMeta.PAGE_HEIGHT,
@@ -353,4 +535,12 @@ data class Page(
     val texts: List<TextBox> = emptyList(),
     /** Drawn under the ink. Absent before schema 3. */
     val images: List<PageImage> = emptyList(),
-)
+    /** Schema 6; written only when not empty. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val stickies: List<StickyNote> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val tables: List<PageTable> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val audio: List<PageAudio> = emptyList(),
+) {
+    /** The lowest schema that stores this page faithfully (older builds then refuse it instead of misreading it). */
+    fun requiredSchema(): Int =
+        if (stickies.isNotEmpty() || tables.isNotEmpty() || audio.isNotEmpty() || strokes.any { it.needsSchema6 }) 6 else BASE_SCHEMA
+}

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Only page exports written for the share sheet are shareable; notebooks are never exposed. -->
+<!-- Only page exports written for the share sheet, and photos the camera writes for Insert > Camera,
+     go through this provider; notebooks are never exposed. -->
 <paths>
     <cache-path name="exports" path="exports/" />
+    <cache-path name="camera" path="camera/" />
 </paths>

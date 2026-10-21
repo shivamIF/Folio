@@ -39,7 +39,16 @@ internal class StrokeRecord(
     @EncodeDefault(NEVER) val orientation: FloatArray? = null,
     @EncodeDefault(NEVER) val t: IntArray? = null,
     val startedAt: Long = 0,
-)
+    // Schema 6 look; written only when not the default.
+    @EncodeDefault(NEVER) val line: LineStyle? = null,
+    @EncodeDefault(NEVER) val fixed: Boolean? = null,
+    @EncodeDefault(NEVER) val round: Boolean? = null,
+    @EncodeDefault(NEVER) val pattern: Int? = null,
+    @EncodeDefault(NEVER) val peeled: Boolean? = null,
+) {
+    val look: StrokeLook get() = if (line == null && fixed == null && round == null && pattern == null && peeled == null) StrokeLook.DEFAULT
+    else StrokeLook(line ?: LineStyle.SOLID, fixed == true, round == true, (pattern ?: 0).coerceIn(0, StrokeLook.PATTERNS), peeled == true)
+}
 
 internal object StrokeSerializer : KSerializer<Stroke> {
     private const val BYTES_PER_POINT = 24
@@ -49,9 +58,14 @@ internal object StrokeSerializer : KSerializer<Stroke> {
     override val descriptor: SerialDescriptor = SerialDescriptor("app.folio.core.model.Stroke", record.descriptor)
 
     override fun serialize(encoder: Encoder, value: Stroke) {
+        val k = value.look
         encoder.encodeSerializableValue(
             record,
-            StrokeRecord(value.id, value.tool, value.color, value.width, pts = pack(value), startedAt = value.startedAt),
+            StrokeRecord(
+                value.id, value.tool, value.color, value.width, pts = pack(value), startedAt = value.startedAt,
+                line = k.line.takeIf { it != LineStyle.SOLID }, fixed = true.takeIf { k.fixedWidth }, round = true.takeIf { k.roundTip },
+                pattern = k.pattern.takeIf { it != 0 }, peeled = true.takeIf { k.peeled },
+            ),
         )
     }
 
@@ -66,7 +80,7 @@ internal object StrokeSerializer : KSerializer<Stroke> {
             requireNotNull(r.y) { "stroke ${r.id} has no y" },
             requireNotNull(r.pressure) { "stroke ${r.id} has no pressure" },
             r.tilt ?: FloatArray(r.x.size), r.orientation ?: FloatArray(r.x.size), r.t ?: IntArray(r.x.size),
-            r.startedAt,
+            r.startedAt, r.look,
         )
     }
 
@@ -90,6 +104,6 @@ internal object StrokeSerializer : KSerializer<Stroke> {
         fun floats() = FloatArray(n).also { buf.asFloatBuffer().get(it); buf.position(buf.position() + n * 4) }
         val x = floats(); val y = floats(); val p = floats(); val tilt = floats(); val o = floats()
         val t = IntArray(n).also { buf.asIntBuffer().get(it) }
-        return Stroke(r.id, r.tool, r.color, r.width, x, y, p, tilt, o, t, r.startedAt)
+        return Stroke(r.id, r.tool, r.color, r.width, x, y, p, tilt, o, t, r.startedAt, r.look)
     }
 }

@@ -80,6 +80,8 @@ data class BrushSpec(
             ToolType.HIGHLIGHTER -> BrushSpec(PenProfile(1f, 1f, 0f, 1f, pressureSensitive = false), CapStyle.SQUARE, NIB, 0.3f)
             // Spray: even core, edges blurred away by the renderer, density from pressure.
             ToolType.AIRBRUSH -> BrushSpec(PenProfile(0.7f, 1f, 0f, 1f), shade = Shade.SPRAY, soften = 0.5f)
+            // Tape: an even, flat band with square ends (drawn opaque, above other ink).
+            ToolType.TAPE -> BrushSpec(PenProfile(1f, 1f, 0f, 1f, pressureSensitive = false), CapStyle.SQUARE)
         }
     }
 }

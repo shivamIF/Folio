@@ -23,6 +23,11 @@ class PageViewport(private val maxZoom: Float = 5f) {
     var unitH = 1414f; private set
     /** Top of the last page in content units (0 for a single page). */
     var lastTop = 0f; private set
+    /**
+     * View pixels covered at the bottom (the on-screen keyboard while typing): the content may
+     * scroll up that much further, so what's being typed near its end can come into view.
+     */
+    var bottomInset = 0f
 
     /** Scale at which the page width exactly fills the view. */
     val fitWidthScale: Float get() = if (pageW > 0f && viewW > 0f) viewW / pageW else 1f
@@ -111,7 +116,10 @@ class PageViewport(private val maxZoom: Float = 5f) {
         val sw = pageW * scale
         val sh = pageH * scale
         tx = if (sw <= viewW) (viewW - sw) / 2f else tx.coerceIn(viewW - sw, 0f)
-        ty = if (sh <= viewH) (viewH - sh) / 2f else ty.coerceIn(minTy(), 0f)
+        ty = if (sh <= viewH) {
+            val centred = (viewH - sh) / 2f
+            if (bottomInset > 0f) ty.coerceIn(minOf(centred, viewH - bottomInset - sh), centred) else centred
+        } else ty.coerceIn(minTy(), 0f)
     }
 
     fun toPage(vx: Float, vy: Float): Pair<Float, Float> = (vx - tx) / scale to (vy - ty) / scale
@@ -119,7 +127,7 @@ class PageViewport(private val maxZoom: Float = 5f) {
 
     /** Scroll range in view pixels, for fling bounds: minX..0 and minY..0 (the end may scroll the last page to the top). */
     fun minTx(): Float = minOf(0f, viewW - pageW * scale)
-    fun minTy(): Float = minOf(0f, viewH - pageH * scale, -lastTop * scale)
+    fun minTy(): Float = minOf(0f, viewH - bottomInset - pageH * scale, -lastTop * scale)
 
     companion object {
         const val MIN_OF_FIT_PAGE = 0.5f
