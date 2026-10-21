@@ -60,6 +60,7 @@ import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -142,6 +143,8 @@ private class DockState {
     var swing0 = 0f
     /** Local x of the pointer's rest point minus the pointer, in the layout in effect: rest = local − originX. */
     var originX = 0f
+    /** How far the centred dock is shifted (pill style). */
+    var offsetX = 0f
 }
 
 /**
@@ -233,12 +236,11 @@ fun GlassDock(
         contents = contents,
         modifier = modifier
             .then(
-                // A pill grows asymmetrically around the pointer; shift it so the cell under the pen stays put.
+                // The parent centres the dock; the pill grows around the pointer, so the layout pass
+                // works out how far to shift it (read here after that pass, every frame it moves).
                 if (fullWidth) Modifier else Modifier.offset {
-                    val r = st.swing0 * st.strength.value
-                    val p = st.pointer.floatValue
-                    val shift = (DockMath.displacement(-p, r, st.reach) + DockMath.displacement(st.restWidth - p, r, st.reach)) / 2f
-                    IntOffset(shift.roundToInt(), 0)
+                    st.strength.value; st.pointer.floatValue; st.open.value
+                    IntOffset(st.offsetX.roundToInt(), 0)
                 },
             )
             .pointerInput(Unit) {
@@ -294,13 +296,20 @@ fun GlassDock(
         val height = (barH + overflow).roundToInt()
         val handle = handleM.firstOrNull()?.measure(Constraints())
         val collapsed = e <= 0.01f && handle != null
-        val layoutW = if (collapsed) handle.width else totalW.roundToInt().coerceAtLeast(1)
+        // Pill: where the magnified pill wants to be in the parent (the rest pill, centred, moved by
+        // the warp of its left edge), kept on screen. Cells pushed past the edge slide off it.
+        val margin = 8.dp.toPx()
+        val wantLeft = (maxW - (st.restWidth + 2 * padH)) / 2f + edges[0]
+        val visLeft = if (fullWidth) 0f else max(margin, wantLeft)
+        val visRight = if (fullWidth) maxW.toFloat() else min(maxW - margin, wantLeft + totalW)
+        val layoutW = if (collapsed) handle.width else (visRight - visLeft).roundToInt().coerceAtLeast(1)
         val layoutH = if (collapsed) handle.height else max(height, handle?.height ?: 0)
+        st.offsetX = if (fullWidth || collapsed) 0f else visLeft - (maxW - layoutW) / 2f
         // Where the warped row starts, in this layout's coordinates.
-        val rowLeft = if (fullWidth) (maxW - st.restWidth) / 2f + edges[0] else padH
+        val rowLeft = if (fullWidth) (maxW - st.restWidth) / 2f + edges[0] else wantLeft - visLeft + padH
         st.originX = rowLeft - edges[0]
         val barTop = if (top) 0f else height - barH
-        val bgP = if (collapsed) null else bgM.first().measure(Constraints.fixed(totalW.roundToInt().coerceAtLeast(1), barH.roundToInt().coerceAtLeast(1)))
+        val bgP = if (collapsed) null else bgM.first().measure(Constraints.fixed(layoutW, barH.roundToInt().coerceAtLeast(1)))
         val labelP = labelM.firstOrNull()?.measure(Constraints())
         layout(layoutW, layoutH) {
             if (!collapsed) {
