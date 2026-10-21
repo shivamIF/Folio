@@ -47,6 +47,19 @@ class InputPolicy(
         eraserToolSelected: Boolean,
         pointerCount: Int,
         nowMs: Long,
+        readOnly: Boolean = false,
+    ): GestureAction = classify(kind, touchMajorPx, barrelButtonPressed, eraserToolSelected, pointerCount, nowMs).let {
+        // Reading mode: nothing writes or erases; a pen or finger scrolls the page instead.
+        if (readOnly && (it == GestureAction.DRAW || it == GestureAction.ERASE)) GestureAction.NAVIGATE else it
+    }
+
+    private fun classify(
+        kind: PointerKind,
+        touchMajorPx: Float,
+        barrelButtonPressed: Boolean,
+        eraserToolSelected: Boolean,
+        pointerCount: Int,
+        nowMs: Long,
     ): GestureAction = when (kind) {
         PointerKind.STYLUS -> {
             onStylusActivity(nowMs)

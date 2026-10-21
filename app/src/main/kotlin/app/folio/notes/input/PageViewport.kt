@@ -1,13 +1,15 @@
 package app.folio.notes.input
 
 /**
- * Maps page units to view pixels: `view = page * scale + (tx, ty)`.
+ * Maps content units to view pixels: `view = content * scale + (tx, ty)`. The content is one
+ * page ([setPage]) or the notebook's pages stacked in a column ([setContent], see [PageStack]).
  *
- * The page is locked to the screen:
+ * The content is locked to the screen:
  * - a notebook opens at fit-width (comfortable for writing);
- * - you can zoom out until the whole page is visible, but no further;
- * - along any axis where the page is smaller than the view it stays centred;
- *   along an axis where it's larger, panning stops exactly at the page edges.
+ * - you can zoom out to half of a whole page ([unitH] tall), but no further;
+ * - along any axis where the content is smaller than the view it stays centred;
+ *   along an axis where it's larger, panning stops at its edges, except that the end may
+ *   scroll on until the last page's top ([lastTop]) reaches the top of the view.
  */
 class PageViewport(private val maxZoom: Float = 5f) {
     var viewW = 0f; private set
@@ -17,11 +19,20 @@ class PageViewport(private val maxZoom: Float = 5f) {
     var scale = 1f; private set
     var tx = 0f; private set
     var ty = 0f; private set
+    /** Height of one page, for the zoom-out limit (a stack's first page). */
+    var unitH = 1414f; private set
+    /** Top of the last page in content units (0 for a single page). */
+    var lastTop = 0f; private set
+    /**
+     * View pixels covered at the bottom (the on-screen keyboard while typing): the content may
+     * scroll up that much further, so what's being typed near its end can come into view.
+     */
+    var bottomInset = 0f
 
     /** Scale at which the page width exactly fills the view. */
     val fitWidthScale: Float get() = if (pageW > 0f && viewW > 0f) viewW / pageW else 1f
-    /** Scale at which the whole page is visible. */
-    val fitPageScale: Float get() = if (viewH > 0f) minOf(fitWidthScale, viewH / pageH) else fitWidthScale
+    /** Scale at which a whole page ([unitH] tall) is visible. */
+    val fitPageScale: Float get() = if (viewH > 0f) minOf(fitWidthScale, viewH / unitH) else fitWidthScale
     /** Smallest scale: half of whole-page, page centred with space around it. */
     val minScale: Float get() = fitPageScale * MIN_OF_FIT_PAGE
     val maxScale: Float get() = fitWidthScale * maxZoom
@@ -31,9 +42,24 @@ class PageViewport(private val maxZoom: Float = 5f) {
     val zoom: Float get() = scale / fitWidthScale
 
     fun setPage(w: Float, h: Float) {
-        if (w == pageW && h == pageH) return
-        pageW = w; pageH = h
+        if (w == pageW && h == pageH && unitH == h && lastTop == 0f) return
+        pageW = w; pageH = h; unitH = h; lastTop = 0f
         fitWidth()
+    }
+
+    /**
+     * The content changed size (pages stacked, added, removed, resized). Unlike [setPage] the
+     * zoom and position are kept (clamped); the caller re-anchors what the user was looking at.
+     */
+    fun setContent(w: Float, h: Float, unitH: Float, lastTop: Float) {
+        pageW = w; pageH = h; this.unitH = unitH; this.lastTop = lastTop
+        if (ready) { scale = scale.coerceIn(minScale, maxScale); clamp() }
+    }
+
+    /** Scrolls so content height [y] sits at view height [viewY] (zoom unchanged, clamped). */
+    fun anchor(y: Float, viewY: Float) {
+        ty = viewY - y * scale
+        clamp()
     }
 
     /**
@@ -90,15 +116,18 @@ class PageViewport(private val maxZoom: Float = 5f) {
         val sw = pageW * scale
         val sh = pageH * scale
         tx = if (sw <= viewW) (viewW - sw) / 2f else tx.coerceIn(viewW - sw, 0f)
-        ty = if (sh <= viewH) (viewH - sh) / 2f else ty.coerceIn(viewH - sh, 0f)
+        ty = if (sh <= viewH) {
+            val centred = (viewH - sh) / 2f
+            if (bottomInset > 0f) ty.coerceIn(minOf(centred, viewH - bottomInset - sh), centred) else centred
+        } else ty.coerceIn(minTy(), 0f)
     }
 
     fun toPage(vx: Float, vy: Float): Pair<Float, Float> = (vx - tx) / scale to (vy - ty) / scale
     fun toView(px: Float, py: Float): Pair<Float, Float> = px * scale + tx to py * scale + ty
 
-    /** Scroll range in view pixels, for fling bounds: minX..0 and minY..0. */
+    /** Scroll range in view pixels, for fling bounds: minX..0 and minY..0 (the end may scroll the last page to the top). */
     fun minTx(): Float = minOf(0f, viewW - pageW * scale)
-    fun minTy(): Float = minOf(0f, viewH - pageH * scale)
+    fun minTy(): Float = minOf(0f, viewH - bottomInset - pageH * scale, -lastTop * scale)
 
     companion object {
         const val MIN_OF_FIT_PAGE = 0.5f
