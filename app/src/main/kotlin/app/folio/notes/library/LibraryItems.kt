@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -49,6 +48,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.folio.core.model.NotebookMeta
+import app.folio.notes.ui.glass.GlassDropdownMenu
+import app.folio.notes.ui.glass.glassMenuItemColors
 
 /** One entry in an item's context menu. */
 @Immutable
@@ -91,7 +92,7 @@ private fun LibraryItem.subtitle(): String = when (this) {
 
 @Composable
 fun ItemMenu(expanded: Boolean, actions: List<MenuAction>, onDismiss: () -> Unit) {
-    DropdownMenu(expanded, onDismissRequest = onDismiss) {
+    GlassDropdownMenu(expanded, onDismissRequest = onDismiss) {
         actions.forEach { a ->
             if (a.dividerBefore) HorizontalDivider(Modifier.padding(vertical = 4.dp))
             val tint = if (a.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
@@ -99,6 +100,7 @@ fun ItemMenu(expanded: Boolean, actions: List<MenuAction>, onDismiss: () -> Unit
                 text = { Text(a.label, color = tint) },
                 leadingIcon = { Icon(a.icon, contentDescription = null, tint = tint) },
                 onClick = { onDismiss(); a.run() },
+                colors = glassMenuItemColors(),
             )
         }
     }

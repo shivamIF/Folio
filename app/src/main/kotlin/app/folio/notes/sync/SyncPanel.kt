@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Button
@@ -35,6 +34,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import app.folio.notes.ui.glass.GlassAlertDialog
 import com.google.android.gms.auth.api.identity.Identity
 import kotlinx.coroutines.launch
 
@@ -115,7 +115,7 @@ fun DrivePanel(sync: SyncManager, onDismiss: () -> Unit) {
         AccountManager.newChooseAccountIntent(s.account?.let { Account(it, "com.google") }, null, arrayOf("com.google"), null, null, null, null),
     )
 
-    AlertDialog(
+    GlassAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Google Drive sync") },
         text = {
