@@ -56,7 +56,14 @@ object ShapeRecognizer {
     const val CLOSE_GAP = 0.2f
     private const val LINE_SNAP_DEG = 6.0
 
-    fun recognize(xs: FloatArray, ys: FloatArray): Shape? {
+    /**
+     * @param minSize smallest bounding-box diagonal (page units) taken as a shape; callers pass a
+     *   size judged on screen so handwriting-sized marks are never converted.
+     * @param closeGap largest end-to-start gap, as a fraction of the size, still taken as closed.
+     * @param strict pen-up auto-fix (no deliberate hold): only clearly closed shapes and long,
+     *   clean lines; open zig-zags (N, M, W, Z, L, V in handwriting) are left as ink.
+     */
+    fun recognize(xs: FloatArray, ys: FloatArray, minSize: Float = MIN_SIZE, closeGap: Float = CLOSE_GAP, strict: Boolean = false): Shape? {
         val n = min(xs.size, ys.size)
         if (n < 3) return null
         var len = 0f
@@ -64,20 +71,21 @@ object ShapeRecognizer {
         val minX = xs.min(); val maxX = xs.max(); val minY = ys.min(); val maxY = ys.max()
         val w = maxX - minX; val h = maxY - minY
         val diag = hypot(w, h)
-        if (diag < MIN_SIZE) return null
+        if (diag < max(minSize, MIN_SIZE)) return null
 
         // Line: everything close to the chord between the ends.
         val chord = hypot(xs[n - 1] - xs[0], ys[n - 1] - ys[0])
         if (chord > 0.7f * diag) {
             var dev = 0f
             for (i in 0 until n) dev = max(dev, StrokeGeometry.distanceToSegment(xs[i], ys[i], xs[0], ys[0], xs[n - 1], ys[n - 1]))
-            if (dev <= max(0.05f * chord, 3f) && len < chord * 1.25f) return straightLine(xs[0], ys[0], xs[n - 1], ys[n - 1])
+            if (dev <= (if (strict) 0.03f * chord else max(0.05f * chord, 3f)) && len < chord * (if (strict) 1.08f else 1.25f)) return straightLine(xs[0], ys[0], xs[n - 1], ys[n - 1])
         }
 
         // Closed shapes: the path goes most of the way round and its end comes back near its
         // start: stopping a little short, or crossing over the start and running on (trimmed).
-        val loop = closeLoop(xs, ys, n, len, diag)
+        val loop = closeLoop(xs, ys, n, len, diag, closeGap)
         if (loop == null) {
+            if (strict) return null
             // Open polyline: a few straight segments (zig-zag, L, V, arrow strokes).
             // Tolerance near hand wobble, not shape size: curves then split into many gentle
             // turns (rejected), while straight runs keep only their real corners.
@@ -133,10 +141,10 @@ object ShapeRecognizer {
     }
 
     /** The closed part of a stroke that comes back to its start, as (first, last) indices; null if it doesn't. */
-    private fun closeLoop(xs: FloatArray, ys: FloatArray, n: Int, len: Float, diag: Float): Pair<Int, Int>? {
+    private fun closeLoop(xs: FloatArray, ys: FloatArray, n: Int, len: Float, diag: Float, closeGap: Float): Pair<Int, Int>? {
         if (len < 1.7f * diag) return null
         // A slip of the hand, not an open shape: at most a fifth of the shape's size.
-        val tolerance = max(12f, CLOSE_GAP * diag)
+        val tolerance = if (closeGap >= CLOSE_GAP) max(12f, closeGap * diag) else closeGap * diag
         // Where the first and last quarter of the path come closest (a crossing counts as 0).
         val cum = FloatArray(n)
         for (i in 1 until n) cum[i] = cum[i - 1] + hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1])

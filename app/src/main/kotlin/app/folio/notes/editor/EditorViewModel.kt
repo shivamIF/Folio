@@ -379,8 +379,10 @@ class EditorViewModel(app: Application, private val notebookId: String) : Androi
     private fun loadBackground(pageId: String, pdf: PdfBackground) {
         val app = getApplication<android.app.Application>()
         val metrics = app.resources.displayMetrics
-        // Sharp at fit-width on this screen and moderately zoomed in.
-        val widthPx = (maxOf(metrics.widthPixels, metrics.heightPixels) * 1.5f).toInt().coerceAtMost(PdfFile.MAX_RENDER_PX)
+        // Only a stand-in until the page's tiles render the PDF sharp at their own scale, so keep
+        // it small (~4 MB a page). It used to be 1.5x the screen's long side: ~50 MB for every
+        // loaded page, over 500 MB after scrolling a PDF, which made scrolling and zooming stutter.
+        val widthPx = (minOf(metrics.widthPixels, metrics.heightPixels) * 0.75f).toInt().coerceIn(1, PdfFile.MAX_RENDER_PX)
         val key = "$notebookId/${pdf.attachmentId}/${pdf.pageIndex}/$widthPx"
         folio.pdfBitmaps.get(key)?.let { bmp -> setBackground(pageId, bmp); return }
         viewModelScope.launch {

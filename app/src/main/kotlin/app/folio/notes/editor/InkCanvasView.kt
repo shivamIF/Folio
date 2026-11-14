@@ -232,6 +232,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         fun onStickyStroke(pageId: String, stickyId: String, stroke: Stroke) {}
         /** A tap on a page object (a recording, a table, a minimised sticky note); true if handled. */
         fun onObjectTap(pageId: String, objectId: String, x: Float, y: Float): Boolean = false
+        /** Open the pen wheel at view point ([vx], [vy]): the pen was held still, or its side button clicked in the air. */
+        fun onPenWheel(vx: Float, vy: Float) {}
+        /** The pen that opened the wheel by holding is still down and moved. */
+        fun onPenWheelDrag(vx: Float, vy: Float) {}
+        /** That pen lifted. */
+        fun onPenWheelRelease(vx: Float, vy: Float) {}
         /** A writing stroke began (S Pen to text doesn't read words while the pen is still writing). */
         fun onPenDown() {}
         /** A writing stroke was committed (S Pen to text waits for a pause after this). */
@@ -346,7 +352,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         selection = ids
     }
 
-    val policy = InputPolicy(palmTouchMajorPx = 48f * resources.displayMetrics.density)
+    val policy = InputPolicy(palmTouchMajorPx = 48f * resources.displayMetrics.density, stylusKnown = deviceHasStylus())
+
+    /** True when a pen digitizer (S Pen) is among the input devices; public InputDevice API only. */
+    private fun deviceHasStylus(): Boolean = android.view.InputDevice.getDeviceIds().any { id ->
+        android.view.InputDevice.getDevice(id)?.let { !it.isVirtual && it.supportsSource(android.view.InputDevice.SOURCE_STYLUS) } == true
+    }
 
     /** User setting: once a stylus has been seen, fingers navigate instead of drawing. */
     var penOnlyPreference: Boolean = true
@@ -814,6 +825,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             MotionEvent.ACTION_DOWN -> { sideButtonGesture = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0; raw }
             else -> raw
         }
+        if (masked == MotionEvent.ACTION_DOWN) hoverButtonTouched = true
         if (handlePadWindow(e, masked)) return true
         if (masked == MotionEvent.ACTION_DOWN) {
             scroller.forceFinished(true)
@@ -847,9 +859,15 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                     }
                     renderLive()
                 }
-                GestureAction.ERASE -> eraseAlong(e)
+                GestureAction.ERASE -> {
+                    eraseAlong(e)
+                    e.findPointerIndex(activePointerId).takeIf { it >= 0 }?.let { i ->
+                        val slop = HOLD_SLOP_DP * resources.displayMetrics.density
+                        if (kotlin.math.abs(e.getX(i) - holdX) > slop || kotlin.math.abs(e.getY(i) - holdY) > slop) removeCallbacks(eraseHoldRunnable)
+                    }
+                }
                 GestureAction.NAVIGATE -> navigate(e)
-                GestureAction.IGNORE -> Unit
+                GestureAction.IGNORE -> if (wheelDrag) e.findPointerIndex(activePointerId).takeIf { it >= 0 }?.let { listener?.onPenWheelDrag(e.getX(it), e.getY(it)) }
             }
             MotionEvent.ACTION_POINTER_UP -> {
                 val idx = e.actionIndex
@@ -934,6 +952,12 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                 val p = toPage(e.getX(index), e.getY(index))
                 lastErase = floatArrayOf(p[0], p[1])
                 eraseTo(p[0], p[1])
+                // The eraser tool held still (pen tip, no side button) opens the pen palette too.
+                removeCallbacks(eraseHoldRunnable)
+                if (penWheelEnabled && kind == PointerKind.STYLUS && !barrel) {
+                    holdX = e.getX(index); holdY = e.getY(index)
+                    postDelayed(eraseHoldRunnable, HOLD_TO_SNAP_MS)
+                }
             }
             GestureAction.NAVIGATE -> startPan(e)
             GestureAction.IGNORE -> Unit
@@ -992,6 +1016,20 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private val perfPredictMs = ArrayList<Float>()
 
     private fun finishGesture(e: MotionEvent, index: Int, canceled: Boolean) {
+        // Side button held + a quick tap of the pen: not an erase, the pen wheel. (On the Galaxy
+        // Tab the button alone sends nothing useful in the air; button + tap is the natural press.)
+        if (action == GestureAction.ERASE && sideButtonGesture && !canceled && penWheelEnabled && !readOnly && !tapMultiTouch && isQuickTap(e)) {
+            finishGesture(e, index, canceled = true) // put back whatever the tap's first touch erased
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            listener?.onPenWheel(tapDownX, tapDownY)
+            return
+        }
+        removeCallbacks(eraseHoldRunnable)
+        if (wheelDrag) {
+            wheelDrag = false
+            val i = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
+            if (!canceled) listener?.onPenWheelRelease(e.getX(i), e.getY(i))
+        }
         when (action) {
             GestureAction.DRAW if textMode -> {
                 val idx = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
@@ -1188,6 +1226,25 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     private var holdX = 0f
     private var holdY = 0f
     private val holdRunnable = Runnable { trySnap() }
+    /** Eraser tool pressed and held still: undo what the first touch erased and open the pen palette. */
+    private val eraseHoldRunnable = Runnable {
+        if (action == GestureAction.ERASE) {
+            erasedPending.clear()
+            if (wiping) finishWipe(canceled = true) else partialPieces.clear()
+            lastErase = null
+            action = GestureAction.IGNORE; wheelDrag = true
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            listener?.onPenWheel(holdX, holdY)
+            requestRender()
+        }
+    }
+    /** Pen wheel: opens on a still press-and-hold of the pen, or a side-button click while hovering. */
+    var penWheelEnabled: Boolean = true
+    /** The pen that opened the wheel by holding is still down: its moves and lift go to the wheel. */
+    private var wheelDrag = false
+    private var hoverButtonDownAt = 0L
+    /** The pen touched the page while the button was held: that press was an erase or a button-tap, not an air click. */
+    private var hoverButtonTouched = false
 
     /** Restarts the hold timer whenever the pen moves more than a few pixels. */
     private fun watchHold(vx: Float, vy: Float) {
@@ -1202,7 +1259,16 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         val b = builder ?: return
         if (action != GestureAction.DRAW || selGesture != SelGesture.NONE || snapped != null) return
         val s = b.build()
-        val shape = ShapeRecognizer.recognize(s.x, s.y) ?: return
+        // Pressed and held without moving: not a stroke at all, the pen wheel.
+        if (penWheelEnabled && strokeIsFromPen && InkShaping.asDot(s, DOT_SLOP_DP * resources.displayMetrics.density / scale) != null) {
+            abortInk()
+            action = GestureAction.IGNORE; wheelDrag = true
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            listener?.onPenWheel(holdX, holdY)
+            requestRender()
+            return
+        }
+        val shape = ShapeRecognizer.recognize(s.x, s.y, minSize = HOLD_SHAPE_MIN_DP * resources.displayMetrics.density / scale) ?: return
         snapped = shape; snapBase = shape
         val p = toPage(holdX, holdY); snapRefX = p[0]; snapRefY = p[1]
         snapPressure = if (s.size > 0) s.pressure.average().toFloat().coerceIn(0.15f, 1f) else 0.5f
@@ -1421,6 +1487,23 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         requestRender()
     }
 
+    /** The pen palette is showing (its overlay takes the pointer, so hover events come via the window instead). */
+    var penWheelOpen = false
+
+    /**
+     * A click of the side button in the air (pressed and let go without touching) opens the pen
+     * palette, or closes it. Fed by [onHoverEvent], and by the activity while the palette's
+     * overlay covers the canvas.
+     */
+    fun trackHoverButton(e: MotionEvent) {
+        val wasDown = (lastHoverButtons and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        val isDown = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        if (isDown && !wasDown) { hoverButtonDownAt = e.eventTime; hoverButtonTouched = false }
+        if (!isDown && wasDown && penWheelEnabled && !readOnly && e.actionMasked != MotionEvent.ACTION_HOVER_EXIT &&
+            !hoverButtonTouched && e.eventTime - hoverButtonDownAt < HOVER_CLICK_MS) listener?.onPenWheel(e.x, e.y)
+        lastHoverButtons = e.buttonState
+    }
+
     override fun onHoverEvent(e: MotionEvent): Boolean {
         val kind = kindOf(e, 0)
         if (kind != PointerKind.STYLUS && kind != PointerKind.STYLUS_ERASER) return super.onHoverEvent(e)
@@ -1429,7 +1512,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         if (debugInput && (e.actionMasked != MotionEvent.ACTION_HOVER_MOVE || e.buttonState != lastHoverButtons)) {
             Log.d(TAG, "hover action=${e.actionMasked} tool=${e.getToolType(0)} buttons=${e.buttonState}")
         }
-        lastHoverButtons = e.buttonState
+        trackHoverButton(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 hoverX = e.x; hoverY = e.y
@@ -1719,8 +1802,10 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
     /** The finished stroke after the pen's options: auto-fixed shape, straightened, fitted to text, styled. */
     private fun finishedStroke(raw: Stroke, snappedAlready: Boolean): Stroke {
         var s = raw
+        if (!snappedAlready && tool != ToolType.TAPE) InkShaping.asDot(s, DOT_SLOP_DP * resources.displayMetrics.density / scale)?.let { s = it }
         if (autoFixShapes && !snappedAlready && tool != ToolType.HIGHLIGHTER && tool != ToolType.TAPE && s.size >= 3) {
-            ShapeRecognizer.recognize(s.x, s.y)?.let { shape ->
+            // No deliberate hold here, so only what is clearly a drawn shape: big on screen, properly closed.
+            ShapeRecognizer.recognize(s.x, s.y, minSize = AUTO_SHAPE_MIN_DP * resources.displayMetrics.density / scale, closeGap = 0.1f, strict = true)?.let { shape ->
                 s = shape.toStroke(tool, color, penWidth, s.pressure.average().toFloat().coerceIn(0.15f, 1f), s.startedAt)
             }
         }
@@ -2280,7 +2365,15 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         private const val NO_PRESSURE_EFFORT = 0.6f
         /** Pen held this still (dp) for this long (ms) at the end of a stroke snaps it to a shape. */
         private const val HOLD_SLOP_DP = 4f
-        private const val HOLD_TO_SNAP_MS = 450L
+        private const val HOLD_TO_SNAP_MS = 600L
+        /** Longest side-button press in the air still taken as a click (longer is hold-to-erase). */
+        private const val HOVER_CLICK_MS = 800L
+        /** Smallest stroke (dp on screen, diagonal) hold-to-snap turns into a shape: above handwriting size. */
+        private const val HOLD_SHAPE_MIN_DP = 32f
+        /** Smallest stroke (dp on screen) "Auto-fix shapes" converts on pen-up without a hold. */
+        private const val AUTO_SHAPE_MIN_DP = 56f
+        /** A pen mark whose every point stays within this of pen-down (dp on screen) is a dot. */
+        private const val DOT_SLOP_DP = 2.5f
         /** A finished stroke stays on the wet layer this long after the page surface posts it (3 vsyncs at 60 Hz). */
         private const val WET_HOLD_NANOS = 50_000_000L
         // Samsung-specific MotionEvent actions sent while the S Pen side button is held.

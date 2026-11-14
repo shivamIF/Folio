@@ -11,6 +11,29 @@ import kotlin.math.max
 
 /** Pen-up reshaping of a finished stroke: "Straighten lines" and "Adjust thickness to text". */
 object InkShaping {
+    /** A quick tap barely registers pressure; a dot is still drawn at least this firmly so it shows. */
+    const val DOT_MIN_EFFORT = 0.5f
+
+    /**
+     * A pen tap: [s] as one clean round dot when it never left [slop] (page units) of where it
+     * started, else null. The digitizer jitters a pixel or two during a tap; drawn as a path that
+     * gave a tiny tapered tick instead of a dot. Sized by the firmest press, placed at the centre.
+     */
+    fun asDot(s: Stroke, slop: Float): Stroke? {
+        if (s.size == 0) return null
+        var minX = s.x[0]; var maxX = minX; var minY = s.y[0]; var maxY = minY; var p = 0f
+        for (i in 0 until s.size) {
+            if (hypot(s.x[i] - s.x[0], s.y[i] - s.y[0]) > slop) return null
+            minX = minOf(minX, s.x[i]); maxX = maxOf(maxX, s.x[i]); minY = minOf(minY, s.y[i]); maxY = maxOf(maxY, s.y[i])
+            p = max(p, s.pressure[i])
+        }
+        val k = s.size - 1
+        return Stroke(
+            s.id, s.tool, s.color, s.width, floatArrayOf((minX + maxX) / 2f), floatArrayOf((minY + maxY) / 2f),
+            floatArrayOf(max(p, DOT_MIN_EFFORT)), floatArrayOf(s.tilt[k]), floatArrayOf(s.orientation[k]), intArrayOf(0), s.startedAt,
+        )
+    }
+
     /**
      * [s] as a straight line from its first point to its last. The pressure, tilt and azimuth
      * profiles are resampled along it (by share of length), so a pen's tapered ends stay.

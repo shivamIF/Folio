@@ -54,4 +54,15 @@ class InkShapingTest {
         val hl = stroke(ToolType.HIGHLIGHTER, floatArrayOf(0f, 60f), floatArrayOf(10f, 10f), width = 18f)
         assertNull(InkShaping.covered(hl, listOf(hl), StrokeIndex(listOf(hl)), emptyList()))
     }
+
+    @Test fun aJitteryTapBecomesOneRoundDot() {
+        val tap = stroke(ToolType.BALLPOINT, floatArrayOf(100f, 100.8f, 101f, 100.4f), floatArrayOf(50f, 50.6f, 49.5f, 50.2f), ps = floatArrayOf(0.1f, 0.3f, 0.2f, 0.05f))
+        val dot = assertNotNull(InkShaping.asDot(tap, slop = 2f))
+        assertEquals(1, dot.size)
+        assertEquals(100.5f, dot.x[0], 0.01f)
+        assertEquals(InkShaping.DOT_MIN_EFFORT, dot.pressure[0])
+        assertEquals(tap.id, dot.id)
+        // A short dash that leaves the slop stays a stroke.
+        assertNull(InkShaping.asDot(stroke(ToolType.BALLPOINT, floatArrayOf(100f, 103f, 106f), floatArrayOf(50f, 50f, 50f)), slop = 2f))
+    }
 }

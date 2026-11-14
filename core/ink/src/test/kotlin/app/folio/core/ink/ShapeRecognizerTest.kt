@@ -125,4 +125,21 @@ class ShapeRecognizerTest {
         val (lx, ly) = trace(100f, 100f, 100f, 300f, 300f, 300f)
         assertEquals(ShapeKind.POLYLINE, ShapeRecognizer.recognize(lx, ly)!!.kind)
     }
+
+    @Test fun autoFixLeavesHandwritingSizedAndOpenStrokesAlone() {
+        // A letter-sized circle and line: recognised on a deliberate hold at default size, not above the on-screen minimum.
+        val (ox, oy) = ellipseTrace(100f, 100f, 12f, 14f)
+        assertNull(ShapeRecognizer.recognize(ox, oy, minSize = 60f, closeGap = 0.1f, strict = true))
+        // A big zig-zag (like a written N or W) is an open polyline: never auto-fixed.
+        val (zx, zy) = trace(100f, 300f, 100f, 100f, 250f, 300f, 250f, 100f)
+        assertNull(ShapeRecognizer.recognize(zx, zy, minSize = 60f, closeGap = 0.1f, strict = true))
+        // A "C": the ends are far apart, so it is not closed into an ellipse.
+        val (cx, cy) = ellipseTrace(300f, 300f, 100f, 100f, sweep = 2 * PI * 0.8)
+        assertNull(ShapeRecognizer.recognize(cx, cy, minSize = 60f, closeGap = 0.1f, strict = true))
+        // A clearly drawn, closed circle and a long clean line still are.
+        val (bx, by) = ellipseTrace(300f, 300f, 100f, 100f)
+        assertEquals(ShapeKind.ELLIPSE, ShapeRecognizer.recognize(bx, by, minSize = 60f, closeGap = 0.1f, strict = true)!!.kind)
+        val (lx, ly) = trace(100f, 100f, 400f, 180f, wobble = 1f)
+        assertEquals(ShapeKind.LINE, ShapeRecognizer.recognize(lx, ly, minSize = 60f, closeGap = 0.1f, strict = true)!!.kind)
+    }
 }

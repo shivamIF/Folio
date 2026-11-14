@@ -64,6 +64,18 @@ class MainActivity : ComponentActivity() {
         return super.dispatchTouchEvent(ev)
     }
 
+    /**
+     * While the pen palette is open its overlay covers the canvas, so the canvas no longer sees
+     * the pen hovering. Pass it the hover events here, so a click of the side button closes the palette.
+     */
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        val canvas = InkCanvasView.attached?.get()
+        if (canvas != null && canvas.penWheelOpen && ev.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS &&
+            (ev.actionMasked == MotionEvent.ACTION_HOVER_MOVE || ev.actionMasked == MotionEvent.ACTION_HOVER_ENTER || ev.actionMasked == MotionEvent.ACTION_HOVER_EXIT)
+        ) canvas.trackHoverButton(ev)
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
     override fun onStart() {
         super.onStart()
         (application as FolioApp).sync.onForeground()

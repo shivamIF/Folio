@@ -55,4 +55,11 @@ class InputPolicyTest {
         assertEquals(GestureAction.IGNORE, p.classifyDown(PointerKind.FINGER, 100f, false, false, 1, 5000, readOnly = true))
         assertEquals(GestureAction.DRAW, p.classifyDown(PointerKind.STYLUS, 2f, false, false, 1, 30))
     }
+
+    @Test fun fingerNavigatesFromTheFirstTouchOnAPenDevice() {
+        val p = InputPolicy(palmTouchMajorPx = 60f, palmGuardMs = 400, stylusKnown = true)
+        assertTrue(p.penOnly)
+        assertEquals(GestureAction.NAVIGATE, p.classifyDown(PointerKind.FINGER, 20f, false, false, 1, 0))
+        assertEquals(GestureAction.DRAW, p.classifyDown(PointerKind.STYLUS, 5f, false, false, 1, 1000))
+    }
 }

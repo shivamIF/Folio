@@ -188,6 +188,19 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
     val display: (Long) -> Long = remember(darkPages) { { col -> if (darkPages) ColorMath.adaptForDark(col) else col } }
 
     var canvasRef by remember { mutableStateOf<InkCanvasView?>(null) }
+    val penWheel = remember { app.folio.notes.editor.wheel.PenWheelState() }
+    val pickWheel: (app.folio.notes.editor.wheel.WheelItem) -> Unit = remember(vm) {
+        { item ->
+            when (item) {
+                is app.folio.notes.editor.wheel.WheelItem.Tool -> vm.updateTools { if (it.active == item.tool) it else it.activate(item.tool) }
+                is app.folio.notes.editor.wheel.WheelItem.Colour -> vm.updateTools { it.withColor(item.color) }
+                app.folio.notes.editor.wheel.WheelItem.Undo -> vm.undo()
+                app.folio.notes.editor.wheel.WheelItem.Redo -> vm.redo()
+                is app.folio.notes.editor.wheel.WheelItem.Size -> vm.updateTools { it.withWidth(it.sizeTool, item.width) }
+                else -> Unit
+            }
+        }
+    }
     var viewportTick by remember { mutableIntStateOf(0) }
     GlassPageBackdrop(canvasRef, viewportTick, state.pages, popup, insertMenu, moreMenu)
     val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -345,6 +358,9 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
                                         override fun onColorPicked(color: Long) = vm.onColorPicked(color)
                                         override fun onStickyStroke(pageId: String, stickyId: String, stroke: Stroke) = vm.onStickyStroke(pageId, stickyId, stroke)
                                         override fun onObjectTap(pageId: String, objectId: String, x: Float, y: Float) = vm.onObjectTap(pageId, objectId, x, y)
+                                        override fun onPenWheel(vx: Float, vy: Float) { if (penWheel.open) penWheel.close() else if (!vm.state.value.reading) penWheel.openAt(vx, vy) }
+                                        override fun onPenWheelDrag(vx: Float, vy: Float) = penWheel.drag(vx, vy)
+                                        override fun onPenWheelRelease(vx: Float, vy: Float) = penWheel.release(vx, vy)
                                         override fun onPenDown() = vm.onPenDown()
                                         override fun onPenLifted() = vm.onPenLifted()
                                         override fun onStickyTapeTap(pageId: String, stickyId: String) = vm.collapseSticky(pageId, stickyId)
@@ -389,6 +405,7 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
                                 v.lassoMode = tools.lasso && !state.reading; v.lassoRectangle = tools.lassoShape == LassoShape.RECTANGLE
                                 v.pressureCurve = PressureCurve.fromSensitivity(tools.pressureSensitivity)
                                 v.penOnlyPreference = tools.penOnly
+                                v.penWheelOpen = penWheel.open
                                 v.assets = vm.assets
                                 v.setDocument(stack, state.pages)
                                 v.setSelection(state.selectionPage, state.selection)
@@ -396,6 +413,7 @@ private fun EditorContent(vm: EditorViewModel, state: EditorUiState, onClose: ()
                             },
                             modifier = Modifier.fillMaxSize().clipToBounds().testTag("canvas").observePress(dockController::onWriting),
                         )
+                        app.folio.notes.editor.wheel.PenWheel(penWheel, tools, state.canUndo, state.canRedo, display, pickWheel)
                         val editing = state.editingText
                         val cv = canvasRef
                         // While typing, the page scrolls past the keyboard and the box being typed shows above it.
