@@ -20,6 +20,26 @@ class MainActivity : ComponentActivity() {
     /** True while a side-button pen gesture is being routed straight to the canvas. */
     private var routingToCanvas = false
 
+    /** PDF handed to us by another app ("Open with" / "Share"), waiting to be imported. */
+    private val importRequest = androidx.compose.runtime.mutableStateOf<android.net.Uri?>(null)
+
+    private fun takeImport(intent: android.content.Intent?) {
+        if (intent == null) return
+        val uri = when (intent.action) {
+            android.content.Intent.ACTION_VIEW -> intent.data
+            android.content.Intent.ACTION_SEND -> androidx.core.content.IntentCompat.getParcelableExtra(intent, android.content.Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            else -> null
+        }
+        if (uri != null) importRequest.value = uri
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        // Debug builds: `am start -f 0x20000000 -a app.folio.notes.debug.PERF_ZOOM` runs the zoom benchmark.
+        if (debugInput && intent.action == "app.folio.notes.debug.PERF_ZOOM") { InkCanvasView.attached?.get()?.runPerfScript(intent.getStringExtra("skip")); return }
+        takeImport(intent)
+    }
+
     /**
      * On the Galaxy Tab S6 Lite the system delivers S Pen touches made with the
      * side button held to this window, but they never reach the canvas inside
@@ -44,15 +64,52 @@ class MainActivity : ComponentActivity() {
         return super.dispatchTouchEvent(ev)
     }
 
+    /**
+     * While the pen palette is open its overlay covers the canvas, so the canvas no longer sees
+     * the pen hovering. Pass it the hover events here, so a click of the side button closes the palette.
+     */
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        val canvas = InkCanvasView.attached?.get()
+        if (canvas != null && canvas.penWheelOpen && ev.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS &&
+            (ev.actionMasked == MotionEvent.ACTION_HOVER_MOVE || ev.actionMasked == MotionEvent.ACTION_HOVER_ENTER || ev.actionMasked == MotionEvent.ACTION_HOVER_EXIT)
+        ) canvas.trackHoverButton(ev)
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        (application as FolioApp).sync.onForeground()
+    }
+
+    override fun onStop() {
+        (application as FolioApp).sync.onBackground()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (savedInstanceState == null) takeImport(intent)
         setContent {
             FolioTheme {
                 // Saved across rotation and process death, so the open notebook is restored.
                 var openNotebook by rememberSaveable { mutableStateOfNullableString() }
                 val id = openNotebook
-                if (id == null) LibraryScreen(onOpenNotebook = { openNotebook = it })
+                // Sync leaves the open notebook alone, and catches it up shortly after it closes.
+                androidx.compose.runtime.LaunchedEffect(id) {
+                    val sync = (application as FolioApp).sync
+                    val was = sync.openNotebook
+                    sync.openNotebook = id
+                    if (id == null && was != null) sync.requestSync(delayMs = 2_000)
+                }
+                val pendingImport = importRequest.value
+                // An incoming PDF always lands in the library, which imports and then opens it.
+                if (pendingImport != null && id != null) openNotebook = null
+                if (id == null) LibraryScreen(
+                    onOpenNotebook = { openNotebook = it },
+                    importRequest = pendingImport,
+                    onImportHandled = { importRequest.value = null },
+                )
                 else EditorScreen(notebookId = id, onClose = { openNotebook = null })
             }
         }

@@ -11,5 +11,6 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 
 dependencies {
     api(project(":core:model"))
+    api(project(":core:sync"))
     testImplementation(libs.kotlin.test)
 }

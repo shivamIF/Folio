@@ -25,9 +25,14 @@ class InputPolicy(
     /** How long after stylus hover/touch a finger is still treated as a palm. */
     private val palmGuardMs: Long = 400,
     private val autoPenOnly: Boolean = true,
+    /**
+     * The device has a pen digitizer, so pen-only applies from the first touch. Without this a
+     * finger scroll made before the pen first came near the screen drew on the page.
+     */
+    stylusKnown: Boolean = false,
 ) {
-    var penOnly = false
-    var stylusSeen = false
+    var penOnly = stylusKnown && autoPenOnly
+    var stylusSeen = stylusKnown
         private set
     private var lastStylusActivity = Long.MIN_VALUE / 2
 
@@ -41,6 +46,19 @@ class InputPolicy(
     }
 
     fun classifyDown(
+        kind: PointerKind,
+        touchMajorPx: Float,
+        barrelButtonPressed: Boolean,
+        eraserToolSelected: Boolean,
+        pointerCount: Int,
+        nowMs: Long,
+        readOnly: Boolean = false,
+    ): GestureAction = classify(kind, touchMajorPx, barrelButtonPressed, eraserToolSelected, pointerCount, nowMs).let {
+        // Reading mode: nothing writes or erases; a pen or finger scrolls the page instead.
+        if (readOnly && (it == GestureAction.DRAW || it == GestureAction.ERASE)) GestureAction.NAVIGATE else it
+    }
+
+    private fun classify(
         kind: PointerKind,
         touchMajorPx: Float,
         barrelButtonPressed: Boolean,

@@ -14,3 +14,7 @@ dependencies {
     api(libs.kotlinx.serialization.json)
     testImplementation(libs.kotlin.test)
 }
+
+// Same heap as a Galaxy Tab S6 Lite app (256 MB), so the dense-page codec test
+// fails here if decoding ever needs more memory than a real device has.
+tasks.test { maxHeapSize = "256m" }
