@@ -28,6 +28,7 @@ import app.folio.core.ink.StrokeGeometry
 import app.folio.core.ink.StrokeIndex
 import app.folio.core.ink.Shape
 import app.folio.core.ink.ShapeKind
+import app.folio.core.ink.ScribbleErase
 import app.folio.core.ink.ShapeRecognizer
 import app.folio.core.ink.InkShaping
 import app.folio.core.model.Argb
@@ -1057,6 +1058,7 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
                     val idx0 = e.findPointerIndex(activePointerId).takeIf { it >= 0 } ?: index
                     val tapped = !canceled && b.size > 0 && isPenTap(e, idx0) && handlePenTap(b.build())
                     if (tapped) abortInk()
+                    else if (!canceled && snapped == null && scribbleErase(b)) Unit // the scrawl took ink away instead of adding any
                     else if (b.size > 0) {
                         val shape = snapped
                         val raw = if (shape != null && !canceled) shape.toStroke(tool, color, penWidth, snapPressure, b.build().startedAt) else b.build()
@@ -1286,6 +1288,26 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
             val f = if (d0 > 1f) (kotlin.math.hypot(p[0] - cx, p[1] - cy) / d0).coerceIn(0.2f, 5f) else 1f
             base.scaled(f, cx, cy)
         }
+    }
+
+    /**
+     * Scribble to erase (always on): a pen scrawl back and forth over existing ink removes the
+     * strokes it covers, as one undoable edit, and leaves no mark itself. False if this stroke
+     * isn't a scrawl or covers nothing; then it is ordinary ink.
+     */
+    private fun scribbleErase(b: StrokeBuilder): Boolean {
+        if (!strokeIsFromPen || tool == ToolType.HIGHLIGHTER || tool == ToolType.TAPE || stickyTarget != null || !active.loaded) return false
+        val s = b.build()
+        val px = resources.displayMetrics.density / scale
+        if (!ScribbleErase.isScribble(s.x, s.y, minSize = SCRIBBLE_MIN_DP * px)) return false
+        val near = index.query(s.bounds())
+        if (near.isEmpty()) return false
+        val ids = ScribbleErase.targets(s.x, s.y, reach = penWidth / 2f + 2f * px, strokes = near.map { strokes[it] })
+        if (ids.isEmpty()) return false
+        performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+        listener?.onStrokesErased(active.pageId, ids)
+        listener?.onPenLifted()
+        return true
     }
 
     private fun abortInk() {
@@ -2366,6 +2388,8 @@ class InkCanvasView(context: Context) : SurfaceView(context), SurfaceHolder.Call
         /** Pen held this still (dp) for this long (ms) at the end of a stroke snaps it to a shape. */
         private const val HOLD_SLOP_DP = 4f
         private const val HOLD_TO_SNAP_MS = 600L
+        /** Smallest scrawl (dp on screen, diagonal) taken as scribble-to-erase. */
+        private const val SCRIBBLE_MIN_DP = 14f
         /** Longest side-button press in the air still taken as a click (longer is hold-to-erase). */
         private const val HOVER_CLICK_MS = 800L
         /** Smallest stroke (dp on screen, diagonal) hold-to-snap turns into a shape: above handwriting size. */

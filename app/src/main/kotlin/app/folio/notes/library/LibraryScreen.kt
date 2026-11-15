@@ -817,7 +817,8 @@ private fun Content(
                 onDispose { motion.probe = null }
             }
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(176.dp),
+                // Phones: narrower cells, so two notebooks fit beside the icon rail.
+                columns = GridCells.Adaptive(if (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 600) 128.dp else 176.dp),
                 modifier = Modifier.fillMaxSize(),
                 state = scroll,
                 contentPadding = if (underBar != null) remember(underBar) { UnderBar(12.dp, 12.dp, 96.dp, underBar) }
